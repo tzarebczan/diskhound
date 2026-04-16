@@ -10,23 +10,49 @@ import { writeFileSync, mkdirSync } from "node:fs";
 const size = 512;
 const pixels = Buffer.alloc(size * size * 4);
 
-function setPixel(x, y, r, g, b, a = 255) {
-  if (x < 0 || x >= size || y < 0 || y >= size) return;
+function blendPixel(x, y, r, g, b, a) {
+  if (x < 0 || x >= size || y < 0 || y >= size || a <= 0) return;
   const i = (y * size + x) * 4;
-  pixels[i] = r;
-  pixels[i + 1] = g;
-  pixels[i + 2] = b;
-  pixels[i + 3] = a;
+  if (a >= 255) {
+    pixels[i] = r; pixels[i + 1] = g; pixels[i + 2] = b; pixels[i + 3] = 255;
+    return;
+  }
+  // Alpha blend over existing pixel
+  const af = a / 255;
+  const inv = 1 - af;
+  pixels[i]     = Math.round(r * af + pixels[i]     * inv);
+  pixels[i + 1] = Math.round(g * af + pixels[i + 1] * inv);
+  pixels[i + 2] = Math.round(b * af + pixels[i + 2] * inv);
+  pixels[i + 3] = Math.min(255, Math.round(a + pixels[i + 3] * inv));
 }
 
 function fillRoundedRect(x0, y0, w, h, radius, r, g, b) {
   for (let y = y0; y < y0 + h; y++) {
     for (let x = x0; x < x0 + w; x++) {
       if (x < 0 || x >= size || y < 0 || y >= size) continue;
-      const dx = x < x0 + radius ? x - (x0 + radius) : x > x0 + w - radius - 1 ? x - (x0 + w - radius - 1) : 0;
-      const dy = y < y0 + radius ? y - (y0 + radius) : y > y0 + h - radius - 1 ? y - (y0 + h - radius - 1) : 0;
-      if (dx * dx + dy * dy <= radius * radius || dx === 0 || dy === 0) {
-        setPixel(x, y, r, g, b);
+
+      // Signed distance from the rounded rect edge (negative = inside)
+      const dx = x < x0 + radius ? x - (x0 + radius)
+               : x > x0 + w - radius - 1 ? x - (x0 + w - radius - 1)
+               : 0;
+      const dy = y < y0 + radius ? y - (y0 + radius)
+               : y > y0 + h - radius - 1 ? y - (y0 + h - radius - 1)
+               : 0;
+
+      if (dx === 0 || dy === 0) {
+        // Not in a corner region — fully inside
+        blendPixel(x, y, r, g, b, 255);
+      } else {
+        // Corner — use distance for anti-aliasing
+        const dist = Math.sqrt(dx * dx + dy * dy) - radius;
+        if (dist < -1) {
+          blendPixel(x, y, r, g, b, 255); // fully inside
+        } else if (dist < 1) {
+          // Edge pixel — blend based on coverage (smooth AA)
+          const alpha = Math.round(255 * Math.max(0, Math.min(1, 0.5 - dist * 0.5)));
+          blendPixel(x, y, r, g, b, alpha);
+        }
+        // dist >= 1: fully outside, skip
       }
     }
   }
