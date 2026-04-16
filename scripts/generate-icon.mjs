@@ -9,7 +9,7 @@
 import { deflateSync } from "node:zlib";
 import { writeFileSync, mkdirSync } from "node:fs";
 
-const size = 256;
+const size = 512;
 const pixels = Buffer.alloc(size * size * 4);
 
 function setPixel(x, y, r, g, b, a = 255) {
