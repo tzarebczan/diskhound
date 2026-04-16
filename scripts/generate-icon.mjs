@@ -60,13 +60,13 @@ for (const b of blocks) {
   const by = Math.round(pad + b.y * area);
   const bw = Math.round(b.w * area) - gap;
   const bh = Math.round(b.h * area) - gap;
-  const radius = 10;
+  const radius = 18;
 
   fillRoundedRect(bx, by, bw, bh, radius, b.r, b.g, b.b);
 
   // Top highlight — brighter top edge for depth
   for (let row = 0; row < 3; row++) {
-    for (let x = bx + radius; x < bx + bw - radius; x++) {
+    for (let x = bx + radius + 2; x < bx + bw - radius - 2; x++) {
       const i = ((by + row) * size + x) * 4;
       if (i >= 0 && i < pixels.length - 3) {
         pixels[i] = Math.min(255, pixels[i] + 35 - row * 10);
@@ -78,7 +78,7 @@ for (const b of blocks) {
 
   // Bottom shadow — darker bottom edge
   for (let row = 0; row < 2; row++) {
-    for (let x = bx + radius; x < bx + bw - radius; x++) {
+    for (let x = bx + radius + 2; x < bx + bw - radius - 2; x++) {
       const yy = by + bh - 1 - row;
       const i = (yy * size + x) * 4;
       if (i >= 0 && i < pixels.length - 3) {

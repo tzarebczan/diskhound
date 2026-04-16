@@ -1591,6 +1591,24 @@ button, input, select, textarea { font: inherit; }
 .status-bar-stat {
   color: var(--text-tertiary);
 }
+.status-bar-theme-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 0.12s;
+  margin-left: 4px;
+}
+.status-bar-theme-toggle:hover {
+  background: var(--bg-row-hover);
+  color: var(--text);
+}
 
 /* ── Toast Notifications ───────────────────── */
 .toast-container {

@@ -43,6 +43,7 @@ export function App() {
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
+  const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
 
   // Load and apply theme
   useEffect(() => {
@@ -51,6 +52,7 @@ export function App() {
       root.classList.remove("light", "dark");
       if (resolved === "light") root.classList.add("light");
       nativeApi.applyTheme(resolved);
+      setActiveTheme(resolved);
     };
 
     void nativeApi.getSettings().then((s) => {
@@ -280,9 +282,9 @@ export function App() {
           </button>
 
           <button className="header-icon-btn" onClick={() => { setShowPicker(false); setView("settings"); }} title="Settings">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <path d="M6.6 1.2h2.8l.4 2 1.3.7 1.8-1 2 2-1 1.8.7 1.3 2 .4v2.8l-2 .4-.7 1.3 1 1.8-2 2-1.8-1-1.3.7-.4 2H6.6l-.4-2-1.3-.7-1.8 1-2-2 1-1.8-.7-1.3-2-.4V6.6l2-.4.7-1.3-1-1.8 2-2 1.8 1 1.3-.7z" />
-              <circle cx="8" cy="8" r="2.5" />
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+              <circle cx="12" cy="12" r="3" />
             </svg>
           </button>
         </header>
@@ -387,6 +389,33 @@ export function App() {
           {snapshot.errorMessage && (
             <span style={{ color: "var(--red)" }}>{snapshot.errorMessage}</span>
           )}
+          <button
+            className="status-bar-theme-toggle"
+            onClick={() => {
+              const next = activeTheme === "dark" ? "light" : "dark";
+              const root = document.documentElement;
+              root.classList.remove("light", "dark");
+              if (next === "light") root.classList.add("light");
+              nativeApi.applyTheme(next);
+              setActiveTheme(next);
+              // Persist the choice
+              void nativeApi.getSettings().then((s) => {
+                if (s) void nativeApi.updateSettings({ ...s, general: { ...s.general, theme: next } });
+              });
+            }}
+            title={activeTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {activeTheme === "dark" ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="5" />
+                <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              </svg>
+            ) : (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            )}
+          </button>
         </footer>
       </div>
     </ToastProvider>
