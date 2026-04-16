@@ -1,0 +1,185 @@
+import { describe, expect, it } from "vitest";
+
+import { computeDiff } from "../scanDiff";
+import { createIdleScanSnapshot, type ScanFileRecord, type ScanSnapshot } from "../contracts";
+
+function makeSnapshot(overrides: Partial<ScanSnapshot> = {}): ScanSnapshot {
+  return {
+    ...createIdleScanSnapshot(),
+    status: "done",
+    rootPath: "C:\\test",
+    startedAt: 1000,
+    finishedAt: 2000,
+    ...overrides,
+  };
+}
+
+function makeFile(path: string, size: number, ext = ".bin"): ScanFileRecord {
+  const name = path.split(/[\\/]/).pop() ?? path;
+  return { path, name, parentPath: "C:\\test", extension: ext, size, modifiedAt: Date.now() };
+}
+
+describe("computeDiff", () => {
+  it("returns zero deltas for identical snapshots", () => {
+    const snap = makeSnapshot({ bytesSeen: 5000, filesVisited: 10, directoriesVisited: 3 });
+    const diff = computeDiff(snap, snap, "base", "curr");
+
+    expect(diff.totalBytesDelta).toBe(0);
+    expect(diff.totalFilesDelta).toBe(0);
+    expect(diff.totalDirsDelta).toBe(0);
+    expect(diff.fileDeltas).toHaveLength(0);
+    expect(diff.directoryDeltas).toHaveLength(0);
+    expect(diff.extensionDeltas).toHaveLength(0);
+  });
+
+  it("computes aggregate deltas from bytesSeen/filesVisited/directoriesVisited", () => {
+    const baseline = makeSnapshot({ bytesSeen: 1000, filesVisited: 10, directoriesVisited: 5 });
+    const current = makeSnapshot({ bytesSeen: 3000, filesVisited: 15, directoriesVisited: 7 });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.totalBytesDelta).toBe(2000);
+    expect(diff.totalFilesDelta).toBe(5);
+    expect(diff.totalDirsDelta).toBe(2);
+    expect(diff.previousBytesSeen).toBe(1000);
+    expect(diff.currentBytesSeen).toBe(3000);
+  });
+
+  it("detects added files", () => {
+    const baseline = makeSnapshot({ largestFiles: [] });
+    const current = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\new.mp4", 5000)],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(1);
+    expect(diff.fileDeltas[0].kind).toBe("added");
+    expect(diff.fileDeltas[0].size).toBe(5000);
+    expect(diff.fileDeltas[0].previousSize).toBe(0);
+    expect(diff.fileDeltas[0].deltaBytes).toBe(5000);
+  });
+
+  it("detects removed files", () => {
+    const baseline = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\old.log", 3000)],
+    });
+    const current = makeSnapshot({ largestFiles: [] });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(1);
+    expect(diff.fileDeltas[0].kind).toBe("removed");
+    expect(diff.fileDeltas[0].size).toBe(0);
+    expect(diff.fileDeltas[0].previousSize).toBe(3000);
+    expect(diff.fileDeltas[0].deltaBytes).toBe(-3000);
+  });
+
+  it("detects files that grew", () => {
+    const baseline = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\data.db", 1000)],
+    });
+    const current = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\data.db", 5000)],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(1);
+    expect(diff.fileDeltas[0].kind).toBe("grew");
+    expect(diff.fileDeltas[0].deltaBytes).toBe(4000);
+  });
+
+  it("detects files that shrank", () => {
+    const baseline = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\data.db", 5000)],
+    });
+    const current = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\data.db", 2000)],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(1);
+    expect(diff.fileDeltas[0].kind).toBe("shrank");
+    expect(diff.fileDeltas[0].deltaBytes).toBe(-3000);
+  });
+
+  it("sorts deltas by absolute impact (largest first)", () => {
+    const baseline = makeSnapshot({
+      largestFiles: [
+        makeFile("C:\\test\\small.txt", 100),
+        makeFile("C:\\test\\big.zip", 10000),
+      ],
+    });
+    const current = makeSnapshot({
+      largestFiles: [
+        makeFile("C:\\test\\small.txt", 200), // +100
+        makeFile("C:\\test\\big.zip", 5000),  // -5000
+      ],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(2);
+    expect(Math.abs(diff.fileDeltas[0].deltaBytes)).toBeGreaterThanOrEqual(
+      Math.abs(diff.fileDeltas[1].deltaBytes),
+    );
+  });
+
+  it("detects directory changes", () => {
+    const baseline = makeSnapshot({
+      hottestDirectories: [{ path: "C:\\test\\docs", size: 1000, fileCount: 5, depth: 1 }],
+    });
+    const current = makeSnapshot({
+      hottestDirectories: [{ path: "C:\\test\\docs", size: 3000, fileCount: 8, depth: 1 }],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.directoryDeltas).toHaveLength(1);
+    expect(diff.directoryDeltas[0].kind).toBe("grew");
+    expect(diff.directoryDeltas[0].deltaBytes).toBe(2000);
+    expect(diff.directoryDeltas[0].fileCount).toBe(8);
+    expect(diff.directoryDeltas[0].previousFileCount).toBe(5);
+  });
+
+  it("detects extension changes", () => {
+    const baseline = makeSnapshot({
+      topExtensions: [{ extension: ".mp4", size: 5000, count: 2 }],
+    });
+    const current = makeSnapshot({
+      topExtensions: [{ extension: ".mp4", size: 8000, count: 3 }],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.extensionDeltas).toHaveLength(1);
+    expect(diff.extensionDeltas[0].deltaBytes).toBe(3000);
+    expect(diff.extensionDeltas[0].count).toBe(3);
+    expect(diff.extensionDeltas[0].previousCount).toBe(2);
+  });
+
+  it("handles case-insensitive path matching", () => {
+    const baseline = makeSnapshot({
+      largestFiles: [makeFile("C:\\Test\\FILE.TXT", 1000)],
+    });
+    const current = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\file.txt", 2000)],
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    // Should be treated as same file (grew), not added+removed
+    expect(diff.fileDeltas).toHaveLength(1);
+    expect(diff.fileDeltas[0].kind).toBe("grew");
+  });
+
+  it("computes timeBetweenMs from finishedAt timestamps", () => {
+    const baseline = makeSnapshot({ finishedAt: 1000 });
+    const current = makeSnapshot({ finishedAt: 5000 });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.timeBetweenMs).toBe(4000);
+  });
+
+  it("ignores files that exist in both with identical size", () => {
+    const file = makeFile("C:\\test\\stable.bin", 999);
+    const baseline = makeSnapshot({ largestFiles: [file] });
+    const current = makeSnapshot({ largestFiles: [file] });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.fileDeltas).toHaveLength(0);
+  });
+});

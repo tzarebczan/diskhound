@@ -1,0 +1,21 @@
+node_modules/
+dist-electron/
+dist-renderer/
+release/
+native/diskhound-native-scanner/target/
+.turbo/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+.env
+.env.local
+
+# Dev temp files
+.tmp-dev-*.log
+
+# AI tooling
+.claude/
+.cursor/
+.copilot/

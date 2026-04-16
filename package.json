@@ -1,0 +1,42 @@
+{
+  "name": "diskhound",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Fast disk space analyzer — find and clean up large files",
+  "author": "DiskHound",
+  "main": "dist-electron/main.cjs",
+  "packageManager": "bun@1.3.11",
+  "scripts": {
+    "dev": "bun run scripts/dev.mjs",
+    "dev:renderer": "vite --strictPort --host 127.0.0.1 --port 4310",
+    "dev:electron:bundle": "tsdown --watch",
+    "dev:electron": "bun run scripts/dev-electron.mjs",
+    "build": "bun run build:renderer && bun run build:electron",
+    "build:native": "cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml",
+    "build:native:debug": "cargo build --manifest-path native/diskhound-native-scanner/Cargo.toml",
+    "bench:scan": "node scripts/benchmark-scan.mjs",
+    "build:renderer": "vite build",
+    "build:electron": "tsdown",
+    "start": "bun run scripts/start-electron.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
+  },
+  "dependencies": {
+    "effect": "^3.16.10",
+    "electron-updater": "^6.6.2",
+    "preact": "^10.26.9"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.2",
+    "@types/node": "^24.12.0",
+    "electron": "40.6.0",
+    "electron-builder": "^26.0.12",
+    "vitest": "^3.2.1",
+    "tsdown": "^0.20.3",
+    "typescript": "^5.7.3",
+    "vite": "^7.1.12",
+    "wait-on": "^8.0.2"
+  }
+}

@@ -1,0 +1,56 @@
+appId: com.diskhound.app
+productName: DiskHound
+copyright: Copyright © 2026 DiskHound
+
+directories:
+  output: release
+
+files:
+  - dist-electron/**/*
+  - dist-renderer/**/*
+  - "!node_modules"
+
+extraResources:
+  - from: native/diskhound-native-scanner/target/release/
+    to: native
+    filter:
+      - diskhound-native-scanner.exe
+      - diskhound-native-scanner
+
+asar: true
+compression: maximum
+
+publish:
+  provider: github
+
+icon: build/icon.png
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: "${productName}-${version}-Setup.${ext}"
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+  category: public.app-category.utilities
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+
+linux:
+  target:
+    - target: AppImage
+      arch:
+        - x64
+  category: Utility
+  artifactName: "${productName}-${version}-${arch}.${ext}"
