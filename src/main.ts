@@ -14,8 +14,6 @@ import {
   shell,
   Tray,
 } from "electron";
-import * as Effect from "effect/Effect";
-
 import {
   createIdleScanSnapshot,
   defaultScanOptions,
@@ -394,18 +392,14 @@ void app.whenReady().then(async () => {
     return startingSnapshot;
   };
 
-  const pathAction = async (message: string, task: () => Promise<void>): Promise<PathActionResult> =>
-    Effect.runPromise(
-      Effect.tryPromise({ try: task, catch: (error) => error }).pipe(
-        Effect.as({ ok: true, message }),
-        Effect.catchAll((error) =>
-          Effect.succeed({
-            ok: false,
-            message: error instanceof Error ? error.message : String(error),
-          }),
-        ),
-      ),
-    );
+  const pathAction = async (message: string, task: () => Promise<void>): Promise<PathActionResult> => {
+    try {
+      await task();
+      return { ok: true, message };
+    } catch (error) {
+      return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+  };
 
   // ── IPC: Scan ─────────────────────────────────────────────
 

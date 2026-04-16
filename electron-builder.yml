@@ -37,6 +37,10 @@ nsis:
   perMachine: false
   allowToChangeInstallationDirectory: true
   deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DiskHound
+  runAfterFinish: true
 
 mac:
   target:

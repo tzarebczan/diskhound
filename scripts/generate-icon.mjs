@@ -1,7 +1,5 @@
 /**
- * Generate DiskHound app icon as a 256x256 PNG using only Node.js built-ins.
- * No external dependencies needed.
- *
+ * Generate DiskHound app icon as a 512x512 PNG using only Node.js built-ins.
  * Run: node scripts/generate-icon.mjs
  * Output: build/icon.png
  */
@@ -21,24 +19,13 @@ function setPixel(x, y, r, g, b, a = 255) {
   pixels[i + 3] = a;
 }
 
-function fillRect(x0, y0, w, h, r, g, b) {
-  for (let y = Math.max(0, y0); y < Math.min(size, y0 + h); y++) {
-    for (let x = Math.max(0, x0); x < Math.min(size, x0 + w); x++) {
-      setPixel(x, y, r, g, b);
-    }
-  }
-}
-
 function fillRoundedRect(x0, y0, w, h, radius, r, g, b) {
   for (let y = y0; y < y0 + h; y++) {
     for (let x = x0; x < x0 + w; x++) {
       if (x < 0 || x >= size || y < 0 || y >= size) continue;
-      // Check corners
       const dx = x < x0 + radius ? x - (x0 + radius) : x > x0 + w - radius - 1 ? x - (x0 + w - radius - 1) : 0;
       const dy = y < y0 + radius ? y - (y0 + radius) : y > y0 + h - radius - 1 ? y - (y0 + h - radius - 1) : 0;
-      if (dx * dx + dy * dy <= radius * radius) {
-        setPixel(x, y, r, g, b);
-      } else if (dx === 0 || dy === 0) {
+      if (dx * dx + dy * dy <= radius * radius || dx === 0 || dy === 0) {
         setPixel(x, y, r, g, b);
       }
     }
@@ -46,26 +33,26 @@ function fillRoundedRect(x0, y0, w, h, radius, r, g, b) {
 }
 
 // Background: dark rounded square
-fillRoundedRect(0, 0, size, size, 40, 14, 14, 20);
+fillRoundedRect(0, 0, size, size, 72, 10, 10, 18);
 
-const pad = 22;
+const pad = 40;
 const area = size - pad * 2;
-const gap = 3;
+const gap = 10; // wider gaps for clear block separation
 
-// Treemap blocks — the visual identity of DiskHound
+// Treemap blocks — wider spacing, brighter colors, more contrast
 const blocks = [
-  // Large block top-left (the "big file" — amber, dominant)
-  { x: 0, y: 0, w: 0.55, h: 0.6, r: 245, g: 158, b: 11 },
+  // Large block top-left (amber — the "big file")
+  { x: 0, y: 0, w: 0.54, h: 0.58, r: 245, g: 158, b: 11 },
   // Medium block top-right
-  { x: 0.56, y: 0, w: 0.44, h: 0.35, r: 217, g: 119, b: 6 },
-  // Small blocks
-  { x: 0.56, y: 0.36, w: 0.22, h: 0.24, r: 180, g: 83, b: 9 },
-  { x: 0.79, y: 0.36, w: 0.21, h: 0.24, r: 146, g: 64, b: 14 },
-  // Bottom row
-  { x: 0, y: 0.61, w: 0.35, h: 0.39, r: 234, g: 88, b: 12 },
-  { x: 0.36, y: 0.61, w: 0.3, h: 0.39, r: 194, g: 65, b: 12 },
-  { x: 0.67, y: 0.61, w: 0.33, h: 0.19, r: 124, g: 58, b: 237 },
-  { x: 0.67, y: 0.81, w: 0.33, h: 0.19, r: 13, g: 148, b: 136 },
+  { x: 0.56, y: 0, w: 0.44, h: 0.34, r: 234, g: 120, b: 8 },
+  // Two small blocks mid-right
+  { x: 0.56, y: 0.36, w: 0.21, h: 0.22, r: 220, g: 90, b: 12 },
+  { x: 0.79, y: 0.36, w: 0.21, h: 0.22, r: 180, g: 70, b: 10 },
+  // Bottom row — varied colors for visual interest
+  { x: 0, y: 0.60, w: 0.34, h: 0.40, r: 239, g: 68, b: 68 },   // red
+  { x: 0.36, y: 0.60, w: 0.28, h: 0.40, r: 168, g: 85, b: 247 }, // purple
+  { x: 0.66, y: 0.60, w: 0.34, h: 0.19, r: 59, g: 130, b: 246 }, // blue
+  { x: 0.66, y: 0.81, w: 0.34, h: 0.19, r: 16, g: 185, b: 129 }, // green
 ];
 
 for (const b of blocks) {
@@ -73,30 +60,43 @@ for (const b of blocks) {
   const by = Math.round(pad + b.y * area);
   const bw = Math.round(b.w * area) - gap;
   const bh = Math.round(b.h * area) - gap;
-  fillRoundedRect(bx, by, bw, bh, 4, b.r, b.g, b.b);
+  const radius = 10;
 
-  // Subtle top highlight
-  for (let x = bx + 4; x < bx + bw - 4; x++) {
-    const i = (by * size + x) * 4;
-    if (i >= 0 && i < pixels.length - 3) {
-      pixels[i] = Math.min(255, pixels[i] + 20);
-      pixels[i + 1] = Math.min(255, pixels[i + 1] + 20);
-      pixels[i + 2] = Math.min(255, pixels[i + 2] + 20);
+  fillRoundedRect(bx, by, bw, bh, radius, b.r, b.g, b.b);
+
+  // Top highlight — brighter top edge for depth
+  for (let row = 0; row < 3; row++) {
+    for (let x = bx + radius; x < bx + bw - radius; x++) {
+      const i = ((by + row) * size + x) * 4;
+      if (i >= 0 && i < pixels.length - 3) {
+        pixels[i] = Math.min(255, pixels[i] + 35 - row * 10);
+        pixels[i + 1] = Math.min(255, pixels[i + 1] + 35 - row * 10);
+        pixels[i + 2] = Math.min(255, pixels[i + 2] + 35 - row * 10);
+      }
+    }
+  }
+
+  // Bottom shadow — darker bottom edge
+  for (let row = 0; row < 2; row++) {
+    for (let x = bx + radius; x < bx + bw - radius; x++) {
+      const yy = by + bh - 1 - row;
+      const i = (yy * size + x) * 4;
+      if (i >= 0 && i < pixels.length - 3) {
+        pixels[i] = Math.max(0, pixels[i] - 25 + row * 10);
+        pixels[i + 1] = Math.max(0, pixels[i + 1] - 25 + row * 10);
+        pixels[i + 2] = Math.max(0, pixels[i + 2] - 25 + row * 10);
+      }
     }
   }
 }
 
 // Write PNG
 const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
-
 const ihdr = Buffer.alloc(13);
 ihdr.writeUInt32BE(size, 0);
 ihdr.writeUInt32BE(size, 4);
-ihdr[8] = 8; // bit depth
-ihdr[9] = 6; // RGBA
-ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
 
-// Filter byte (0) prepended to each row
 const rawData = Buffer.alloc(size * (1 + size * 4));
 for (let y = 0; y < size; y++) {
   rawData[y * (1 + size * 4)] = 0;
@@ -104,7 +104,6 @@ for (let y = 0; y < size; y++) {
 }
 const compressed = deflateSync(rawData);
 
-// CRC32
 const crc32Table = new Uint32Array(256);
 for (let i = 0; i < 256; i++) {
   let c = i;
@@ -116,7 +115,6 @@ function crc32(buf) {
   for (let i = 0; i < buf.length; i++) c = (c >>> 8) ^ crc32Table[(c ^ buf[i]) & 0xff];
   return (c ^ 0xffffffff) >>> 0;
 }
-
 function makeChunk(type, data) {
   const len = Buffer.alloc(4);
   len.writeUInt32BE(data.length, 0);
