@@ -470,8 +470,8 @@ export function defaultSettings(): AppSettings {
     },
     scanning: {
       defaultRootPath: "",
-      topFileLimit: 100,
-      topDirectoryLimit: 500,
+      topFileLimit: 200,
+      topDirectoryLimit: 1000,
     },
     monitoring: {
       enabled: false,

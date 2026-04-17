@@ -66,7 +66,9 @@ export function App() {
   const [view, setView] = useState<AppView>("overview");
   const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
   const [filterExt, setFilterExt] = useState<string | undefined>();
-  const [showPicker, setShowPicker] = useState(true);
+  // null = still loading the initial snapshot; prevents a flash of the picker
+  // when we're about to restore a previous scan
+  const [showPicker, setShowPicker] = useState<boolean | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
@@ -134,12 +136,12 @@ export function App() {
   // Boot: load current snapshot + drives + IPC listeners (run once)
   useEffect(() => {
     void nativeApi.getCurrentSnapshot().then((s) => {
-      if (s) {
+      if (s && (s.status === "running" || s.status === "done")) {
         syncSnapshot(s);
-        // Hide picker if a scan is running or already completed
-        if (s.status === "running" || s.status === "done") {
-          setShowPicker(false);
-        }
+        setShowPicker(false);
+      } else {
+        if (s) syncSnapshot(s);
+        setShowPicker(true);
       }
     });
     void nativeApi.getDiskSpace().then((d) => { if (d) setDrives(d); });
@@ -465,7 +467,7 @@ export function App() {
 
         {/* ── Main View ── */}
         <div className="view-container">
-          {showPicker ? (
+          {showPicker === null ? null : showPicker ? (
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}

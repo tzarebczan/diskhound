@@ -61,20 +61,51 @@ function buildBreadcrumbs(currentPath: string, rootPath: string): { label: strin
   return crumbs;
 }
 
-/** Find direct children of parentDir in the directory list */
-function getDirectChildren(dirs: DirectoryHotspot[], parentDir: string): DirectoryHotspot[] {
-  const prefix = parentDir.replace(/[\\/]+$/, "") + "\\";
+/** Find direct children of parentDir, enriching with any deeper tracked paths. */
+function getDirectChildren(
+  dirs: DirectoryHotspot[],
+  files: { path: string; parentPath: string; size: number }[],
+  parentDir: string,
+): DirectoryHotspot[] {
+  const normalizedPrefix = (parentDir.replace(/[\\/]+$/, "") + "\\").replace(/\//g, "\\");
+  const parentKey = parentDir.replace(/[\\/]+$/, "").replace(/\//g, "\\");
 
-  return dirs.filter((d) => {
-    if (d.path === parentDir) return false;
-    // Must start with parent + separator
+  // Start with tracked directories that are direct children.
+  const known = new Map<string, DirectoryHotspot>();
+  for (const d of dirs) {
+    if (d.path === parentDir) continue;
     const normalized = d.path.replace(/\//g, "\\");
-    const normalizedPrefix = prefix.replace(/\//g, "\\");
-    if (!normalized.startsWith(normalizedPrefix)) return false;
-    // Must be a direct child (no more separators in the remainder)
+    if (!normalized.startsWith(normalizedPrefix)) continue;
     const rest = normalized.slice(normalizedPrefix.length);
-    return !rest.includes("\\");
-  });
+    if (rest.includes("\\")) continue; // not a direct child
+    known.set(normalized, d);
+  }
+
+  // Infer additional direct-child directory paths from tracked file/dir paths
+  // that live deeper in the tree. This surfaces folders too small to make the
+  // top-N list but still have tracked descendants.
+  const addInferred = (fullPath: string) => {
+    const normalized = fullPath.replace(/\//g, "\\");
+    if (!normalized.startsWith(normalizedPrefix)) return;
+    const rest = normalized.slice(normalizedPrefix.length);
+    if (!rest) return;
+    const firstSep = rest.indexOf("\\");
+    const childName = firstSep >= 0 ? rest.slice(0, firstSep) : rest;
+    if (!childName) return;
+    const childPath = `${parentKey}\\${childName}`;
+    if (known.has(childPath)) return;
+    known.set(childPath, {
+      path: childPath,
+      size: 0,
+      fileCount: 0,
+      depth: 0,
+    });
+  };
+
+  for (const d of dirs) addInferred(d.path);
+  for (const f of files) addInferred(f.parentPath);
+
+  return Array.from(known.values());
 }
 
 // ── Component ───────────────────────────────────────────────
@@ -106,8 +137,8 @@ export function FolderList({ snapshot }: Props) {
 
   // Direct children sorted by size
   const children = useMemo(
-    () => getDirectChildren(dirs, currentPath).sort((a, b) => b.size - a.size),
-    [dirs, currentPath],
+    () => getDirectChildren(dirs, allFiles, currentPath).sort((a, b) => b.size - a.size),
+    [dirs, allFiles, currentPath],
   );
 
   // Calculate "other" — space not accounted for by listed children

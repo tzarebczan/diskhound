@@ -694,8 +694,26 @@ button, input, select, textarea { font: inherit; }
   box-shadow: inset 0 0 0 1px var(--border-selected);
 }
 
+.treemap-featured.collapsed .treemap-featured-header {
+  padding: 8px 12px;
+}
+.treemap-featured.expanded .treemap-featured-header {
+  padding: 10px 12px 6px;
+}
+.treemap-featured-chevron {
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+}
+.treemap-featured-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
 .treemap-featured {
-  padding: 10px 12px 8px;
+  padding: 0 12px 0;
   border-bottom: 1px solid var(--border);
   background:
     linear-gradient(180deg, rgba(245, 158, 11, 0.05), rgba(245, 158, 11, 0)),
@@ -705,9 +723,21 @@ button, input, select, textarea { font: inherit; }
 .treemap-featured-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 10px;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: inherit;
+  text-align: left;
+  transition: background 0.1s;
+}
+.treemap-featured-header:hover {
+  background: rgba(255,255,255,0.02);
+}
+.treemap-featured-header .treemap-featured-title {
+  flex: 1;
 }
 
 .treemap-featured-title {
@@ -728,8 +758,9 @@ button, input, select, textarea { font: inherit; }
 
 .treemap-featured-list {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
   gap: 8px;
+  padding-bottom: 10px;
 }
 
 .treemap-featured-card {
@@ -1734,8 +1765,11 @@ button, input, select, textarea { font: inherit; }
 .settings-view {
   height: 100%;
   overflow-y: auto;
-  padding: 16px 20px;
-  max-width: 720px;
+  padding: 24px clamp(16px, 4vw, 48px);
+}
+.settings-view-inner {
+  max-width: 820px;
+  margin: 0 auto;
 }
 
 .settings-section {
@@ -2522,8 +2556,24 @@ button, input, select, textarea { font: inherit; }
 }
 .changes-history-item:hover:not(:disabled) { background: var(--bg-row-hover); }
 .changes-history-item.selected { background: var(--amber-glow); border-left: 2px solid var(--amber); }
-.changes-history-item.latest { opacity: 0.6; cursor: default; }
 .changes-history-item:disabled { cursor: default; }
+
+.changes-history-current {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 12px;
+  border-bottom: 2px solid var(--amber);
+  background: linear-gradient(180deg, rgba(245,158,11,0.08), transparent);
+}
+.changes-history-current-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  font-weight: 700;
+  margin-bottom: 2px;
+}
 
 .changes-history-date {
   display: flex;

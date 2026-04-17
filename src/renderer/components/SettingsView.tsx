@@ -65,6 +65,7 @@ export function SettingsView() {
 
   return (
     <div className="settings-view">
+      <div className="settings-view-inner">
       {/* ── General ── */}
       <div className="settings-section">
         <div className="settings-section-title">General</div>
@@ -233,6 +234,7 @@ export function SettingsView() {
           desc="Safer default for cleanup actions"
           value={settings.cleanup.safeDeleteToTrash}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, safeDeleteToTrash: v } })} />
+      </div>
       </div>
     </div>
   );

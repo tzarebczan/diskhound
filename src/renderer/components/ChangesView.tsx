@@ -275,27 +275,43 @@ export function ChangesView({ rootPath, snapshot }: Props) {
               const isSelected = h.id === selectedBaseline;
               const prevEntry = history[i + 1];
               const sizeDelta = prevEntry ? h.bytesSeen - prevEntry.bytesSeen : 0;
+
+              // The latest scan is the "current" side of the diff — not clickable,
+              // render as a static header that clearly differs from the list items.
+              if (isLatest) {
+                return (
+                  <div key={h.id} className="changes-history-current">
+                    <div className="changes-history-current-label">COMPARING AGAINST</div>
+                    <div className="changes-history-date">
+                      {relativeTime(h.scannedAt)}
+                      <span className="changes-history-badge">current</span>
+                    </div>
+                    <div className="changes-history-meta">
+                      <span>{formatBytes(h.bytesSeen)}</span>
+                      <span>{h.filesVisited.toLocaleString()} files</span>
+                    </div>
+                  </div>
+                );
+              }
+
               return (
                 <button
                   key={h.id}
-                  className={`changes-history-item ${isSelected ? "selected" : ""} ${isLatest ? "latest" : ""}`}
+                  className={`changes-history-item ${isSelected ? "selected" : ""}`}
                   onClick={() => {
-                    if (isLatest) return;
                     setActiveQuickSelect(null);
                     void selectBaseline(h.id);
                   }}
-                  disabled={isLatest}
-                  title={isLatest ? "Current scan (comparing against)" : "Compare against this scan"}
+                  title="Compare against this scan"
                 >
                   <div className="changes-history-date">
                     {relativeTime(h.scannedAt)}
-                    {isLatest && <span className="changes-history-badge">latest</span>}
                   </div>
                   <div className="changes-history-meta">
                     <span>{formatBytes(h.bytesSeen)}</span>
                     <span>{h.filesVisited.toLocaleString()} files</span>
                   </div>
-                  {sizeDelta !== 0 && !isLatest && (
+                  {sizeDelta !== 0 && (
                     <div className={`changes-history-delta ${sizeDelta > 0 ? "negative" : "positive"}`}>
                       {sizeDelta > 0 ? "+" : ""}{formatBytes(Math.abs(sizeDelta))}
                     </div>

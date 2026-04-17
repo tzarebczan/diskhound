@@ -2,11 +2,13 @@ import { useEffect, useMemo, useState } from "preact/hooks";
 
 import type { ExtensionBucket, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount, formatElapsed } from "../lib/format";
+import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import {
   buildTreemapComposition,
   colorForExtension,
   type TreemapFeaturedItem,
 } from "../lib/treemap";
+import { nativeApi } from "../nativeApi";
 import { Treemap } from "./Treemap";
 
 interface Props {
@@ -29,6 +31,9 @@ function getInitialTreemapMode(): TreemapMode {
 export function Overview({ snapshot, onFilterExtension }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries, elapsedMs } = snapshot;
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
+  const [dominantExpanded, setDominantExpanded] = useState(false);
+  const { busy, runAction, handleEasyMove } = usePathActions();
+  const safeDeleteOnly = useSafeDeleteOnly();
   const treemapComposition = useMemo(
     () => buildTreemapComposition(snapshot.largestFiles),
     [snapshot.largestFiles],
@@ -96,16 +101,47 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
             )}
 
             {condensedMode && (
-              <div className="treemap-featured">
-                <div className="treemap-featured-header">
-                  <div className="treemap-featured-title">Dominant Files</div>
+              <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
+                <button
+                  className="treemap-featured-header"
+                  onClick={() => setDominantExpanded((v) => !v)}
+                  aria-expanded={dominantExpanded}
+                >
+                  <svg
+                    className="treemap-featured-chevron"
+                    width="10" height="10" viewBox="0 0 10 10"
+                    fill="none" stroke="currentColor" strokeWidth="1.5"
+                    style={{ transform: dominantExpanded ? "rotate(90deg)" : "rotate(0deg)" }}
+                  >
+                    <path d="M3.5 2L7 5L3.5 8" />
+                  </svg>
+                  <div className="treemap-featured-title">
+                    {treemapComposition.featuredFiles.length} dominant file{treemapComposition.featuredFiles.length === 1 ? "" : "s"}
+                  </div>
                   <div className="treemap-featured-summary">{formatBytes(featuredBytes)}</div>
-                </div>
-                <div className="treemap-featured-list">
-                  {treemapComposition.featuredFiles.map((item, index) => (
-                    <FeaturedFileCard key={item.file.path} item={item} rank={index + 1} />
-                  ))}
-                </div>
+                </button>
+                {dominantExpanded && (
+                  <div className="treemap-featured-list">
+                    {treemapComposition.featuredFiles.map((item, index) => (
+                      <FeaturedFileCard
+                        key={item.file.path}
+                        item={item}
+                        rank={index + 1}
+                        isBusy={busy.has(item.file.path)}
+                        safeDeleteOnly={safeDeleteOnly}
+                        onReveal={() => void runAction(item.file.path, () => nativeApi.revealPath(item.file.path))}
+                        onOpen={() => void runAction(item.file.path, () => nativeApi.openPath(item.file.path))}
+                        onTrash={() => void runAction(item.file.path, () => nativeApi.trashPath(item.file.path))}
+                        onDelete={() => {
+                          if (confirm(`Permanently delete ${item.file.name}?\n\nThis cannot be undone.`)) {
+                            void runAction(item.file.path, () => nativeApi.permanentlyDeletePath(item.file.path));
+                          }
+                        }}
+                        onMove={() => void handleEasyMove(item.file.path)}
+                      />
+                    ))}
+                  </div>
+                )}
               </div>
             )}
 
@@ -139,7 +175,17 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
   );
 }
 
-function FeaturedFileCard({ item, rank }: { item: TreemapFeaturedItem; rank: number }) {
+function FeaturedFileCard({ item, rank, isBusy, safeDeleteOnly, onReveal, onOpen, onTrash, onDelete, onMove }: {
+  item: TreemapFeaturedItem;
+  rank: number;
+  isBusy: boolean;
+  safeDeleteOnly: boolean;
+  onReveal: () => void;
+  onOpen: () => void;
+  onTrash: () => void;
+  onDelete: () => void;
+  onMove: () => void;
+}) {
   const color = colorForExtension(item.file.extension);
 
   return (
@@ -162,6 +208,13 @@ function FeaturedFileCard({ item, rank }: { item: TreemapFeaturedItem; rank: num
           className="treemap-featured-bar-fill"
           style={{ width: `${Math.max(item.share * 100, 3)}%`, background: color }}
         />
+      </div>
+      <div className="treemap-featured-actions">
+        <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
+        <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
+        <button className="action-btn warn" disabled={isBusy} onClick={onTrash}>Trash</button>
+        {!safeDeleteOnly && <button className="action-btn danger" disabled={isBusy} onClick={onDelete}>Del</button>}
+        <button className="action-btn" disabled={isBusy} onClick={onMove}>Move</button>
       </div>
     </div>
   );
