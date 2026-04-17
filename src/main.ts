@@ -96,38 +96,28 @@ const sendToast = (level: ToastMessage["level"], title: string, body?: string) =
   mainWindow?.webContents.send(NOTIFICATION_CHANNEL, toast);
 };
 
-// ── Tray Icon ───────────────────────────────────────────────
-// Generate a 16×16 BGRA bitmap: an amber circle on transparent background.
-// Electron's createFromBitmap expects BGRA byte order.
 function createTrayIconImage(): Electron.NativeImage {
-  const size = 16;
-  const buf = Buffer.alloc(size * size * 4);
-  const cx = 7.5;
-  const cy = 7.5;
-  const radius = 6;
+  // Use the app icon (build/icon.png), resized to tray dimensions
+  const iconPaths = [
+    Path.join(projectRoot, "build", "icon.png"),
+    Path.join(process.resourcesPath ?? projectRoot, "icon.png"),
+  ];
 
-  for (let y = 0; y < size; y++) {
-    for (let x = 0; x < size; x++) {
-      const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
-      const i = (y * size + x) * 4;
-      if (dist <= radius) {
-        // Amber #f59e0b  →  BGRA
-        buf[i + 0] = 11;   // B
-        buf[i + 1] = 158;  // G
-        buf[i + 2] = 245;  // R
-        buf[i + 3] = 255;  // A
-      } else if (dist <= radius + 0.8) {
-        // Anti-aliased edge
-        const alpha = Math.round(255 * Math.max(0, radius + 0.8 - dist) / 0.8);
-        buf[i + 0] = 11;
-        buf[i + 1] = 158;
-        buf[i + 2] = 245;
-        buf[i + 3] = alpha;
+  for (const iconPath of iconPaths) {
+    try {
+      if (require("fs").existsSync(iconPath)) {
+        const icon = nativeImage.createFromPath(iconPath);
+        return icon.resize({ width: 16, height: 16 });
       }
-      // else: all zeros (transparent)
-    }
+    } catch { /* continue */ }
   }
 
+  // Fallback: simple amber square if icon file not found
+  const size = 16;
+  const buf = Buffer.alloc(size * size * 4);
+  for (let i = 0; i < size * size; i++) {
+    buf[i * 4] = 11; buf[i * 4 + 1] = 158; buf[i * 4 + 2] = 245; buf[i * 4 + 3] = 255;
+  }
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 

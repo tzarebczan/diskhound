@@ -8,14 +8,16 @@ directories:
 files:
   - dist-electron/**/*
   - dist-renderer/**/*
-  - "!node_modules"
+  - package.json
 
 extraResources:
   - from: native/diskhound-native-scanner/target/release/
-    to: native
+    to: native/
     filter:
-      - diskhound-native-scanner.exe
       - diskhound-native-scanner
+      - diskhound-native-scanner.exe
+  - from: build/icon.png
+    to: icon.png
 
 asar: true
 compression: maximum
@@ -36,11 +38,14 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  allowElevation: true
   deleteAppDataOnUninstall: false
-  createDesktopShortcut: true
+  createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: DiskHound
   runAfterFinish: true
+  installerSidebar: null
+  uninstallerSidebar: null
 
 mac:
   target:
