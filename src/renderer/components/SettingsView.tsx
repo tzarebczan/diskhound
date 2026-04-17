@@ -6,6 +6,7 @@ import {
   type AppSettings,
   type DiskDelta,
   type MonitoringSnapshot,
+  type UpdateStatus,
 } from "../../shared/contracts";
 import { formatBytes } from "../lib/format";
 import { nativeApi } from "../nativeApi";
@@ -108,6 +109,13 @@ export function SettingsView() {
           value={settings.general.launchOnStartup}
           onChange={(v) => void save({ ...settings, general: { ...settings.general, launchOnStartup: v } })}
         />
+        <ToggleRow
+          label="Auto-update"
+          desc="Check for and download updates in the background"
+          value={settings.general.autoUpdate}
+          onChange={(v) => void save({ ...settings, general: { ...settings.general, autoUpdate: v } })}
+        />
+        <UpdateRow />
       </div>
 
       {/* ── Scanning ── */}
@@ -225,6 +233,55 @@ export function SettingsView() {
           desc="Safer default for cleanup actions"
           value={settings.cleanup.safeDeleteToTrash}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, safeDeleteToTrash: v } })} />
+      </div>
+    </div>
+  );
+}
+
+function UpdateRow() {
+  const [status, setStatus] = useState<UpdateStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+
+  useEffect(() => {
+    return nativeApi.onUpdateStatus(setStatus);
+  }, []);
+
+  const check = async () => {
+    setChecking(true);
+    await nativeApi.checkForUpdates();
+    setChecking(false);
+  };
+
+  let statusText = "Never checked";
+  if (status) {
+    switch (status.phase) {
+      case "checking":      statusText = "Checking..."; break;
+      case "available":     statusText = `Update available: v${status.availableVersion}`; break;
+      case "downloading":   statusText = `Downloading... ${status.downloadPercent ?? 0}%`; break;
+      case "downloaded":    statusText = `Ready to install: v${status.availableVersion}`; break;
+      case "up-to-date":    statusText = `Up to date (v${status.currentVersion})`; break;
+      case "error":         statusText = `Error: ${status.errorMessage ?? "unknown"}`; break;
+    }
+  }
+
+  const canInstall = status?.phase === "downloaded";
+
+  return (
+    <div className="setting-row">
+      <div>
+        <div className="setting-label">Update status</div>
+        <div className="setting-desc">{statusText}</div>
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        {canInstall ? (
+          <button className="action-btn warn" onClick={() => nativeApi.quitAndInstall()}>
+            Restart & install
+          </button>
+        ) : (
+          <button className="action-btn" disabled={checking} onClick={() => void check()}>
+            {checking ? "Checking..." : "Check now"}
+          </button>
+        )}
       </div>
     </div>
   );

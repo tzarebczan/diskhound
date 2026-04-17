@@ -67,8 +67,8 @@ Download the latest release for your platform from [**Releases**](https://github
       <sub><b>Folders</b> — drill into directories with size breakdowns</sub>
     </td>
     <td align="center">
-      <img src="build/icon.png" alt="Icon" width="100" /><br>
-      <sub><b>Custom app icon</b> — stylized treemap identity</sub>
+      <img src="docs/screenshots/settings.png" alt="Settings" width="100%" /><br>
+      <sub><b>Settings</b> — theme, scanning, monitoring, cleanup</sub>
     </td>
   </tr>
 </table>

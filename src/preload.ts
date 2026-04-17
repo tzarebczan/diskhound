@@ -8,6 +8,7 @@ import type {
   DuplicateScanProgress,
   ScanSnapshot,
   ToastMessage,
+  UpdateStatus,
 } from "./shared/contracts";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
@@ -77,6 +78,15 @@ const api: DiskhoundNativeApi = {
 
   // Theme
   applyTheme: (theme) => ipcRenderer.send("diskhound:apply-theme", theme),
+
+  // Auto-update
+  checkForUpdates: () => ipcRenderer.invoke("diskhound:check-for-updates"),
+  quitAndInstall: () => ipcRenderer.send("diskhound:quit-and-install"),
+  onUpdateStatus: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, status: UpdateStatus) => listener(status);
+    ipcRenderer.on("diskhound:update-status", wrapped);
+    return () => { ipcRenderer.removeListener("diskhound:update-status", wrapped); };
+  },
 
   // Tray
   minimizeToTray: () => ipcRenderer.send("diskhound:minimize-to-tray"),

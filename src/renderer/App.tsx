@@ -9,6 +9,7 @@ import {
   type GeneralSettings,
   type ScanOptions,
   type ScanSnapshot,
+  type UpdateStatus,
 } from "../shared/contracts";
 import { formatBytes } from "./lib/format";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents";
@@ -71,6 +72,7 @@ export function App() {
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
   const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const isSearchableView = SEARCHABLE_VIEWS.includes(view);
 
   const applyResolvedTheme = useCallback((resolved: "dark" | "light") => {
@@ -169,7 +171,11 @@ export function App() {
       }
     });
 
-    return () => { unsub(); };
+    const unsubUpdate = nativeApi.onUpdateStatus((status) => {
+      setUpdateStatus(status);
+    });
+
+    return () => { unsub(); unsubUpdate(); };
   }, []);
 
   // Keyboard shortcuts (separate effect so search state changes don't tear down IPC listeners)
@@ -295,6 +301,20 @@ export function App() {
       <div className="app-shell">
         {/* Scan progress stripe */}
         <div className={`scan-stripe ${snapshot.status === "running" ? "active" : ""}`} />
+
+        {/* Update banner — shows when an update is downloaded and ready */}
+        {updateStatus?.phase === "downloaded" && (
+          <div className="update-banner">
+            <span className="update-banner-icon">↻</span>
+            <span className="update-banner-text">
+              DiskHound <strong>v{updateStatus.availableVersion}</strong> is ready to install.
+            </span>
+            <button className="update-banner-btn" onClick={() => nativeApi.quitAndInstall()}>
+              Restart & install
+            </button>
+            <button className="update-banner-dismiss" onClick={() => setUpdateStatus(null)} title="Dismiss">&times;</button>
+          </div>
+        )}
 
         {/* ── Header ── */}
         <header className="header">

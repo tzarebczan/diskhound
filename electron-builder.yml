@@ -11,11 +11,12 @@ files:
   - package.json
 
 extraResources:
+  # Copy the compiled Rust scanner binary into resources/native/.
   - from: native/diskhound-native-scanner/target/release/
     to: native/
     filter:
-      - diskhound-native-scanner
-      - diskhound-native-scanner.exe
+      - "diskhound-native-scanner"
+      - "diskhound-native-scanner.exe"
   - from: build/icon.png
     to: icon.png
 

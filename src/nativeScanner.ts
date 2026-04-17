@@ -71,6 +71,7 @@ export function createNativeScannerSession(
 
   const binaryPath = resolveNativeScannerBinary(projectRoot);
   if (!binaryPath) {
+    console.warn("[nativeScanner] No binary found — falling back to JS worker");
     return null;
   }
 
@@ -85,10 +86,22 @@ export function createNativeScannerSession(
     args.push("--index-output", input.indexOutput);
   }
 
-  const child = spawn(binaryPath, args, {
-    cwd: projectRoot,
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
+  let child: ChildProcessByStdio<null, Readable, Readable>;
+  try {
+    child = spawn(binaryPath, args, {
+      cwd: Path.dirname(binaryPath),
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  } catch (error) {
+    console.warn(`[nativeScanner] spawn failed at ${binaryPath}:`, error);
+    return null;
+  }
+
+  // Catch spawn errors that fire async (ENOENT, EACCES, etc.)
+  child.on("error", (error: NodeJS.ErrnoException) => {
+    console.warn(`[nativeScanner] process error at ${binaryPath}:`, error);
+    callbacks.onError(error);
   });
 
   child.stdout.setEncoding("utf8");

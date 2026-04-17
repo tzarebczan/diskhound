@@ -41,6 +41,15 @@ jobs:
       - name: Build native scanner
         run: cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml
 
+      - name: Verify native binary exists
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            ls -la native/diskhound-native-scanner/target/release/diskhound-native-scanner.exe
+          else
+            ls -la native/diskhound-native-scanner/target/release/diskhound-native-scanner
+          fi
+
       - name: Build app
         run: bun run build
 
@@ -48,6 +57,14 @@ jobs:
         run: npx electron-builder --config electron-builder.yml --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify packaged native binary
+        shell: bash
+        run: |
+          echo "=== Contents of release folder ==="
+          ls -la release/ || true
+          echo "=== Searching for native scanner ==="
+          find release -name "diskhound-native-scanner*" -type f 2>/dev/null || true
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

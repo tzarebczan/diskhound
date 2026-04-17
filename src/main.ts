@@ -307,6 +307,26 @@ void app.whenReady().then(async () => {
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
     }
+
+    // If the native scanner failed to launch (ENOENT, EACCES), silently
+    // fall back to the JS worker so the user still gets a scan.
+    const errCode = (error as NodeJS.ErrnoException | undefined)?.code;
+    if (
+      session.kind === "native" &&
+      startingSnapshot.rootPath &&
+      (errCode === "ENOENT" || errCode === "EACCES")
+    ) {
+      console.warn(`[scan] native scanner unavailable (${errCode}) — falling back to JS worker`);
+      const { session: fallbackSession, startingSnapshot: fallbackStart } = createWorkerSession(
+        startingSnapshot.rootPath,
+        startingSnapshot.scanOptions,
+        session.trigger,
+      );
+      activeScan = fallbackSession;
+      await broadcastSnapshot(fallbackStart);
+      return;
+    }
+
     await broadcastSnapshot(
       await buildErrorSnapshot(
         startingSnapshot,
@@ -882,29 +902,63 @@ void app.whenReady().then(async () => {
     mainWindow?.hide();
   }
 
-  // Auto-update check (production only)
+  // Auto-update (production only, gated on user setting)
+  let autoUpdater: any = null;
+  const UPDATE_STATUS_CHANNEL = "diskhound:update-status";
+  const currentVersion = app.getVersion();
+
+  const emitUpdateStatus = (status: import("./shared/contracts").UpdateStatus) => {
+    mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, status);
+  };
+
   if (!isDevelopment) {
     try {
-      const { autoUpdater } = require("electron-updater");
+      autoUpdater = require("electron-updater").autoUpdater;
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = true;
-      // Request UAC elevation if installed to a system directory (e.g. Program Files)
-      if (process.platform === "win32") {
-        autoUpdater.allowElevation = true;
+      if (process.platform === "win32") autoUpdater.allowElevation = true;
+
+      autoUpdater.on("checking-for-update", () => {
+        emitUpdateStatus({ phase: "checking", currentVersion });
+      });
+      autoUpdater.on("update-available", (info: any) => {
+        emitUpdateStatus({ phase: "available", currentVersion, availableVersion: info?.version });
+        sendToast("info", "Update available", `DiskHound ${info?.version ?? ""} is available. Downloading...`);
+        autoUpdater.downloadUpdate().catch(() => {});
+      });
+      autoUpdater.on("update-not-available", (info: any) => {
+        emitUpdateStatus({ phase: "up-to-date", currentVersion, availableVersion: info?.version });
+      });
+      autoUpdater.on("download-progress", (p: any) => {
+        emitUpdateStatus({ phase: "downloading", currentVersion, downloadPercent: Math.round(p?.percent ?? 0) });
+      });
+      autoUpdater.on("update-downloaded", (info: any) => {
+        emitUpdateStatus({ phase: "downloaded", currentVersion, availableVersion: info?.version });
+        sendToast("success", "Update ready", "Restart DiskHound to apply the update.");
+      });
+      autoUpdater.on("error", (err: Error) => {
+        emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err?.message });
+      });
+
+      // Check on boot only if the user has auto-update enabled
+      if (settings.general.autoUpdate) {
+        autoUpdater.checkForUpdates().catch(() => {});
       }
-      autoUpdater.on("update-available", () => {
-        sendToast("info", "Update available", "A new version of DiskHound is available.");
-        autoUpdater.downloadUpdate();
-      });
-      autoUpdater.on("update-downloaded", () => {
-        sendToast("success", "Update ready", "The update will be applied when you restart DiskHound.");
-      });
-      autoUpdater.on("error", () => { /* update check failed — offline or rate-limited */ });
-      autoUpdater.checkForUpdates().catch(() => {});
     } catch {
       // electron-updater not available (dev mode or build issue)
     }
   }
+
+  ipcMain.handle("diskhound:check-for-updates", async () => {
+    if (!autoUpdater) return;
+    try { await autoUpdater.checkForUpdates(); } catch { /* ignore */ }
+  });
+
+  ipcMain.on("diskhound:quit-and-install", () => {
+    if (!autoUpdater) return;
+    isQuitting = true;
+    try { autoUpdater.quitAndInstall(); } catch { /* ignore */ }
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {

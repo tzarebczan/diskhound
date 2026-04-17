@@ -95,6 +95,7 @@ export interface GeneralSettings {
   startMinimized: boolean;
   launchOnStartup: boolean;
   theme: "dark" | "light" | "system";
+  autoUpdate: boolean;
 }
 
 export interface ScanningSettings {
@@ -334,6 +335,18 @@ export interface FullDiffResult {
   truncated: boolean;
 }
 
+// ── Auto-Update Types ──────────────────────────────────────
+
+export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "up-to-date" | "error";
+
+export interface UpdateStatus {
+  phase: UpdatePhase;
+  currentVersion: string;
+  availableVersion?: string;
+  downloadPercent?: number;
+  errorMessage?: string;
+}
+
 // ── Duplicate Detection Types ──────────────────────────────
 
 export type DuplicateScanStatus = "idle" | "walking" | "hashing" | "done" | "cancelled" | "error";
@@ -426,6 +439,11 @@ export interface DiskhoundNativeApi {
   // Theme
   applyTheme: (theme: "dark" | "light") => void;
 
+  // Auto-update
+  checkForUpdates: () => Promise<void>;
+  quitAndInstall: () => void;
+  onUpdateStatus: (listener: (status: UpdateStatus) => void) => () => void;
+
   // Tray
   minimizeToTray: () => void;
 
@@ -444,10 +462,11 @@ export function defaultScanOptions(): ScanOptions {
 export function defaultSettings(): AppSettings {
   return {
     general: {
-      minimizeToTray: false,
+      minimizeToTray: true,
       startMinimized: false,
-      launchOnStartup: false,
+      launchOnStartup: true,
       theme: "dark",
+      autoUpdate: true,
     },
     scanning: {
       defaultRootPath: "",
@@ -510,6 +529,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
       startMinimized: minimizeToTray && Boolean(merged.general.startMinimized),
       launchOnStartup: Boolean(merged.general.launchOnStartup),
       theme: isThemeValue(merged.general.theme) ? merged.general.theme : defaults.general.theme,
+      autoUpdate: merged.general.autoUpdate === undefined ? defaults.general.autoUpdate : Boolean(merged.general.autoUpdate),
     },
     scanning: {
       defaultRootPath:
