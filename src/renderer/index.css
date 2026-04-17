@@ -2647,6 +2647,16 @@ button, input, select, textarea { font: inherit; }
 .changes-full-diff-stats .grew { color: var(--red-dim); }
 .changes-full-diff-stats .shrank { color: var(--green-dim); }
 .changes-full-diff-stats .removed { color: var(--green); }
+
+.changes-full-diff-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.changes-full-diff-controls .filter-input {
+  width: 220px;
+}
 .changes-empty-detail {
   padding: 40px 16px;
   text-align: center;

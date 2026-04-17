@@ -4,7 +4,6 @@ import * as Path from "node:path";
 import { createGzip, createGunzip } from "node:zlib";
 import { createReadStream, createWriteStream, type WriteStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { pipeline } from "node:stream/promises";
 
 import type { FullDiffResult, FullFileChange } from "./contracts";
 import { normPath } from "./pathUtils";
@@ -167,6 +166,3 @@ export async function deleteIndex(id: string): Promise<void> {
     await FSP.unlink(indexFilePath(id));
   } catch { /* already gone */ }
 }
-
-// Re-export for the stream pipeline to avoid unused import warnings
-export const _pipeline = pipeline;

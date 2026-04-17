@@ -628,6 +628,14 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onSho
   onEasyMove: (path: string) => void;
   onShowTopN: () => void;
 }) {
+  const [filter, setFilter] = useState("");
+
+  const visibleChanges = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return diff.changes;
+    return diff.changes.filter((c) => c.path.toLowerCase().includes(q));
+  }, [diff.changes, filter]);
+
   return (
     <>
       <div className="changes-full-diff-header">
@@ -640,18 +648,33 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onSho
           {diff.totalShrank > 0 && <span className="shrank">{diff.totalShrank.toLocaleString()} shrank</span>}
           {diff.totalRemoved > 0 && <span className="removed">−{diff.totalRemoved.toLocaleString()} removed</span>}
         </div>
-        <button className="action-btn" onClick={onShowTopN}>Back to top-N</button>
+        <div className="changes-full-diff-controls">
+          <input
+            className="filter-input"
+            value={filter}
+            onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
+            placeholder="Filter by path..."
+          />
+          <button className="action-btn" onClick={onShowTopN}>Back to top-N</button>
+        </div>
       </div>
-      {diff.truncated && (
+      {diff.truncated && !filter && (
         <div className="changes-caveat">
           Showing the top {diff.changes.length.toLocaleString()} changes by impact.
           {diff.totalChanges - diff.changes.length > 0 && ` ${(diff.totalChanges - diff.changes.length).toLocaleString()} more exist in the index.`}
         </div>
       )}
-      {diff.changes.length === 0 && (
-        <div className="changes-empty-detail">No file-level changes detected</div>
+      {filter && (
+        <div className="changes-caveat">
+          {visibleChanges.length.toLocaleString()} match{visibleChanges.length !== 1 ? "es" : ""} for "{filter}"
+        </div>
       )}
-      {diff.changes.map((change: FullFileChange) => {
+      {visibleChanges.length === 0 && (
+        <div className="changes-empty-detail">
+          {filter ? "No matches" : "No file-level changes detected"}
+        </div>
+      )}
+      {visibleChanges.map((change: FullFileChange) => {
         const isBusy = busy.has(change.path);
         const isActionable = change.kind !== "removed";
         const name = change.path.split(/[\\/]/).pop() ?? change.path;

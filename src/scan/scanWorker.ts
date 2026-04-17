@@ -1,4 +1,4 @@
-import type { Dirent, Stats, WriteStream } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { createWriteStream, mkdirSync } from "node:fs";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
@@ -66,16 +66,13 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
 
   // Optional full-file index writer (gzipped NDJSON) for real diff tracking
   let indexGzip: ReturnType<typeof createGzip> | null = null;
-  let indexFile: WriteStream | null = null;
   if (input.indexOutput) {
     try {
       mkdirSync(Path.dirname(input.indexOutput), { recursive: true });
       indexGzip = createGzip({ level: 6 });
-      indexFile = createWriteStream(input.indexOutput);
-      indexGzip.pipe(indexFile);
+      indexGzip.pipe(createWriteStream(input.indexOutput));
     } catch {
       indexGzip = null;
-      indexFile = null;
     }
   }
   const writeIndexEntry = (path: string, size: number, mtime: number) => {
@@ -92,7 +89,6 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       indexGzip!.end(() => resolve());
     });
     indexGzip = null;
-    indexFile = null;
   };
 
   directoryTotals.set(rootPath, {
