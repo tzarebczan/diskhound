@@ -1,6 +1,8 @@
-import type { Dirent, Stats } from "node:fs";
+import type { Dirent, Stats, WriteStream } from "node:fs";
+import { createWriteStream, mkdirSync } from "node:fs";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
+import { createGzip } from "node:zlib";
 import { parentPort } from "node:worker_threads";
 
 import {
@@ -62,6 +64,37 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
   let bytesSeen = 0;
   let lastEmitAt = 0;
 
+  // Optional full-file index writer (gzipped NDJSON) for real diff tracking
+  let indexGzip: ReturnType<typeof createGzip> | null = null;
+  let indexFile: WriteStream | null = null;
+  if (input.indexOutput) {
+    try {
+      mkdirSync(Path.dirname(input.indexOutput), { recursive: true });
+      indexGzip = createGzip({ level: 6 });
+      indexFile = createWriteStream(input.indexOutput);
+      indexGzip.pipe(indexFile);
+    } catch {
+      indexGzip = null;
+      indexFile = null;
+    }
+  }
+  const writeIndexEntry = (path: string, size: number, mtime: number) => {
+    if (!indexGzip) return;
+    try {
+      indexGzip.write(JSON.stringify({ p: path, s: size, m: mtime }) + "\n");
+    } catch {
+      indexGzip = null;
+    }
+  };
+  const finalizeIndex = async () => {
+    if (!indexGzip) return;
+    await new Promise<void>((resolve) => {
+      indexGzip!.end(() => resolve());
+    });
+    indexGzip = null;
+    indexFile = null;
+  };
+
   directoryTotals.set(rootPath, {
     path: rootPath,
     size: 0,
@@ -101,7 +134,7 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
 
   while (directoryStack.length > 0) {
     if (cancelled) {
-      // Emit final snapshot with cancelled status before exiting
+      await finalizeIndex();
       emitSnapshot("cancelled");
       return;
     }
@@ -188,11 +221,13 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
         upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
         rollupDirectorySize(rootPath, directoryPath, fileRecord.size, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
         rollupExtension(extensionTotals, fileRecord.extension, fileRecord.size);
+        writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt);
         maybeEmitProgress();
       }
     }
   }
 
+  await finalizeIndex();
   emitSnapshot("done");
 
   function maybeEmitProgress() {

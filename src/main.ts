@@ -40,6 +40,7 @@ import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
 import { easyMove, easyMoveBack, getEasyMoves, initEasyMoveStore } from "./shared/easyMoveStore";
 import {
+  consumeLastPrunedIds,
   getScanHistory,
   getLatestPair,
   initScanHistory,
@@ -47,7 +48,15 @@ import {
   saveScanToHistory,
 } from "./shared/scanHistory";
 import { computeDiff } from "./shared/scanDiff";
+import {
+  deleteIndex,
+  diffIndexes,
+  indexFilePath,
+  initScanIndex,
+  loadIndex,
+} from "./shared/scanIndex";
 import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
+import { randomUUID } from "node:crypto";
 import { analyzeForCleanup } from "./shared/suggestions";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 
@@ -68,11 +77,13 @@ type WorkerScanSession = {
   active: boolean;
   trigger: "manual" | "scheduled";
   stop: () => Promise<void>;
+  tempIndexPath?: string;
 };
 
 type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
   active: boolean;
   trigger: "manual" | "scheduled";
+  tempIndexPath?: string;
 };
 
 let mainWindow: BrowserWindow | null = null;
@@ -146,8 +157,9 @@ void app.whenReady().then(async () => {
   // Initialize easy-move store
   initEasyMoveStore(app.getPath("userData"));
 
-  // Initialize scan history
+  // Initialize scan history + full-file indexes
   initScanHistory(app.getPath("userData"));
+  initScanIndex(app.getPath("userData"));
 
   // ── Scan helpers ──────────────────────────────────────────
 
@@ -197,7 +209,21 @@ void app.whenReady().then(async () => {
       if (message.type === "done") {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
-        await saveScanToHistory(message.snapshot);
+        const historyId = await saveScanToHistory(message.snapshot);
+
+        // Rename the temp index file to match the history entry ID
+        if (historyId && session.tempIndexPath) {
+          try {
+            await FS.rename(session.tempIndexPath, indexFilePath(historyId));
+          } catch {
+            // Scanner may have skipped or failed to write the index — ignore
+          }
+        }
+
+        // Delete index files for any history entries that just got pruned
+        for (const prunedId of consumeLastPrunedIds()) {
+          void deleteIndex(prunedId);
+        }
       }
 
       await broadcastSnapshot(message.snapshot);
@@ -277,6 +303,10 @@ void app.whenReady().then(async () => {
     if (!session.active) return;
     session.active = false;
     if (activeScan === session) activeScan = null;
+    // Clean up orphaned temp index file
+    if (session.tempIndexPath) {
+      try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
+    }
     await broadcastSnapshot(
       await buildErrorSnapshot(
         startingSnapshot,
@@ -292,11 +322,13 @@ void app.whenReady().then(async () => {
   ): { session: WorkerScanSession; startingSnapshot: ScanSnapshot } => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
+    const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
 
     const session: WorkerScanSession = {
       kind: "worker",
       active: true,
       trigger,
+      tempIndexPath,
       stop: async () => {
         // Ask the worker to stop gracefully first
         worker.postMessage({ type: "cancel" });
@@ -330,6 +362,7 @@ void app.whenReady().then(async () => {
           topFileLimit: settings.scanning.topFileLimit,
           topDirectoryLimit: settings.scanning.topDirectoryLimit,
         } : undefined,
+        indexOutput: tempIndexPath,
       },
     });
 
@@ -342,6 +375,7 @@ void app.whenReady().then(async () => {
     trigger: "manual" | "scheduled",
   ): { session: ActiveScanSession; startingSnapshot: ScanSnapshot } => {
     const nativeStartingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "native-sidecar");
+    const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
 
     // Pass configurable limits from settings to the native scanner
     const currentSettings = settingsStore?.get();
@@ -357,7 +391,7 @@ void app.whenReady().then(async () => {
 
     const nativeResult = createNativeScannerSession(
       projectRoot,
-      { rootPath, options: scanOptions, limits: scanLimits },
+      { rootPath, options: scanOptions, limits: scanLimits, indexOutput: tempIndexPath },
       {
         onMessage: (message) => {
           if (!sessionRef) {
@@ -379,7 +413,7 @@ void app.whenReady().then(async () => {
 
     if (nativeResult) {
       // Wire up the session with active=true BEFORE flushing buffered messages
-      sessionRef = Object.assign(nativeResult, { active: true, trigger }) as ActiveScanSession;
+      sessionRef = Object.assign(nativeResult, { active: true, trigger, tempIndexPath }) as ActiveScanSession;
 
       // Flush any messages that arrived during construction
       for (const msg of earlyMessages) {
@@ -403,6 +437,9 @@ void app.whenReady().then(async () => {
 
     session.active = false;
     await session.stop();
+    if (session.tempIndexPath) {
+      try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
+    }
     const cancelledSnapshot = await scanStore.update((current) => ({
       ...current,
       status: current.status === "running" ? "cancelled" : current.status,
@@ -551,6 +588,15 @@ void app.whenReady().then(async () => {
     ]);
     if (!baseline || !current) return null;
     return computeDiff(baseline, current, baselineId, currentId);
+  });
+
+  ipcMain.handle("diskhound:compute-full-scan-diff", async (_event, baselineId: string, currentId: string, limit?: number) => {
+    const [baseline, current] = await Promise.all([
+      loadIndex(indexFilePath(baselineId)),
+      loadIndex(indexFilePath(currentId)),
+    ]);
+    if (baseline.size === 0 && current.size === 0) return null;
+    return diffIndexes(baselineId, currentId, baseline, current, limit ?? 500);
   });
 
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {

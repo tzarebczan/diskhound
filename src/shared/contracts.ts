@@ -61,6 +61,8 @@ export interface ScanStartInput {
     topFileLimit: number;
     topDirectoryLimit: number;
   };
+  /** If set, scanner writes a gzipped NDJSON index of every file to this path. */
+  indexOutput?: string;
 }
 
 export type WorkerToMainMessage =
@@ -303,6 +305,35 @@ export interface ScanDiffResult {
   timeBetweenMs: number;
 }
 
+// ── Full File-Index Diff Types ─────────────────────────────
+// Built from the complete file index (every file seen), not top-N.
+
+export type FullFileChangeKind = "added" | "removed" | "grew" | "shrank";
+
+export interface FullFileChange {
+  path: string;
+  kind: FullFileChangeKind;
+  size: number;
+  previousSize: number;
+  deltaBytes: number;
+}
+
+export interface FullDiffResult {
+  baselineId: string;
+  currentId: string;
+  totalChanges: number;
+  totalAdded: number;
+  totalRemoved: number;
+  totalGrew: number;
+  totalShrank: number;
+  totalBytesAdded: number;
+  totalBytesRemoved: number;
+  /** Sorted by absolute deltaBytes descending. Capped at a configurable limit. */
+  changes: FullFileChange[];
+  /** True when more changes exist than are included in `changes`. */
+  truncated: boolean;
+}
+
 // ── Duplicate Detection Types ──────────────────────────────
 
 export type DuplicateScanStatus = "idle" | "walking" | "hashing" | "done" | "cancelled" | "error";
@@ -389,6 +420,8 @@ export interface DiskhoundNativeApi {
   getScanHistory: (rootPath: string) => Promise<ScanHistoryEntry[]>;
   computeScanDiff: (baselineId: string, currentId: string) => Promise<ScanDiffResult | null>;
   getLatestDiff: (rootPath: string) => Promise<ScanDiffResult | null>;
+  /** Compute the full per-file diff from the persisted index files (not top-N). */
+  computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;
 
   // Theme
   applyTheme: (theme: "dark" | "light") => void;

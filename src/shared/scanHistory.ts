@@ -44,6 +44,15 @@ function snapshotPath(id: string): string {
   return Path.join(historyDir, `${SNAPSHOT_PREFIX}${id}.json`);
 }
 
+/** IDs of entries pruned by the most recent saveScanToHistory call. */
+let lastPrunedIds: string[] = [];
+
+export function consumeLastPrunedIds(): string[] {
+  const ids = lastPrunedIds;
+  lastPrunedIds = [];
+  return ids;
+}
+
 /** Save a completed scan to history. Returns the history entry ID. */
 export async function saveScanToHistory(snapshot: ScanSnapshot): Promise<string | null> {
   if (!historyDir || !snapshot.rootPath || snapshot.status !== "done") return null;
@@ -75,11 +84,13 @@ export async function saveScanToHistory(snapshot: ScanSnapshot): Promise<string 
     .filter((e) => normPath(e.rootPath) === normPath(rootPath))
     .sort((a, b) => b.scannedAt - a.scannedAt);
 
+  lastPrunedIds = [];
   if (rootEntries.length > MAX_HISTORY_PER_ROOT) {
     const toRemove = rootEntries.slice(MAX_HISTORY_PER_ROOT);
     for (const old of toRemove) {
       index = index.filter((e) => e.id !== old.id);
       try { FS.unlinkSync(snapshotPath(old.id)); } catch { /* gone */ }
+      lastPrunedIds.push(old.id);
     }
   }
 

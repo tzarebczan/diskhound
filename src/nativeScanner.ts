@@ -81,6 +81,9 @@ export function createNativeScannerSession(
   if (input.limits?.topDirectoryLimit) {
     args.push("--top-directory-limit", String(input.limits.topDirectoryLimit));
   }
+  if (input.indexOutput) {
+    args.push("--index-output", input.indexOutput);
+  }
 
   const child = spawn(binaryPath, args, {
     cwd: projectRoot,

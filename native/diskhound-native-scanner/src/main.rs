@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs::File;
 use std::io::{self, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use flate2::Compression;
+use flate2::write::GzEncoder;
 
 /// Global cancellation flag — set by signal handlers.
 static CANCELLED: AtomicBool = AtomicBool::new(false);
@@ -33,12 +37,53 @@ struct ScanInput {
     root_path: PathBuf,
     top_file_limit: usize,
     top_directory_limit: usize,
+    index_output: Option<PathBuf>,
 }
 
 /// Empty options struct — kept for IPC contract stability with the JS side.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanOptions {}
+
+#[derive(Serialize)]
+struct IndexEntry<'a> {
+    p: &'a str,
+    s: u64,
+    m: u64,
+}
+
+/// Streams one gzipped NDJSON line per file to an output path.
+/// Stdout is reserved for the scan snapshot JSON protocol — this writes
+/// to the dedicated index file only.
+struct IndexWriter {
+    encoder: GzEncoder<BufWriter<File>>,
+}
+
+impl IndexWriter {
+    fn create(path: &Path) -> io::Result<Self> {
+        let file = File::create(path)?;
+        // BufWriter sits between the gzip encoder and the file so that gzip
+        // (which does not buffer) isn't making syscalls on every small write.
+        let buffered = BufWriter::new(file);
+        let encoder = GzEncoder::new(buffered, Compression::default());
+        Ok(IndexWriter { encoder })
+    }
+
+    fn write_entry(&mut self, path: &str, size: u64, mtime: u64) -> io::Result<()> {
+        let entry = IndexEntry {
+            p: path,
+            s: size,
+            m: mtime,
+        };
+        serde_json::to_writer(&mut self.encoder, &entry)?;
+        self.encoder.write_all(b"\n")
+    }
+
+    fn finish(self) -> io::Result<()> {
+        let mut buffered = self.encoder.finish()?;
+        buffered.flush()
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +170,7 @@ struct ScanState {
     directory_totals: HashMap<String, DirectoryHotspot>,
     extension_totals: HashMap<String, ExtensionBucket>,
     last_emit_elapsed_ms: u128,
+    index_writer: Option<IndexWriter>,
 }
 
 fn main() {
@@ -193,12 +239,26 @@ fn run() -> Result<(), String> {
         )
     })?;
 
+    let index_writer = match &input.index_output {
+        Some(path) => match IndexWriter::create(path) {
+            Ok(writer) => Some(writer),
+            Err(error) => {
+                return Err(format!(
+                    "Failed to create index output at {}: {error}",
+                    path.to_string_lossy()
+                ));
+            }
+        },
+        None => None,
+    };
+
     let root_path_string = normalize_path(&root_path);
     let mut state = ScanState {
         input: ScanInput {
             root_path: root_path.clone(),
             top_file_limit: input.top_file_limit,
             top_directory_limit: input.top_directory_limit,
+            index_output: input.index_output.clone(),
         },
         root_path_string: root_path_string.clone(),
         started_at_ms: unix_timestamp_ms(SystemTime::now()),
@@ -212,6 +272,7 @@ fn run() -> Result<(), String> {
         directory_totals: HashMap::new(),
         extension_totals: HashMap::new(),
         last_emit_elapsed_ms: 0,
+        index_writer,
     };
 
     state.directory_totals.insert(
@@ -232,10 +293,19 @@ fn run() -> Result<(), String> {
         ScanStatus::Done
     };
 
-    emit_message(&Message::Done {
+    let emit_result = emit_message(&Message::Done {
         snapshot: state.snapshot(final_status, None),
     })
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string());
+
+    // Flush and close the index writer in both the success and cancelled
+    // paths. Best-effort: if finalizing the gzip stream fails, drop it
+    // silently rather than crashing the scan.
+    if let Some(writer) = state.index_writer.take() {
+        let _ = writer.finish();
+    }
+
+    emit_result
 }
 
 #[cfg(windows)]
@@ -426,6 +496,19 @@ fn record_file(state: &mut ScanState, file_record: ScanFileRecord) -> Result<(),
         &file_record.extension,
         file_record.size,
     );
+
+    // Best-effort index write. If it fails partway through the scan
+    // (e.g. disk full), drop the writer so we stop trying but let the
+    // snapshot protocol keep working.
+    if let Some(writer) = state.index_writer.as_mut() {
+        if writer
+            .write_entry(&file_record.path, file_record.size, file_record.modified_at)
+            .is_err()
+        {
+            state.index_writer = None;
+        }
+    }
+
     maybe_emit_progress(state)
 }
 
@@ -487,6 +570,7 @@ fn parse_args() -> Result<ScanInput, String> {
     let mut root_path: Option<PathBuf> = None;
     let mut top_file_limit: Option<usize> = None;
     let mut top_directory_limit: Option<usize> = None;
+    let mut index_output: Option<PathBuf> = None;
     let mut args = std::env::args().skip(1);
 
     while let Some(argument) = args.next() {
@@ -513,6 +597,12 @@ fn parse_args() -> Result<ScanInput, String> {
                     value.parse::<usize>().map_err(|_| format!("Invalid --top-directory-limit: {value}"))?,
                 );
             }
+            "--index-output" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| String::from("Expected a path after --index-output"))?;
+                index_output = Some(PathBuf::from(value));
+            }
             unknown => {
                 return Err(format!("Unknown argument: {unknown}"));
             }
@@ -528,6 +618,7 @@ fn parse_args() -> Result<ScanInput, String> {
         root_path,
         top_file_limit: top_file_limit.unwrap_or(DEFAULT_TOP_FILE_LIMIT),
         top_directory_limit: top_directory_limit.unwrap_or(DEFAULT_TOP_DIRECTORY_LIMIT),
+        index_output,
     })
 }
 

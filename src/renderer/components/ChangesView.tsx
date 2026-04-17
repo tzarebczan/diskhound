@@ -4,6 +4,8 @@ import type {
   DirectoryDelta,
   ExtensionDelta,
   FileDelta,
+  FullDiffResult,
+  FullFileChange,
   ScanDiffResult,
   ScanHistoryEntry,
   ScanSnapshot,
@@ -87,6 +89,8 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const [selectedBaseline, setSelectedBaseline] = useState<string | null>(null);
   const [activeQuickSelect, setActiveQuickSelect] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("files");
+  const [fullDiff, setFullDiff] = useState<FullDiffResult | null>(null);
+  const [fullDiffLoading, setFullDiffLoading] = useState(false);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const prevStatusRef = useRef(snapshot.status);
 
@@ -168,10 +172,19 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     if (!history.length) return;
     const currentId = history[0].id;
     setSelectedBaseline(baselineId);
+    setFullDiff(null); // invalidate — applies to different baseline now
     setLoading(true);
     const d = await nativeApi.computeScanDiff(baselineId, currentId);
     if (d) setDiff(d);
     setLoading(false);
+  };
+
+  const loadFullDiff = async () => {
+    if (!diff) return;
+    setFullDiffLoading(true);
+    const result = await nativeApi.computeFullScanDiff(diff.baselineId, diff.currentId, 1000);
+    if (result) setFullDiff(result);
+    setFullDiffLoading(false);
   };
 
   if (!rootPath) {
@@ -319,14 +332,39 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
           {/* Detail list */}
           <div className="changes-detail-scroll">
-            {detailTab === "files" && (
-              <FileDeltaList
-                deltas={diff.fileDeltas}
+            {detailTab === "files" && !fullDiff && (
+              <>
+                <FileDeltaList
+                  deltas={diff.fileDeltas}
+                  busy={busy}
+                  onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
+                  onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
+                  onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
+                  onEasyMove={(p) => void handleEasyMove(p)}
+                />
+                <div className="changes-full-diff-cta">
+                  <button
+                    className="scan-btn"
+                    disabled={fullDiffLoading}
+                    onClick={() => void loadFullDiff()}
+                  >
+                    {fullDiffLoading ? "Loading..." : "Browse all changes"}
+                  </button>
+                  <span className="changes-full-diff-hint">
+                    Load the full per-file diff from the persisted index.
+                  </span>
+                </div>
+              </>
+            )}
+            {detailTab === "files" && fullDiff && (
+              <FullDiffList
+                diff={fullDiff}
                 busy={busy}
                 onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
                 onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
                 onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
                 onEasyMove={(p) => void handleEasyMove(p)}
+                onShowTopN={() => setFullDiff(null)}
               />
             )}
             {detailTab === "directories" && (
@@ -577,5 +615,81 @@ function formatTimeBetween(ms: number): string {
   if (hours < 24) return `${hours}h ${mins % 60}m`;
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
+}
+
+// ── Full diff list (sourced from the persisted file index) ──
+
+function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onShowTopN }: {
+  diff: FullDiffResult;
+  busy: Set<string>;
+  onReveal: (path: string) => void;
+  onOpen: (path: string) => void;
+  onTrash: (path: string) => void;
+  onEasyMove: (path: string) => void;
+  onShowTopN: () => void;
+}) {
+  return (
+    <>
+      <div className="changes-full-diff-header">
+        <div className="changes-full-diff-stats">
+          <span>
+            <strong>{diff.totalChanges.toLocaleString()}</strong> total
+          </span>
+          {diff.totalAdded > 0 && <span className="added">+{diff.totalAdded.toLocaleString()} added</span>}
+          {diff.totalGrew > 0 && <span className="grew">{diff.totalGrew.toLocaleString()} grew</span>}
+          {diff.totalShrank > 0 && <span className="shrank">{diff.totalShrank.toLocaleString()} shrank</span>}
+          {diff.totalRemoved > 0 && <span className="removed">−{diff.totalRemoved.toLocaleString()} removed</span>}
+        </div>
+        <button className="action-btn" onClick={onShowTopN}>Back to top-N</button>
+      </div>
+      {diff.truncated && (
+        <div className="changes-caveat">
+          Showing the top {diff.changes.length.toLocaleString()} changes by impact.
+          {diff.totalChanges - diff.changes.length > 0 && ` ${(diff.totalChanges - diff.changes.length).toLocaleString()} more exist in the index.`}
+        </div>
+      )}
+      {diff.changes.length === 0 && (
+        <div className="changes-empty-detail">No file-level changes detected</div>
+      )}
+      {diff.changes.map((change: FullFileChange) => {
+        const isBusy = busy.has(change.path);
+        const isActionable = change.kind !== "removed";
+        const name = change.path.split(/[\\/]/).pop() ?? change.path;
+        return (
+          <div key={change.path} className="changes-row">
+            <div className={`changes-row-badge ${change.kind}`}>{change.kind}</div>
+            <div className="changes-row-info">
+              <div className="changes-row-name">{name}</div>
+              <div className="changes-row-path">{change.path}</div>
+            </div>
+            <div className={`changes-row-delta ${change.deltaBytes <= 0 ? "positive" : "negative"}`}>
+              {change.deltaBytes > 0 ? "+" : ""}{formatBytes(Math.abs(change.deltaBytes))}
+            </div>
+            <div className="changes-row-sizes">
+              {change.kind === "added" ? (
+                <span>{formatBytes(change.size)}</span>
+              ) : change.kind === "removed" ? (
+                <span className="changes-row-prev">{formatBytes(change.previousSize)}</span>
+              ) : (
+                <>
+                  <span className="changes-row-prev">{formatBytes(change.previousSize)}</span>
+                  <span className="changes-row-arrow">&rarr;</span>
+                  <span>{formatBytes(change.size)}</span>
+                </>
+              )}
+            </div>
+            {isActionable && (
+              <div className="changes-row-actions">
+                <button className="action-btn" disabled={isBusy} onClick={() => onReveal(change.path)}>Reveal</button>
+                <button className="action-btn" disabled={isBusy} onClick={() => onOpen(change.path)}>Open</button>
+                <button className="action-btn warn" disabled={isBusy} onClick={() => onTrash(change.path)}>Trash</button>
+                <button className="action-btn" disabled={isBusy} onClick={() => onEasyMove(change.path)}>Move</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </>
+  );
 }
 
