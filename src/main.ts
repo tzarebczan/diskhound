@@ -779,14 +779,20 @@ void app.whenReady().then(async () => {
     try {
       const { autoUpdater } = require("electron-updater");
       autoUpdater.autoDownload = false;
+      autoUpdater.autoInstallOnAppQuit = true;
+      // Request UAC elevation if installed to a system directory (e.g. Program Files)
+      if (process.platform === "win32") {
+        autoUpdater.allowElevation = true;
+      }
       autoUpdater.on("update-available", () => {
-        sendToast("info", "Update available", "A new version of DiskHound is available. Restart to update.");
+        sendToast("info", "Update available", "A new version of DiskHound is available.");
         autoUpdater.downloadUpdate();
       });
       autoUpdater.on("update-downloaded", () => {
-        sendToast("success", "Update ready", "Restart DiskHound to apply the update.");
+        sendToast("success", "Update ready", "The update will be applied when you restart DiskHound.");
       });
-      autoUpdater.checkForUpdates().catch(() => { /* offline or no releases */ });
+      autoUpdater.on("error", () => { /* update check failed — offline or rate-limited */ });
+      autoUpdater.checkForUpdates().catch(() => {});
     } catch {
       // electron-updater not available (dev mode or build issue)
     }
