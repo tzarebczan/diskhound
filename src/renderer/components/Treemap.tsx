@@ -5,10 +5,11 @@ import { formatBytes } from "../lib/format";
 import { useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
-import { buildTreemapRects, type TreemapRect } from "../lib/treemap";
+import { buildTreemapRects, type TreemapAreaMode, type TreemapRect } from "../lib/treemap";
 
 interface Props {
   files: ScanFileRecord[];
+  areaMode?: TreemapAreaMode;
   onFileClick?: (file: ScanFileRecord) => void;
 }
 
@@ -19,9 +20,8 @@ interface ContextMenuState {
 }
 
 const GAP = 1;
-const DPR = typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1;
 
-export function Treemap({ files, onFileClick }: Props) {
+export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -61,18 +61,20 @@ export function Treemap({ files, onFileClick }: Props) {
     const canvas = canvasRef.current;
     if (!canvas || dims.w === 0 || dims.h === 0) return;
 
-    canvas.width = dims.w * DPR;
-    canvas.height = dims.h * DPR;
+    const dpr = typeof window !== "undefined" ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+
+    canvas.width = dims.w * dpr;
+    canvas.height = dims.h * dpr;
     canvas.style.width = `${dims.w}px`;
     canvas.style.height = `${dims.h}px`;
 
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.scale(DPR, DPR);
+    ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dims.w, dims.h);
 
-    const rects = buildTreemapRects(files, dims.w, dims.h);
+    const rects = buildTreemapRects(files, dims.w, dims.h, areaMode);
     rectsRef.current = rects;
 
     for (const r of rects) {
@@ -134,7 +136,7 @@ export function Treemap({ files, onFileClick }: Props) {
         }
       }
     }
-  }, [files, dims]);
+  }, [files, dims, areaMode]);
 
   const hitTest = useCallback((e: MouseEvent): ScanFileRecord | null => {
     const canvas = canvasRef.current;

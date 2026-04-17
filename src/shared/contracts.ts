@@ -445,6 +445,129 @@ export function defaultSettings(): AppSettings {
   };
 }
 
+function clampInteger(value: unknown, minimum: number, maximum: number, fallback: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return fallback;
+  }
+
+  const rounded = Math.round(value);
+  return Math.min(maximum, Math.max(minimum, rounded));
+}
+
+function isThemeValue(value: unknown): value is GeneralSettings["theme"] {
+  return value === "dark" || value === "light" || value === "system";
+}
+
+export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSettings {
+  const defaults = defaultSettings();
+  const merged: AppSettings = {
+    general: { ...defaults.general, ...(input?.general ?? {}) },
+    scanning: { ...defaults.scanning, ...(input?.scanning ?? {}) },
+    monitoring: { ...defaults.monitoring, ...(input?.monitoring ?? {}) },
+    notifications: { ...defaults.notifications, ...(input?.notifications ?? {}) },
+    cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
+    recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
+  };
+
+  const minimizeToTray = Boolean(merged.general.minimizeToTray);
+
+  return {
+    general: {
+      minimizeToTray,
+      startMinimized: minimizeToTray && Boolean(merged.general.startMinimized),
+      launchOnStartup: Boolean(merged.general.launchOnStartup),
+      theme: isThemeValue(merged.general.theme) ? merged.general.theme : defaults.general.theme,
+    },
+    scanning: {
+      defaultRootPath:
+        typeof merged.scanning.defaultRootPath === "string"
+          ? merged.scanning.defaultRootPath
+          : defaults.scanning.defaultRootPath,
+      topFileLimit: clampInteger(
+        merged.scanning.topFileLimit,
+        25,
+        5000,
+        defaults.scanning.topFileLimit,
+      ),
+      topDirectoryLimit: clampInteger(
+        merged.scanning.topDirectoryLimit,
+        25,
+        10000,
+        defaults.scanning.topDirectoryLimit,
+      ),
+    },
+    monitoring: {
+      enabled: Boolean(merged.monitoring.enabled),
+      checkIntervalMinutes: clampInteger(
+        merged.monitoring.checkIntervalMinutes,
+        1,
+        1440,
+        defaults.monitoring.checkIntervalMinutes,
+      ),
+      alertThresholdBytes: clampInteger(
+        merged.monitoring.alertThresholdBytes,
+        0,
+        50 * 1024 ** 4,
+        defaults.monitoring.alertThresholdBytes,
+      ),
+      alertThresholdPercent: clampInteger(
+        merged.monitoring.alertThresholdPercent,
+        1,
+        100,
+        defaults.monitoring.alertThresholdPercent,
+      ),
+      fullScanIntervalHours: clampInteger(
+        merged.monitoring.fullScanIntervalHours,
+        0,
+        24 * 30,
+        defaults.monitoring.fullScanIntervalHours,
+      ),
+      requireIdle: Boolean(merged.monitoring.requireIdle),
+      idleMinutes: clampInteger(
+        merged.monitoring.idleMinutes,
+        1,
+        240,
+        defaults.monitoring.idleMinutes,
+      ),
+    },
+    notifications: {
+      scanComplete: Boolean(merged.notifications.scanComplete),
+      deltaAlerts: Boolean(merged.notifications.deltaAlerts),
+    },
+    cleanup: {
+      autoDetectTempFiles: Boolean(merged.cleanup.autoDetectTempFiles),
+      autoDetectCaches: Boolean(merged.cleanup.autoDetectCaches),
+      autoDetectOldDownloads: Boolean(merged.cleanup.autoDetectOldDownloads),
+      oldFileThresholdDays: clampInteger(
+        merged.cleanup.oldFileThresholdDays,
+        1,
+        3650,
+        defaults.cleanup.oldFileThresholdDays,
+      ),
+      safeDeleteToTrash: Boolean(merged.cleanup.safeDeleteToTrash),
+    },
+    recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])
+      .filter((scan): scan is RecentScan =>
+        Boolean(scan) &&
+        typeof scan.path === "string" &&
+        scan.path.length > 0 &&
+        typeof scan.scannedAt === "number" &&
+        Number.isFinite(scan.scannedAt) &&
+        typeof scan.filesFound === "number" &&
+        Number.isFinite(scan.filesFound) &&
+        typeof scan.bytesFound === "number" &&
+        Number.isFinite(scan.bytesFound),
+      )
+      .slice(0, 10)
+      .map((scan) => ({
+        path: scan.path,
+        scannedAt: Math.round(scan.scannedAt),
+        filesFound: Math.max(0, Math.round(scan.filesFound)),
+        bytesFound: Math.max(0, Math.round(scan.bytesFound)),
+      })),
+  };
+}
+
 export function createIdleScanSnapshot(): ScanSnapshot {
   return {
     status: "idle",

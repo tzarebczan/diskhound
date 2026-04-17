@@ -3,7 +3,7 @@ import * as Path from "node:path";
 
 import { app } from "electron";
 
-import { defaultSettings, type AppSettings } from "./contracts";
+import { normalizeAppSettings, defaultSettings, type AppSettings } from "./contracts";
 
 const SETTINGS_FILE_NAME = "settings.json";
 
@@ -22,7 +22,7 @@ export async function createSettingsStore(): Promise<SettingsStore> {
   try {
     const raw = await FS.readFile(settingsPath, "utf8");
     const parsed = JSON.parse(raw) as Partial<AppSettings>;
-    current = mergeSettings(current, parsed);
+    current = normalizeAppSettings(mergeSettings(current, parsed));
   } catch {
     // No existing settings file - use defaults
   }
@@ -35,11 +35,11 @@ export async function createSettingsStore(): Promise<SettingsStore> {
   return {
     get: () => current,
     set: async (next) => {
-      current = next;
+      current = normalizeAppSettings(next);
       await persist(current);
     },
     update: async (transform) => {
-      current = transform(current);
+      current = normalizeAppSettings(transform(current));
       await persist(current);
       return current;
     },

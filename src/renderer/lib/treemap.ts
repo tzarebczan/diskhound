@@ -9,6 +9,20 @@ export interface TreemapRect {
   color: string;
 }
 
+export interface TreemapFeaturedItem {
+  file: ScanFileRecord;
+  share: number;
+}
+
+export type TreemapAreaMode = "compressed" | "exact";
+
+export interface TreemapComposition {
+  featuredFiles: TreemapFeaturedItem[];
+  mapFiles: ScanFileRecord[];
+  trackedBytes: number;
+  remainingBytes: number;
+}
+
 // Extension → color mapping (HSL-based, dark palette)
 // Comprehensive color map — every common file type gets a distinct category color
 const EXT_COLORS: Record<string, string> = {
@@ -65,15 +79,73 @@ const EXT_COLORS: Record<string, string> = {
   ".pagefile": "#4338ca", ".hiberfil": "#4338ca",
 };
 const DEFAULT_COLOR = "#475569";
+const PRIMARY_DOMINANT_SHARE = 0.38;
+const SECONDARY_DOMINANT_SHARE = 0.16;
+const MAX_FEATURED_FILES = 2;
 
 export function colorForExtension(ext: string): string {
   return EXT_COLORS[ext.toLowerCase()] ?? DEFAULT_COLOR;
+}
+
+export function buildTreemapComposition(
+  files: ScanFileRecord[],
+): TreemapComposition {
+  const sorted = [...files].sort((a, b) => b.size - a.size);
+  const trackedBytes = files.reduce((sum, file) => sum + file.size, 0);
+
+  if (sorted.length === 0 || trackedBytes <= 0) {
+    return {
+      featuredFiles: [],
+      mapFiles: sorted,
+      trackedBytes,
+      remainingBytes: trackedBytes,
+    };
+  }
+
+  const featuredFiles: TreemapFeaturedItem[] = [];
+
+  for (let index = 0; index < Math.min(sorted.length, MAX_FEATURED_FILES); index++) {
+    const file = sorted[index];
+    if (!file) continue;
+
+    const share = file.size / trackedBytes;
+    const minShare = index === 0 ? PRIMARY_DOMINANT_SHARE : SECONDARY_DOMINANT_SHARE;
+
+    if (share < minShare) {
+      break;
+    }
+
+    featuredFiles.push({ file, share });
+  }
+
+  if (featuredFiles.length === 0 || sorted.length - featuredFiles.length < 2) {
+    return {
+      featuredFiles: [],
+      mapFiles: sorted,
+      trackedBytes,
+      remainingBytes: trackedBytes,
+    };
+  }
+
+  const mapFiles = sorted.slice(featuredFiles.length);
+  const remainingBytes = Math.max(
+    0,
+    trackedBytes - featuredFiles.reduce((sum, item) => sum + item.file.size, 0),
+  );
+
+  return {
+    featuredFiles,
+    mapFiles,
+    trackedBytes,
+    remainingBytes,
+  };
 }
 
 export function buildTreemapRects(
   files: ScanFileRecord[],
   width: number,
   height: number,
+  areaMode: TreemapAreaMode = "compressed",
 ): TreemapRect[] {
   if (files.length === 0 || width <= 0 || height <= 0) return [];
 
@@ -81,12 +153,15 @@ export function buildTreemapRects(
   // while preserving relative ordering. A 48GB file vs 100MB goes from 480:1
   // to ~22:1 — still clearly larger, but doesn't eat the entire canvas.
   const sorted = [...files].sort((a, b) => b.size - a.size);
-  const compressed = sorted.map((f) => ({ file: f, weight: Math.sqrt(f.size) }));
-  const totalWeight = compressed.reduce((s, c) => s + c.weight, 0);
+  const weighted = sorted.map((file) => ({
+    file,
+    weight: areaMode === "exact" ? file.size : Math.sqrt(file.size),
+  }));
+  const totalWeight = weighted.reduce((sum, item) => sum + item.weight, 0);
   if (totalWeight === 0) return [];
 
   const rects: TreemapRect[] = [];
-  squarify(compressed, { x: 0, y: 0, w: width, h: height }, totalWeight, rects);
+  squarify(weighted, { x: 0, y: 0, w: width, h: height }, totalWeight, rects);
   return rects;
 }
 

@@ -17,6 +17,7 @@ import {
 import {
   createIdleScanSnapshot,
   defaultScanOptions,
+  normalizeAppSettings,
   type AppSettings,
   type DirectoryHotspot,
   type PathActionResult,
@@ -31,6 +32,7 @@ import {
   checkDiskDeltas,
   getDiskSpace,
   getLastFullScanAt,
+  getMonitoringSnapshot,
   initDiskMonitor,
   markFullScan,
 } from "./shared/diskMonitor";
@@ -64,11 +66,13 @@ const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 type WorkerScanSession = {
   kind: "worker";
   active: boolean;
+  trigger: "manual" | "scheduled";
   stop: () => Promise<void>;
 };
 
 type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
   active: boolean;
+  trigger: "manual" | "scheduled";
 };
 
 let mainWindow: BrowserWindow | null = null;
@@ -131,6 +135,13 @@ void app.whenReady().then(async () => {
 
   // Initialize disk monitor with persistent baseline storage
   await initDiskMonitor(app.getPath("userData"));
+  // Prime the cached monitoring snapshot so the UI can show current drive state
+  // without mutating baselines on first render.
+  try {
+    await checkDiskDeltas();
+  } catch {
+    // Best effort - monitoring remains optional
+  }
 
   // Initialize easy-move store
   initEasyMoveStore(app.getPath("userData"));
@@ -224,6 +235,36 @@ void app.whenReady().then(async () => {
             }).show();
           }
         }
+
+        if (session.trigger === "scheduled" && settings?.notifications.deltaAlerts && message.snapshot.rootPath) {
+          const latestPair = getLatestPair(message.snapshot.rootPath);
+          if (latestPair) {
+            const [baseline, current] = await Promise.all([
+              loadHistoricalSnapshot(latestPair.baseline.id),
+              loadHistoricalSnapshot(latestPair.current.id),
+            ]);
+
+            if (baseline && current) {
+              const diff = computeDiff(baseline, current, latestPair.baseline.id, latestPair.current.id);
+              if (diff.totalBytesDelta !== 0) {
+                const grew = diff.totalBytesDelta > 0;
+                const absBytes = formatBytesShort(Math.abs(diff.totalBytesDelta));
+                sendToast(
+                  grew ? "warning" : "success",
+                  "Scheduled rescan found changes",
+                  `${message.snapshot.rootPath} ${grew ? "grew" : "freed"} ${absBytes} since the previous full scan.`,
+                );
+
+                if (Notification.isSupported() && !mainWindow?.isVisible()) {
+                  new Notification({
+                    title: "DiskHound - Scheduled Rescan",
+                    body: `${message.snapshot.rootPath} ${grew ? "grew" : "freed"} ${absBytes}.`,
+                  }).show();
+                }
+              }
+            }
+          }
+        }
       }
     }
   };
@@ -247,6 +288,7 @@ void app.whenReady().then(async () => {
   const createWorkerSession = (
     rootPath: string,
     scanOptions: ScanOptions,
+    trigger: "manual" | "scheduled",
   ): { session: WorkerScanSession; startingSnapshot: ScanSnapshot } => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
@@ -254,6 +296,7 @@ void app.whenReady().then(async () => {
     const session: WorkerScanSession = {
       kind: "worker",
       active: true,
+      trigger,
       stop: async () => {
         // Ask the worker to stop gracefully first
         worker.postMessage({ type: "cancel" });
@@ -296,6 +339,7 @@ void app.whenReady().then(async () => {
   const createPreferredScanSession = (
     rootPath: string,
     scanOptions: ScanOptions,
+    trigger: "manual" | "scheduled",
   ): { session: ActiveScanSession; startingSnapshot: ScanSnapshot } => {
     const nativeStartingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "native-sidecar");
 
@@ -335,7 +379,7 @@ void app.whenReady().then(async () => {
 
     if (nativeResult) {
       // Wire up the session with active=true BEFORE flushing buffered messages
-      sessionRef = Object.assign(nativeResult, { active: true }) as ActiveScanSession;
+      sessionRef = Object.assign(nativeResult, { active: true, trigger }) as ActiveScanSession;
 
       // Flush any messages that arrived during construction
       for (const msg of earlyMessages) {
@@ -348,7 +392,7 @@ void app.whenReady().then(async () => {
       return { session: sessionRef, startingSnapshot: nativeStartingSnapshot };
     }
 
-    return createWorkerSession(rootPath, scanOptions);
+    return createWorkerSession(rootPath, scanOptions, trigger);
   };
 
   const cancelActiveScan = async () => {
@@ -371,12 +415,20 @@ void app.whenReady().then(async () => {
     return cancelledSnapshot;
   };
 
-  const startScan = async (rootPathInput: string, scanOptions: ScanOptions) => {
+  const startScan = async (
+    rootPathInput: string,
+    scanOptions: ScanOptions,
+    trigger: "manual" | "scheduled" = "manual",
+  ) => {
     const resolvedScanOptions = { ...defaultScanOptions(), ...scanOptions };
     const rootPath = Path.resolve(rootPathInput);
     await cancelActiveScan();
 
-    const { session, startingSnapshot } = createPreferredScanSession(rootPath, resolvedScanOptions);
+    const { session, startingSnapshot } = createPreferredScanSession(
+      rootPath,
+      resolvedScanOptions,
+      trigger,
+    );
     activeScan = session;
     await broadcastSnapshot(startingSnapshot);
     return startingSnapshot;
@@ -443,22 +495,24 @@ void app.whenReady().then(async () => {
   ipcMain.handle("diskhound:get-settings", () => settingsStore!.get());
   ipcMain.handle("diskhound:update-settings", async (_event, settings: AppSettings) => {
     const previousSettings = settingsStore!.get();
-    await settingsStore!.set(settings);
+    const normalizedSettings = normalizeAppSettings(settings);
+
+    await settingsStore!.set(normalizedSettings);
 
     // Wire launchOnStartup to OS login items
-    if (settings.general.launchOnStartup !== previousSettings.general.launchOnStartup) {
-      applyLoginItemSettings(settings.general.launchOnStartup);
+    if (normalizedSettings.general.launchOnStartup !== previousSettings.general.launchOnStartup) {
+      applyLoginItemSettings(normalizedSettings.general.launchOnStartup);
     }
 
     // Recreate tray or destroy it based on minimizeToTray toggle
-    if (settings.general.minimizeToTray && !tray) {
+    if (normalizedSettings.general.minimizeToTray && !tray) {
       createTray();
-    } else if (!settings.general.minimizeToTray && tray) {
+    } else if (!normalizedSettings.general.minimizeToTray && tray) {
       tray.destroy();
       tray = null;
     }
 
-    restartMonitoring(settings);
+    restartMonitoring(normalizedSettings);
   });
 
   ipcMain.handle("diskhound:get-recent-scans", () => settingsStore!.get().recentScans ?? []);
@@ -512,7 +566,7 @@ void app.whenReady().then(async () => {
 
   // ── IPC: Monitoring ───────────────────────────────────────
 
-  ipcMain.handle("diskhound:get-monitoring-snapshot", () => checkDiskDeltas());
+  ipcMain.handle("diskhound:get-monitoring-snapshot", () => getMonitoringSnapshot());
   ipcMain.handle("diskhound:get-disk-space", () => getDiskSpace());
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
@@ -616,8 +670,10 @@ void app.whenReady().then(async () => {
       // Check disk deltas
       const snapshot = await checkDiskDeltas();
 
-      // Only alert on free-space DECREASES (negative deltaBytes)
       for (const delta of snapshot.deltas) {
+        mainWindow?.webContents.send(DISK_DELTA_CHANNEL, delta);
+
+        // Only alert on free-space DECREASES (negative deltaBytes)
         if (delta.deltaBytes >= 0) continue; // Space increased — not actionable
 
         const decrease = Math.abs(delta.deltaBytes);
@@ -629,8 +685,6 @@ void app.whenReady().then(async () => {
         if (shouldAlert && settings.notifications.deltaAlerts) {
           sendToast("warning", "Free space decreased",
             `${delta.drive}: lost ${formatBytesShort(decrease)} since last check.`);
-
-          mainWindow?.webContents.send(DISK_DELTA_CHANNEL, delta);
 
           if (Notification.isSupported() && !mainWindow?.isVisible()) {
             new Notification({
@@ -650,7 +704,7 @@ void app.whenReady().then(async () => {
         if (lastScan === null || now - lastScan >= intervalMs) {
           const defaultPath = settings.scanning.defaultRootPath;
           if (defaultPath && !activeScan) {
-            void startScan(defaultPath, defaultScanOptions());
+            void startScan(defaultPath, defaultScanOptions(), "scheduled");
             sendToast("info", "Scheduled rescan started",
               `Rescanning ${defaultPath} after ${settings.monitoring.fullScanIntervalHours}h interval.`);
           }
@@ -754,7 +808,12 @@ void app.whenReady().then(async () => {
     });
   };
 
-  const settings = settingsStore.get();
+  let settings = settingsStore.get();
+  const normalizedSettings = normalizeAppSettings(settings);
+  if (JSON.stringify(normalizedSettings) !== JSON.stringify(settings)) {
+    await settingsStore.set(normalizedSettings);
+    settings = normalizedSettings;
+  }
 
   // Only create tray if minimizeToTray is explicitly enabled
   if (settings.general.minimizeToTray) {
@@ -768,8 +827,11 @@ void app.whenReady().then(async () => {
   await createWindow();
 
   // Check if launched with --start-minimized (from login item)
-  const launchMinimized = settings.general.startMinimized ||
-    process.argv.includes("--start-minimized");
+  const canLaunchToTray = settings.general.minimizeToTray && Boolean(tray);
+  const launchMinimized = canLaunchToTray && (
+    settings.general.startMinimized ||
+    process.argv.includes("--start-minimized")
+  );
   if (launchMinimized) {
     mainWindow?.hide();
   }

@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import {
+  type AppSettings,
   createIdleScanSnapshot,
   defaultScanOptions,
   type AppView,
   type DiskSpaceInfo,
+  type GeneralSettings,
   type ScanOptions,
   type ScanSnapshot,
 } from "../shared/contracts";
 import { formatBytes } from "./lib/format";
+import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents";
 import { nativeApi } from "./nativeApi";
 
 import { ChangesView } from "./components/ChangesView";
@@ -32,6 +35,29 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "settings", label: "Settings", key: "7" },
 ];
 
+const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
+
+function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
+  if (theme === "light") {
+    return "light";
+  }
+  if (theme === "system") {
+    return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  }
+  return "dark";
+}
+
+function cycleThemePreference(theme: GeneralSettings["theme"]): GeneralSettings["theme"] {
+  switch (theme) {
+    case "dark":
+      return "light";
+    case "light":
+      return "system";
+    default:
+      return "dark";
+  }
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<ScanSnapshot>(createIdleScanSnapshot());
   const [rootPath, setRootPath] = useState("");
@@ -44,29 +70,64 @@ export function App() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [hasPendingDiff, setHasPendingDiff] = useState(false);
   const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
+  const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
+  const isSearchableView = SEARCHABLE_VIEWS.includes(view);
+
+  const applyResolvedTheme = useCallback((resolved: "dark" | "light") => {
+    const root = document.documentElement;
+    root.classList.remove("light", "dark");
+    if (resolved === "light") root.classList.add("light");
+    nativeApi.applyTheme(resolved);
+    setActiveTheme(resolved);
+  }, []);
+
+  const syncThemePreference = useCallback((theme: GeneralSettings["theme"]) => {
+    setThemePreference(theme);
+    applyResolvedTheme(resolveThemePreference(theme));
+  }, [applyResolvedTheme]);
 
   // Load and apply theme
   useEffect(() => {
-    const applyTheme = (resolved: "dark" | "light") => {
-      const root = document.documentElement;
-      root.classList.remove("light", "dark");
-      if (resolved === "light") root.classList.add("light");
-      nativeApi.applyTheme(resolved);
-      setActiveTheme(resolved);
-    };
-
     void nativeApi.getSettings().then((s) => {
       if (!s) return;
-      const theme = s.general.theme;
-      if (theme === "light") {
-        applyTheme("light");
-      } else if (theme === "system") {
-        applyTheme(window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
-      } else {
-        applyTheme("dark");
-      }
+      syncThemePreference(s.general.theme);
     });
-  }, []);
+  }, [syncThemePreference]);
+
+  // Keep "System" theme in sync with OS changes while the app is open.
+  useEffect(() => {
+    if (themePreference !== "system") {
+      return;
+    }
+
+    const media = window.matchMedia("(prefers-color-scheme: light)");
+    const handleChange = (event: MediaQueryListEvent) => {
+      applyResolvedTheme(event.matches ? "light" : "dark");
+    };
+
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", handleChange);
+      return () => media.removeEventListener("change", handleChange);
+    }
+
+    media.addListener(handleChange);
+    return () => media.removeListener(handleChange);
+  }, [themePreference, applyResolvedTheme]);
+
+  // Renderer-local settings sync for theme and other reactive view state.
+  useEffect(() => {
+    const handleSettings = (event: Event) => {
+      const detail = (event as CustomEvent<AppSettings>).detail;
+      if (detail) {
+        syncThemePreference(detail.general.theme);
+      }
+    };
+
+    window.addEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+    return () => {
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+    };
+  }, [syncThemePreference]);
 
   // Boot: load current snapshot + drives + IPC listeners (run once)
   useEffect(() => {
@@ -120,6 +181,11 @@ export function App() {
         // Ctrl+F to open search
         if (e.key === "f") {
           e.preventDefault();
+          if (showPicker) return;
+          if (!SEARCHABLE_VIEWS.includes(view)) {
+            setFilterExt(undefined);
+            setView("files");
+          }
           setSearchOpen(true);
         }
       }
@@ -132,7 +198,14 @@ export function App() {
     window.addEventListener("keydown", onKey);
 
     return () => { window.removeEventListener("keydown", onKey); };
-  }, [searchOpen]);
+  }, [searchOpen, showPicker, view]);
+
+  useEffect(() => {
+    if (!isSearchableView && searchOpen) {
+      setSearchOpen(false);
+      setSearchQuery("");
+    }
+  }, [isSearchableView, searchOpen]);
 
   const syncSnapshot = useCallback((s: ScanSnapshot) => {
     setSnapshot(s);
@@ -199,7 +272,10 @@ export function App() {
     return {
       ...snapshot,
       largestFiles: snapshot.largestFiles.filter(
-        (f) => f.path.toLowerCase().includes(q) || f.name.toLowerCase().includes(q) || f.extension.toLowerCase().includes(q),
+        (f) =>
+          f.path.toLowerCase().includes(q) ||
+          f.name.toLowerCase().includes(q) ||
+          f.extension.toLowerCase().includes(q),
       ),
     };
   }, [snapshot, searchQuery]);
@@ -272,8 +348,18 @@ export function App() {
           {/* Search toggle */}
           <button
             className={`header-icon-btn ${searchOpen ? "active" : ""}`}
-            onClick={() => { setSearchOpen(!searchOpen); if (searchOpen) setSearchQuery(""); }}
-            title="Search (Ctrl+F)"
+            onClick={() => {
+              if (showPicker) return;
+              if (!isSearchableView) {
+                setFilterExt(undefined);
+                setView("files");
+                setSearchOpen(true);
+                return;
+              }
+              setSearchOpen(!searchOpen);
+              if (searchOpen) setSearchQuery("");
+            }}
+            title="Search largest files (Ctrl+F)"
           >
             <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
               <circle cx="6" cy="6" r="4" />
@@ -290,7 +376,7 @@ export function App() {
         </header>
 
         {/* ── Search bar (slides in) ── */}
-        {searchOpen && (
+        {searchOpen && !showPicker && isSearchableView && (
           <div className="search-bar">
             <svg className="search-bar-icon" width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
               <circle cx="6" cy="6" r="4" />
@@ -305,9 +391,9 @@ export function App() {
             />
             {searchQuery && (
               <span className="search-bar-count">
-                {searchFilteredSnapshot.largestFiles.length} match{searchFilteredSnapshot.largestFiles.length !== 1 ? "es" : ""}
-              </span>
-            )}
+              {searchFilteredSnapshot.largestFiles.length} match{searchFilteredSnapshot.largestFiles.length !== 1 ? "es" : ""}
+            </span>
+          )}
             <button
               className="search-bar-close"
               onClick={() => { setSearchOpen(false); setSearchQuery(""); }}
@@ -329,6 +415,10 @@ export function App() {
                 setView(tab.id);
                 if (snapshot.status !== "idle") setShowPicker(false);
                 if (tab.id !== "files") setFilterExt(undefined);
+                if (!SEARCHABLE_VIEWS.includes(tab.id)) {
+                  setSearchOpen(false);
+                  setSearchQuery("");
+                }
                 if (tab.id === "changes") setHasPendingDiff(false);
               }}
             >
@@ -362,7 +452,7 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={searchFilteredSnapshot} onFilterExtension={onFilterExtension} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
               {view === "duplicates" && <ErrorBoundary name="Duplicates"><DuplicatesView snapshot={snapshot} /></ErrorBoundary>}
@@ -392,29 +482,40 @@ export function App() {
           <button
             className="status-bar-theme-toggle"
             onClick={() => {
-              const next = activeTheme === "dark" ? "light" : "dark";
-              const root = document.documentElement;
-              root.classList.remove("light", "dark");
-              if (next === "light") root.classList.add("light");
-              nativeApi.applyTheme(next);
-              setActiveTheme(next);
-              // Persist the choice
+              const next = cycleThemePreference(themePreference);
+              syncThemePreference(next);
               void nativeApi.getSettings().then((s) => {
-                if (s) void nativeApi.updateSettings({ ...s, general: { ...s.general, theme: next } });
+                if (!s) return;
+                const nextSettings: AppSettings = {
+                  ...s,
+                  general: {
+                    ...s.general,
+                    theme: next,
+                  },
+                };
+                void nativeApi.updateSettings(nextSettings).then(() => {
+                  dispatchSettingsUpdated(nextSettings);
+                });
               });
             }}
-            title={activeTheme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+            title={`Theme: ${themePreference}. Click to switch to ${cycleThemePreference(themePreference)}.`}
           >
-            {activeTheme === "dark" ? (
+            {themePreference === "system" ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <rect x="3" y="4" width="18" height="12" rx="2" />
+                <path d="M8 20h8M12 16v4" />
+              </svg>
+            ) : activeTheme === "dark" ? (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+              </svg>
+            ) : (
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="5" />
                 <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
               </svg>
-            ) : (
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
-              </svg>
             )}
+            <span>{themePreference === "system" ? "System" : activeTheme === "dark" ? "Dark" : "Light"}</span>
           </button>
         </footer>
       </div>

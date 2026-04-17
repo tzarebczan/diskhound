@@ -11,11 +11,17 @@ const BASELINE_FILE = "disk-baselines.json";
 interface PersistedState {
   previousDrives: Record<string, DiskSpaceInfo>;
   lastFullScanAt: number | null;
+  lastDrives?: DiskSpaceInfo[];
+  lastDeltas?: DiskDelta[];
+  lastCheckedAt?: number;
 }
 
 let previousDriveMap = new Map<string, DiskSpaceInfo>();
 let lastFullScanAt: number | null = null;
 let persistDir: string | null = null;
+let lastDrives: DiskSpaceInfo[] = [];
+let lastDeltas: DiskDelta[] = [];
+let lastCheckedAt = 0;
 
 // ── Initialization (call once at startup) ───────────────────
 
@@ -26,6 +32,12 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
     const state = JSON.parse(raw) as PersistedState;
     previousDriveMap = new Map(Object.entries(state.previousDrives ?? {}));
     lastFullScanAt = state.lastFullScanAt ?? null;
+    lastDrives = Array.isArray(state.lastDrives) ? state.lastDrives : [];
+    lastDeltas = Array.isArray(state.lastDeltas) ? state.lastDeltas : [];
+    lastCheckedAt =
+      typeof state.lastCheckedAt === "number" && Number.isFinite(state.lastCheckedAt)
+        ? state.lastCheckedAt
+        : 0;
   } catch {
     // No existing baseline — fresh start
   }
@@ -36,6 +48,9 @@ async function persistState(): Promise<void> {
   const state: PersistedState = {
     previousDrives: Object.fromEntries(previousDriveMap),
     lastFullScanAt,
+    lastDrives,
+    lastDeltas,
+    lastCheckedAt,
   };
   try {
     await FS.mkdir(persistDir, { recursive: true });
@@ -86,13 +101,25 @@ export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
   }
 
   previousDriveMap = new Map(drives.map((d) => [d.drive, d]));
+  lastDrives = drives;
+  lastDeltas = deltas;
+  lastCheckedAt = now;
   void persistState();
 
   return {
-    drives,
-    deltas,
+    drives: lastDrives,
+    deltas: lastDeltas,
     lastFullScanAt,
-    lastCheckedAt: now,
+    lastCheckedAt,
+  };
+}
+
+export function getMonitoringSnapshot(): MonitoringSnapshot {
+  return {
+    drives: lastDrives,
+    deltas: lastDeltas,
+    lastFullScanAt,
+    lastCheckedAt,
   };
 }
 

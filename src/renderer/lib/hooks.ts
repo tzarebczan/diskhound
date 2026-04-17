@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 
-import type { PathActionResult } from "../../shared/contracts";
+import type { AppSettings, PathActionResult } from "../../shared/contracts";
 import { nativeApi } from "../nativeApi";
 import { toast } from "../components/Toasts";
+import { SETTINGS_UPDATED_EVENT } from "./uiEvents";
 
 /** Shared busy-set state with add/remove helpers. */
 export function useBusySet() {
@@ -56,10 +57,24 @@ export function usePathActions() {
 /** Load the safeDeleteToTrash setting once on mount. */
 export function useSafeDeleteOnly(): boolean {
   const [safe, setSafe] = useState(true);
+
   useEffect(() => {
     void nativeApi.getSettings().then((s) => {
       if (s) setSafe(s.cleanup.safeDeleteToTrash);
     });
+
+    const handleSettings = (event: Event) => {
+      const detail = (event as CustomEvent<AppSettings>).detail;
+      if (detail) {
+        setSafe(detail.cleanup.safeDeleteToTrash);
+      }
+    };
+
+    window.addEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+    return () => {
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+    };
   }, []);
+
   return safe;
 }
