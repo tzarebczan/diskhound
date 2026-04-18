@@ -187,14 +187,31 @@ button, input, select, textarea { font: inherit; }
 /* ── Scan Progress Stripe ──────────────────── */
 /* ── Update banner ─────────────────────────── */
 .update-banner {
+  position: fixed;
+  bottom: 40px;
+  right: 14px;
+  z-index: 150;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 14px;
-  background: linear-gradient(90deg, rgba(59,130,246,0.12), rgba(245,158,11,0.08));
-  border-bottom: 1px solid rgba(59,130,246,0.2);
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(14, 14, 22, 0.96);
+  border: 1px solid rgba(59,130,246,0.35);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  backdrop-filter: blur(10px);
   font-size: 12px;
   color: var(--text);
+  max-width: 420px;
+  animation: update-banner-in 0.25s ease-out;
+}
+:root.light .update-banner {
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+}
+@keyframes update-banner-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 .update-banner-icon {
   font-size: 14px;

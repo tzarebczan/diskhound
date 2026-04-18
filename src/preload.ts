@@ -75,6 +75,8 @@ const api: DiskhoundNativeApi = {
   getLatestDiff: (rootPath) => ipcRenderer.invoke("diskhound:get-latest-diff", rootPath),
   computeFullScanDiff: (baselineId, currentId, limit) =>
     ipcRenderer.invoke("diskhound:compute-full-scan-diff", baselineId, currentId, limit),
+  getTreemapFiles: (rootPath, limit) =>
+    ipcRenderer.invoke("diskhound:get-treemap-files", rootPath, limit),
 
   // Easy Move
   easyMove: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move", sourcePath, destinationDir),

@@ -131,6 +131,7 @@ export function SettingsView() {
         />
         <NumberRow
           label="Top files to track"
+          desc="Size of the Largest Files list. The treemap uses the full scan index and isn't limited by this."
           value={settings.scanning.topFileLimit}
           min={25}
           max={5000}
@@ -138,6 +139,7 @@ export function SettingsView() {
         />
         <NumberRow
           label="Top directories to track"
+          desc="Size of the Folders view roll-up list."
           value={settings.scanning.topDirectoryLimit}
           min={25}
           max={10000}

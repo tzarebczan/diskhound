@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 
-import type { ExtensionBucket, ScanSnapshot } from "../../shared/contracts";
+import type { ExtensionBucket, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount, formatElapsed, humanAge } from "../lib/format";
 import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import {
@@ -29,19 +29,47 @@ function getInitialTreemapMode(): TreemapMode {
   return stored === "all" ? "all" : "condensed";
 }
 
+// Dense treemap default — render up to this many files from the full file
+// index. Independent of the `topFileLimit` setting (which now only controls
+// the Largest Files list). 10k is plenty dense for a WinDirStat feel without
+// hurting canvas render performance.
+const DENSE_TREEMAP_LIMIT = 10_000;
+
 export function Overview({ snapshot, onFilterExtension }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries, elapsedMs } = snapshot;
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
   const [dominantExpanded, setDominantExpanded] = useState(false);
+  const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const safeDeleteOnly = useSafeDeleteOnly();
+
+  // Load the dense file list from the persisted full-file index whenever a
+  // completed scan is available. Falls back to the in-memory top-N if the
+  // index isn't ready yet (e.g. during a running scan).
+  useEffect(() => {
+    if (snapshot.status !== "done" || !snapshot.rootPath) {
+      setDenseFiles(null);
+      return;
+    }
+    let cancelled = false;
+    void nativeApi.getTreemapFiles(snapshot.rootPath, DENSE_TREEMAP_LIMIT).then((files) => {
+      if (cancelled) return;
+      setDenseFiles(files && files.length > 0 ? files : null);
+    });
+    return () => { cancelled = true; };
+  }, [snapshot.status, snapshot.rootPath]);
+
+  // Prefer the dense file list; fall back to the snapshot's top-N while a
+  // scan is running or if the index isn't available.
+  const sourceFiles = denseFiles ?? snapshot.largestFiles;
+
   const treemapComposition = useMemo(
-    () => buildTreemapComposition(snapshot.largestFiles),
-    [snapshot.largestFiles],
+    () => buildTreemapComposition(sourceFiles),
+    [sourceFiles],
   );
   const hasDominantFiles = treemapComposition.featuredFiles.length > 0;
   const condensedMode = hasDominantFiles && treemapMode === "condensed";
-  const treemapFiles = condensedMode ? treemapComposition.mapFiles : snapshot.largestFiles;
+  const treemapFiles = condensedMode ? treemapComposition.mapFiles : sourceFiles;
   const featuredBytes = treemapComposition.featuredFiles.reduce(
     (sum, item) => sum + item.file.size,
     0,

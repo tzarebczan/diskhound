@@ -160,6 +160,52 @@ export function diffIndexes(
   };
 }
 
+/**
+ * Stream the index and return the N largest files by size, with an optional
+ * minimum-size cutoff to skip noise. Keeps a bounded heap in memory so it
+ * scales to tens of millions of files without loading them all.
+ */
+export async function loadLargestFiles(
+  filePath: string,
+  limit: number = 10_000,
+  minBytes: number = 0,
+): Promise<IndexRecord[]> {
+  if (!FS.existsSync(filePath)) return [];
+
+  const top: IndexRecord[] = [];
+  let smallestInTop = 0;
+
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  source.pipe(gunzip);
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+
+  for await (const line of rl) {
+    if (!line) continue;
+    let rec: IndexRecord;
+    try {
+      rec = JSON.parse(line) as IndexRecord;
+    } catch { continue; }
+    if (!rec || typeof rec.s !== "number" || rec.s < minBytes) continue;
+
+    if (top.length < limit) {
+      top.push(rec);
+      if (top.length === limit) {
+        top.sort((a, b) => a.s - b.s);
+        smallestInTop = top[0].s;
+      }
+    } else if (rec.s > smallestInTop) {
+      // Replace the smallest entry (binary insertion keeps it sorted ascending)
+      top[0] = rec;
+      // Re-bubble down to maintain sorted order — simple re-sort is fine at this size
+      top.sort((a, b) => a.s - b.s);
+      smallestInTop = top[0].s;
+    }
+  }
+
+  return top.sort((a, b) => b.s - a.s);
+}
+
 /** Delete an index file if it exists (best effort). */
 export async function deleteIndex(id: string): Promise<void> {
   try {

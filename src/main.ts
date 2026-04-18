@@ -54,6 +54,7 @@ import {
   indexFilePath,
   initScanIndex,
   loadIndex,
+  loadLargestFiles,
 } from "./shared/scanIndex";
 import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
@@ -705,6 +706,36 @@ void app.whenReady().then(async () => {
     ]);
     if (baseline.size === 0 && current.size === 0) return null;
     return diffIndexes(baselineId, currentId, baseline, current, limit ?? 500);
+  });
+
+  // Load a dense file list for the treemap from the persisted full-file index.
+  // Returns the top N files by size across the whole scan (not just the
+  // top-N tracked in memory). Used for WinDirStat-style dense visualization.
+  ipcMain.handle("diskhound:get-treemap-files", async (_event, rootPath: string, limit: number = 10_000) => {
+    const pair = getLatestPair(rootPath);
+    const history = getScanHistory(rootPath);
+    const currentId = pair?.current.id ?? history[0]?.id;
+    if (!currentId) return [];
+    try {
+      const records = await loadLargestFiles(indexFilePath(currentId), limit, 0);
+      // Map to the ScanFileRecord shape the renderer expects
+      return records.map((r) => {
+        const name = Path.basename(r.p);
+        const parentPath = Path.dirname(r.p);
+        const dotIdx = name.lastIndexOf(".");
+        const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+        return {
+          path: r.p,
+          name,
+          parentPath,
+          extension,
+          size: r.s,
+          modifiedAt: r.m,
+        };
+      });
+    } catch {
+      return [];
+    }
   });
 
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {

@@ -473,6 +473,12 @@ export interface DiskhoundNativeApi {
   getLatestDiff: (rootPath: string) => Promise<ScanDiffResult | null>;
   /** Compute the full per-file diff from the persisted index files (not top-N). */
   computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;
+  /**
+   * Returns the N largest files for the given root's latest scan, sourced from
+   * the persisted full-file index (not just the in-memory top-N snapshot list).
+   * Powers the dense WinDirStat-style treemap visualization.
+   */
+  getTreemapFiles: (rootPath: string, limit?: number) => Promise<ScanFileRecord[]>;
 
   // Theme
   applyTheme: (theme: "dark" | "light") => void;
@@ -508,7 +514,7 @@ export function defaultSettings(): AppSettings {
     },
     scanning: {
       defaultRootPath: "",
-      topFileLimit: 2000,
+      topFileLimit: 500,
       topDirectoryLimit: 1000,
     },
     monitoring: {
