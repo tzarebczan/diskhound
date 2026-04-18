@@ -30,9 +30,8 @@ function getInitialTreemapMode(): TreemapMode {
 }
 
 // Dense treemap default — render up to this many files from the full file
-// index. Independent of the `topFileLimit` setting (which now only controls
-// the Largest Files list). 10k is plenty dense for a WinDirStat feel without
-// hurting canvas render performance.
+// index on disk. 10k is plenty dense for a WinDirStat feel without hurting
+// canvas render performance.
 const DENSE_TREEMAP_LIMIT = 10_000;
 
 export function Overview({ snapshot, onFilterExtension }: Props) {

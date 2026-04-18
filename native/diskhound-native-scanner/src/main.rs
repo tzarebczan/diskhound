@@ -26,8 +26,11 @@ use windows_sys::Win32::Storage::FileSystem::{
     WIN32_FIND_DATAW,
 };
 
-const DEFAULT_TOP_FILE_LIMIT: usize = 100;
-const DEFAULT_TOP_DIRECTORY_LIMIT: usize = 500;
+// Generous internal caps — large enough that no user reasonably hits them,
+// small enough that a multi-million-file scan stays memory-safe. The full
+// per-file index on disk (NDJSON) is the source of truth for the treemap.
+const DEFAULT_TOP_FILE_LIMIT: usize = 5_000;
+const DEFAULT_TOP_DIRECTORY_LIMIT: usize = 10_000;
 const TOP_EXTENSION_LIMIT: usize = 12;
 const SNAPSHOT_INTERVAL_MS: u128 = 200;
 const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;

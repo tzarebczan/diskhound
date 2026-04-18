@@ -244,9 +244,6 @@ export function FolderList({ snapshot }: Props) {
         {children.length === 0 && otherSize === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>No subdirectories tracked at this level</span>
-            <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
-              Try scanning with a higher directory limit in Settings
-            </span>
           </div>
         ) : (
           <>

@@ -14,8 +14,11 @@ import {
   type ScanSnapshot,
 } from "../shared/contracts";
 
-const DEFAULT_TOP_FILE_LIMIT = 60;
-const DEFAULT_TOP_DIRECTORY_LIMIT = 500;
+// Generous internal caps — large enough that no user reasonably hits them,
+// small enough that a multi-million-file scan stays memory-safe. The full
+// per-file index on disk (NDJSON) is the source of truth for the treemap.
+const DEFAULT_TOP_FILE_LIMIT = 5_000;
+const DEFAULT_TOP_DIRECTORY_LIMIT = 10_000;
 const TOP_EXTENSION_LIMIT = 12;
 const STAT_BATCH_SIZE = 32;
 const SNAPSHOT_INTERVAL_MS = 200;

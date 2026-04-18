@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, humanAge, relativePath } from "../lib/format";
-import { useBusySet, useSafeDeleteOnly } from "../lib/hooks";
+import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -52,7 +52,9 @@ export function FileList({ snapshot, initialFilter }: Props) {
   const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
-  const { busy, markBusy, clearBusy } = useBusySet();
+  // We use our own local runAction below (so success+dismiss can also hide the row),
+  // but pull the other helpers from the shared hook.
+  const { busy, markBusy, clearBusy, handleEasyMove, handleEasyMoveBatch } = usePathActions();
   const [sortField, setSortField] = useState<SortField>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const safeDeleteOnly = useSafeDeleteOnly();
@@ -201,6 +203,13 @@ export function FileList({ snapshot, initialFilter }: Props) {
     }
   };
 
+  const bulkMove = async () => {
+    const targets = visibleFiles.filter((f) => selected.has(f.path));
+    if (targets.length === 0) return;
+    const moved = await handleEasyMoveBatch(targets.map((f) => f.path));
+    if (moved.length > 0) markDismissed(moved);
+  };
+
   return (
     <div className="file-view">
       <div className="file-toolbar">
@@ -229,6 +238,14 @@ export function FileList({ snapshot, initialFilter }: Props) {
         <div className="bulk-spacer" />
         <button className="bulk-btn" onClick={toggleSelectAll}>
           {selectedVisible === visibleFiles.length && visibleFiles.length > 0 ? "Clear all" : "Select all"}
+        </button>
+        <button
+          className="bulk-btn"
+          disabled={selectedVisible === 0}
+          onClick={() => void bulkMove()}
+          title="Move selected files to another location and leave a symlink so they still open from here"
+        >
+          Move selected
         </button>
         <button
           className="bulk-btn warn"
@@ -278,6 +295,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
               onToggle={() => toggleSelected(file.path)}
               onReveal={() => void runAction(file.path, () => nativeApi.revealPath(file.path))}
               onOpen={() => void runAction(file.path, () => nativeApi.openPath(file.path))}
+              onMove={() => void handleEasyMove(file.path)}
               onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { dismiss: true })}
               onDelete={() => {
                 if (!confirm(`Permanently delete ${file.name}?`)) return;
@@ -329,10 +347,11 @@ function FileRow(props: {
   onToggle: () => void;
   onReveal: () => void;
   onOpen: () => void;
+  onMove: () => void;
   onTrash: () => void;
   onDelete: () => void;
 }) {
-  const { file, index, focused, rootPath, selected, isBusy, safeDeleteOnly, onToggle, onReveal, onOpen, onTrash, onDelete } = props;
+  const { file, index, focused, rootPath, selected, isBusy, safeDeleteOnly, onToggle, onReveal, onOpen, onMove, onTrash, onDelete } = props;
 
   return (
     <div className={`file-row ${selected ? "selected" : ""} ${focused ? "focused" : ""}`} data-index={index}>
@@ -348,6 +367,14 @@ function FileRow(props: {
       <div className="file-ext">{file.extension}</div>
       <div className="file-age">{humanAge(file.modifiedAt)}</div>
       <div className="file-actions">
+        <button
+          className="action-btn"
+          disabled={isBusy}
+          onClick={onMove}
+          title="Move this file to another location and leave a symlink so it still opens from here"
+        >
+          Move
+        </button>
         <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
         <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
         <button className="action-btn warn" disabled={isBusy} onClick={onTrash}>Trash</button>

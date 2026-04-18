@@ -5,7 +5,8 @@ import { promisify } from "node:util";
 import type { KillSignal, ProcessInfo, SystemMemorySnapshot } from "./contracts";
 
 const execFileAsync = promisify(execFile);
-const LIST_TIMEOUT_MS = 4_000;
+// tasklist /v on a busy system can take 5-10+ seconds — give it room.
+const LIST_TIMEOUT_MS = 15_000;
 
 /**
  * Sample the current system memory + running processes.
@@ -67,25 +68,51 @@ export async function killProcess(pid: number, signal: KillSignal): Promise<void
 // ── Platform implementations ──────────────────────────────
 
 async function sampleProcessesWindows(): Promise<ProcessInfo[]> {
-  // tasklist with /v gives: "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name","CPU Time","Window Title"
-  // Use /fo csv /nh (no header) for easier parsing.
+  // Try `/v` first — it gives us the owning user, which lets us flag
+  // system-vs-user processes. If that fails (the /v variant requires the
+  // Terminal Services subsystem and can also be blocked by AV/EDR), fall
+  // back to the basic call which works almost anywhere.
+  try {
+    return await runTasklist(true);
+  } catch (verboseError) {
+    try {
+      return await runTasklist(false);
+    } catch (basicError) {
+      const verboseMsg = verboseError instanceof Error ? verboseError.message : String(verboseError);
+      const basicMsg = basicError instanceof Error ? basicError.message : String(basicError);
+      throw new Error(
+        `tasklist failed. With /v: ${verboseMsg}. Basic: ${basicMsg}. ` +
+        `This can happen when the Terminal Services service is disabled or ` +
+        `security software blocks tasklist.exe.`,
+      );
+    }
+  }
+}
+
+async function runTasklist(verbose: boolean): Promise<ProcessInfo[]> {
+  // Verbose (/v) fields: "Image Name","PID","Session Name","Session#","Mem Usage","Status","User Name","CPU Time","Window Title"
+  // Basic fields:         "Image Name","PID","Session Name","Session#","Mem Usage"
+  const args = verbose ? ["/fo", "csv", "/nh", "/v"] : ["/fo", "csv", "/nh"];
   const { stdout } = await execFileAsync(
     "tasklist",
-    ["/fo", "csv", "/nh", "/v"],
+    args,
     { timeout: LIST_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024, windowsHide: true },
   );
 
   const rows = stdout.split(/\r?\n/).filter(Boolean);
   const processes: ProcessInfo[] = [];
+  const minFields = verbose ? 7 : 5;
 
   for (const row of rows) {
     const fields = parseCsvRow(row);
-    if (fields.length < 7) continue;
+    if (fields.length < minFields) continue;
 
     const name = fields[0] ?? "";
     const pid = Number.parseInt(fields[1] ?? "0", 10);
     const memKb = parseWindowsMemKb(fields[4] ?? "");
-    const userName = fields[6] ?? "";
+    // User name only present in the /v output — default to user-owned so
+    // the Kill actions stay enabled when we can't tell.
+    const userName = verbose ? (fields[6] ?? "") : "";
 
     if (!name || !Number.isFinite(pid) || pid <= 0) continue;
 
@@ -94,7 +121,7 @@ async function sampleProcessesWindows(): Promise<ProcessInfo[]> {
       name,
       memoryBytes: memKb * 1024,
       cpuPercent: null, // tasklist doesn't give instantaneous CPU %
-      userOwned: !/\b(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)\b/i.test(userName),
+      userOwned: verbose ? !/\b(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)\b/i.test(userName) : true,
     });
   }
 

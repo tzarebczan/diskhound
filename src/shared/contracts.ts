@@ -57,6 +57,10 @@ export interface PathActionResult {
 export interface ScanStartInput {
   rootPath: string;
   options: ScanOptions;
+  /**
+   * Optional scanner knobs. Not user-configurable — the scanner uses
+   * generous internal defaults so the UI "just works" without tuning.
+   */
   limits?: {
     topFileLimit: number;
     topDirectoryLimit: number;
@@ -100,8 +104,6 @@ export interface GeneralSettings {
 
 export interface ScanningSettings {
   defaultRootPath: string;
-  topFileLimit: number;
-  topDirectoryLimit: number;
 }
 
 export interface MonitoringSettings {
@@ -514,8 +516,6 @@ export function defaultSettings(): AppSettings {
     },
     scanning: {
       defaultRootPath: "",
-      topFileLimit: 500,
-      topDirectoryLimit: 1000,
     },
     monitoring: {
       enabled: false,
@@ -580,18 +580,6 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         typeof merged.scanning.defaultRootPath === "string"
           ? merged.scanning.defaultRootPath
           : defaults.scanning.defaultRootPath,
-      topFileLimit: clampInteger(
-        merged.scanning.topFileLimit,
-        25,
-        5000,
-        defaults.scanning.topFileLimit,
-      ),
-      topDirectoryLimit: clampInteger(
-        merged.scanning.topDirectoryLimit,
-        25,
-        10000,
-        defaults.scanning.topDirectoryLimit,
-      ),
     },
     monitoring: {
       enabled: Boolean(merged.monitoring.enabled),

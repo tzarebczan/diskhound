@@ -404,17 +404,12 @@ void app.whenReady().then(async () => {
       void handleRuntimeFailure(session, startingSnapshot, error);
     });
 
-    // Pass configurable limits from settings
-    const settings = settingsStore?.get();
+    // Scanner uses generous internal defaults — no user knobs here.
     worker.postMessage({
       type: "start",
       input: {
         rootPath,
         options: scanOptions,
-        limits: settings ? {
-          topFileLimit: settings.scanning.topFileLimit,
-          topDirectoryLimit: settings.scanning.topDirectoryLimit,
-        } : undefined,
         indexOutput: tempIndexPath,
       },
     });
@@ -430,13 +425,6 @@ void app.whenReady().then(async () => {
     const nativeStartingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "native-sidecar");
     const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
 
-    // Pass configurable limits from settings to the native scanner
-    const currentSettings = settingsStore?.get();
-    const scanLimits = currentSettings ? {
-      topFileLimit: currentSettings.scanning.topFileLimit,
-      topDirectoryLimit: currentSettings.scanning.topDirectoryLimit,
-    } : undefined;
-
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
     let earlyErrors: Error[] = [];
@@ -444,7 +432,7 @@ void app.whenReady().then(async () => {
 
     const nativeResult = createNativeScannerSession(
       projectRoot,
-      { rootPath, options: scanOptions, limits: scanLimits, indexOutput: tempIndexPath },
+      { rootPath, options: scanOptions, indexOutput: tempIndexPath },
       {
         onMessage: (message) => {
           if (!sessionRef) {

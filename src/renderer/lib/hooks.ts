@@ -51,7 +51,56 @@ export function usePathActions() {
     }
   }, [markBusy, clearBusy]);
 
-  return { busy, runAction, handleEasyMove } as const;
+  /**
+   * Move many files in one gesture: pick a destination once, then move each
+   * source into it. Returns the paths that were moved successfully so callers
+   * can dismiss them from their list.
+   */
+  const handleEasyMoveBatch = useCallback(async (sourcePaths: string[]): Promise<string[]> => {
+    if (sourcePaths.length === 0) return [];
+    const dest = await nativeApi.pickMoveDestination();
+    if (!dest) return [];
+
+    const moved: string[] = [];
+    const failures: { path: string; message: string }[] = [];
+
+    for (const path of sourcePaths) {
+      markBusy(path);
+      try {
+        const result = await nativeApi.easyMove(path, dest);
+        if (result?.ok) {
+          moved.push(path);
+        } else {
+          failures.push({ path, message: result?.message ?? "Unknown error" });
+        }
+      } catch (err) {
+        failures.push({ path, message: err instanceof Error ? err.message : String(err) });
+      } finally {
+        clearBusy(path);
+      }
+    }
+
+    if (moved.length > 0) {
+      toast(
+        "success",
+        `Moved ${moved.length} file(s) & linked`,
+        failures.length > 0 ? `${failures.length} failed` : undefined,
+      );
+    }
+    if (failures.length > 0 && moved.length === 0) {
+      toast("error", "Easy Move failed", failures[0]?.message ?? "Unknown error");
+    }
+    return moved;
+  }, [markBusy, clearBusy]);
+
+  return {
+    busy,
+    markBusy,
+    clearBusy,
+    runAction,
+    handleEasyMove,
+    handleEasyMoveBatch,
+  } as const;
 }
 
 /** Load the safeDeleteToTrash setting once on mount. */
