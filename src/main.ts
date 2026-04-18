@@ -58,6 +58,7 @@ import {
 import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
 import { analyzeForCleanup } from "./shared/suggestions";
+import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
@@ -551,6 +552,24 @@ void app.whenReady().then(async () => {
     } catch {
       iconCache.set(key, null);
       return null;
+    }
+  });
+
+  // ── IPC: Process / Memory viewer ──────────────────────────
+
+  ipcMain.handle("diskhound:get-memory-snapshot", async () => {
+    return sampleSystemMemory();
+  });
+
+  ipcMain.handle("diskhound:kill-process", async (_event, pid: number, signal: "soft" | "hard"): Promise<PathActionResult> => {
+    try {
+      await killProcessImpl(pid, signal);
+      return { ok: true, message: `Killed process ${pid}` };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      };
     }
   });
 

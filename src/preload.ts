@@ -26,6 +26,10 @@ const api: DiskhoundNativeApi = {
   runScheduledScanNow: () => ipcRenderer.invoke("diskhound:run-scheduled-scan-now"),
   getFileIcon: (path, size) => ipcRenderer.invoke("diskhound:get-file-icon", path, size),
 
+  // Process / memory viewer
+  getMemorySnapshot: () => ipcRenderer.invoke("diskhound:get-memory-snapshot"),
+  killProcess: (pid, signal) => ipcRenderer.invoke("diskhound:kill-process", pid, signal),
+
   // Path actions
   revealPath: (targetPath) => ipcRenderer.invoke("diskhound:reveal-path", targetPath),
   openPath: (targetPath) => ipcRenderer.invoke("diskhound:open-path", targetPath),

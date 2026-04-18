@@ -2291,6 +2291,193 @@ button, input, select, textarea { font: inherit; }
   to { opacity: 1; transform: scale(1); }
 }
 
+/* ── Memory / Process viewer ──────────────── */
+.memory-view {
+  display: grid;
+  grid-template-rows: auto auto auto 1fr;
+  height: 100%;
+  overflow: hidden;
+}
+
+.memory-summary {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+.memory-summary-main {
+  flex: 1;
+  min-width: 300px;
+}
+.memory-summary-big {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.memory-summary-value {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--amber);
+  letter-spacing: -0.02em;
+}
+.memory-summary-denom {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.memory-summary-bar {
+  width: 100%;
+  max-width: 480px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255,255,255,0.05);
+  overflow: hidden;
+}
+.memory-summary-bar-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s;
+}
+.memory-summary-bar-fill.low { background: var(--green); }
+.memory-summary-bar-fill.mid { background: var(--amber); }
+.memory-summary-bar-fill.high { background: var(--red); }
+.memory-summary-caption {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.memory-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 12px;
+  border-left: 1px solid var(--border);
+}
+.memory-stat-value {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+}
+.memory-stat-label {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.memory-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.memory-toolbar-spacer { flex: 1; }
+
+.memory-col-header {
+  display: grid;
+  grid-template-columns: 140px 70px 70px 1fr 130px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.memory-list-scroll {
+  overflow-y: auto;
+  padding: 2px 0;
+}
+
+.memory-row {
+  display: grid;
+  grid-template-columns: 140px 70px 70px 1fr 130px;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+  transition: background 0.1s;
+}
+.memory-row:hover { background: var(--bg-row-hover); }
+
+.memory-row-mem {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.memory-row-mem-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--amber);
+}
+.memory-row-mem-bar {
+  height: 3px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 1.5px;
+  overflow: hidden;
+}
+.memory-row-mem-bar-fill {
+  height: 100%;
+  background: var(--amber-dim);
+  border-radius: 1.5px;
+}
+
+.memory-row-cpu,
+.memory-row-pid {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  text-align: right;
+}
+.memory-row-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.memory-row-system-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: rgba(148,163,184,0.12);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.memory-row-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.memory-row:hover .memory-row-actions { opacity: 1; }
+
+.memory-error {
+  padding: 10px 14px;
+  background: var(--red-glow);
+  color: var(--red);
+  font-size: 11.5px;
+  font-family: var(--font-mono);
+  border-top: 1px solid rgba(239,68,68,0.15);
+}
+
 /* ── Toast Notifications ───────────────────── */
 .toast-container {
   position: fixed;

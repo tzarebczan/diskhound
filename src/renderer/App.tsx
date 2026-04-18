@@ -18,6 +18,7 @@ import { nativeApi } from "./nativeApi";
 import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
 import { DuplicatesView } from "./components/DuplicatesView";
+import { MemoryView } from "./components/MemoryView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShortcutHelp } from "./components/ShortcutHelp";
 import { EasyMoveView } from "./components/EasyMoveView";
@@ -34,7 +35,8 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "duplicates", label: "Duplicates", key: "4" },
   { id: "changes", label: "Changes", key: "5" },
   { id: "easyMove", label: "Easy Move", key: "6" },
-  { id: "settings", label: "Settings", key: "7" },
+  { id: "memory", label: "Memory", key: "7" },
+  { id: "settings", label: "Settings", key: "8" },
 ];
 
 const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
@@ -482,7 +484,7 @@ export function App() {
 
         {/* ── Main View ── */}
         <div className="view-container">
-          {showPicker === null ? null : showPicker ? (
+          {showPicker === null ? null : showPicker && view !== "memory" && view !== "settings" ? (
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}
@@ -495,6 +497,7 @@ export function App() {
               {view === "duplicates" && <ErrorBoundary name="Duplicates"><DuplicatesView snapshot={snapshot} /></ErrorBoundary>}
               {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
+              {view === "memory" && <ErrorBoundary name="Memory"><MemoryView /></ErrorBoundary>}
               {view === "settings" && <ErrorBoundary name="Settings"><SettingsView /></ErrorBoundary>}
             </>
           )}

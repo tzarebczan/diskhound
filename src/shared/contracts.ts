@@ -335,6 +335,37 @@ export interface FullDiffResult {
   truncated: boolean;
 }
 
+// ── Process / Memory Types ─────────────────────────────────
+
+export interface ProcessInfo {
+  pid: number;
+  name: string;
+  /** Resident set size in bytes (real RAM used) */
+  memoryBytes: number;
+  /** CPU percent when available (Windows wmic gives instantaneous; Unix ps gives %CPU). */
+  cpuPercent: number | null;
+  /** True when the user owns the process. On Windows we can't always tell cheaply — may be true for all. */
+  userOwned: boolean;
+  /** Full command line or executable path, when we can get it. */
+  commandLine?: string;
+}
+
+export interface SystemMemorySnapshot {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  usedPercent: number;
+  /** Number of logical CPU cores */
+  cpuCount: number;
+  /** 1m load average (Unix) or null on Windows. */
+  loadAvg: number | null;
+  processes: ProcessInfo[];
+  sampledAt: number;
+  errorMessage?: string;
+}
+
+export type KillSignal = "soft" | "hard";
+
 // ── Auto-Update Types ──────────────────────────────────────
 
 export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "up-to-date" | "error";
@@ -388,7 +419,7 @@ export interface DuplicateScanProgress {
 
 // ── View Types ──────────────────────────────────────────────
 
-export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "settings";
+export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "memory" | "settings";
 
 // ── IPC API ─────────────────────────────────────────────────
 
@@ -401,6 +432,10 @@ export interface DiskhoundNativeApi {
   runScheduledScanNow: () => Promise<PathActionResult>;
   /** Returns a data-URL PNG of the OS-provided file icon, or null if unavailable. */
   getFileIcon: (path: string, size?: "small" | "normal" | "large") => Promise<string | null>;
+
+  // Process / memory viewer
+  getMemorySnapshot: () => Promise<SystemMemorySnapshot>;
+  killProcess: (pid: number, signal: KillSignal) => Promise<PathActionResult>;
 
   // Path actions
   revealPath: (targetPath: string) => Promise<PathActionResult>;
