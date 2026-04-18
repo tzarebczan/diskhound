@@ -19,6 +19,7 @@ import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
 import { DuplicatesView } from "./components/DuplicatesView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ShortcutHelp } from "./components/ShortcutHelp";
 import { EasyMoveView } from "./components/EasyMoveView";
 import { FileList } from "./components/FileList";
 import { FolderList } from "./components/FolderList";
@@ -37,6 +38,13 @@ const TABS: { id: AppView; label: string; key: string }[] = [
 ];
 
 const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
+
+function isEditableElement(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+  return target.isContentEditable;
+}
 
 function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
   if (theme === "light") {
@@ -75,6 +83,7 @@ export function App() {
   const [activeTheme, setActiveTheme] = useState<"dark" | "light">("dark");
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
   const isSearchableView = SEARCHABLE_VIEWS.includes(view);
 
   const applyResolvedTheme = useCallback((resolved: "dark" | "light") => {
@@ -201,6 +210,12 @@ export function App() {
       if (e.key === "Escape" && searchOpen) {
         setSearchOpen(false);
         setSearchQuery("");
+      }
+      // ? (Shift+/) to toggle the shortcut help overlay — but not while
+      // typing in an input or text area.
+      if (e.key === "?" && !isEditableElement(e.target)) {
+        e.preventDefault();
+        setShortcutHelpOpen((v) => !v);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -539,7 +554,16 @@ export function App() {
             )}
             <span>{themePreference === "system" ? "System" : activeTheme === "dark" ? "Dark" : "Light"}</span>
           </button>
+          <button
+            className="status-bar-help"
+            onClick={() => setShortcutHelpOpen(true)}
+            title="Keyboard shortcuts (?)"
+          >
+            ?
+          </button>
         </footer>
+
+        <ShortcutHelp open={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} />
       </div>
     </ToastProvider>
   );

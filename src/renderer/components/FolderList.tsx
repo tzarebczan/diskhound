@@ -4,6 +4,7 @@ import type { DirectoryHotspot, ScanFileRecord, ScanSnapshot } from "../../share
 import { formatBytes, formatCount } from "../lib/format";
 import { usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { FileIcon } from "./FileIcon";
 
 interface Props {
   snapshot: ScanSnapshot;
@@ -346,15 +347,18 @@ function FolderRow(props: {
       onClick={canDrillIn ? onNavigate : undefined}
     >
       <div className="folder-row-icon">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-          <path
-            d="M2 4V13C2 13.55 2.45 14 3 14H13C13.55 14 14 13.55 14 13V6C14 5.45 13.55 5 13 5H8L6.5 3H3C2.45 3 2 3.45 2 4Z"
-            fill="currentColor"
-            opacity="0.25"
-            stroke="currentColor"
-            strokeWidth="1"
-          />
-        </svg>
+        <FileIcon
+          path={dir.path}
+          className="folder-row-icon-img"
+          fallback={
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path
+                d="M2 4V13C2 13.55 2.45 14 3 14H13C13.55 14 14 13.55 14 13V6C14 5.45 13.55 5 13 5H8L6.5 3H3C2.45 3 2 3.45 2 4Z"
+                fill="currentColor" opacity="0.25" stroke="currentColor" strokeWidth="1"
+              />
+            </svg>
+          }
+        />
       </div>
       <div className="folder-row-info">
         <div className="folder-row-name">
@@ -420,10 +424,16 @@ function LooseFileRow(props: {
   return (
     <div className="loose-file-row">
       <div className="loose-file-icon">
-        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
-          <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
-          <path d="M8.5 1.5V4H11" />
-        </svg>
+        <FileIcon
+          path={file.path}
+          className="loose-file-icon-img"
+          fallback={
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
+              <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
+              <path d="M8.5 1.5V4H11" />
+            </svg>
+          }
+        />
       </div>
       <div className="loose-file-info">
         <span className="loose-file-name">{file.name}</span>

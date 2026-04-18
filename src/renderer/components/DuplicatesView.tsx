@@ -259,10 +259,16 @@ function GroupCard({ group, isExpanded, busy, safeDeleteOnly, onToggle, onKeepNe
     <div className={`duplicate-group ${isExpanded ? "expanded" : ""}`}>
       <div className="duplicate-group-header" onClick={onToggle}>
         <div className="duplicate-group-icon">
-          <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
-            <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
-            <path d="M8.5 1.5V4H11" />
-          </svg>
+          <FileIcon
+            path={group.files[0]?.path ?? name}
+            className="duplicate-group-icon-img"
+            fallback={
+              <svg width="16" height="16" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.1" opacity="0.5">
+                <path d="M3 1.5H8.5L11 4V12.5H3V1.5Z" />
+                <path d="M8.5 1.5V4H11" />
+              </svg>
+            }
+          />
         </div>
         <div className="duplicate-group-info">
           <span className="duplicate-group-name">{name}</span>

@@ -309,6 +309,22 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         </svg>
         Open file
       </button>
+      <button
+        className="treemap-ctx-item"
+        onClick={() => {
+          onClose();
+          void navigator.clipboard.writeText(file.path).then(
+            () => toast("success", "Path copied", file.path),
+            () => toast("error", "Couldn't copy path"),
+          );
+        }}
+      >
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+          <rect x="4" y="4" width="8" height="9" rx="1" />
+          <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
+        </svg>
+        Copy path
+      </button>
       <div className="treemap-ctx-divider" />
       <button
         className="treemap-ctx-item"

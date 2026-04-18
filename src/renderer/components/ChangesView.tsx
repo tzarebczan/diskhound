@@ -13,6 +13,7 @@ import type {
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { FileIcon } from "./FileIcon";
 
 interface Props {
   rootPath: string | null;
@@ -491,6 +492,7 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
         return (
           <div key={d.path} className="changes-row">
             <div className={`changes-row-badge ${badgeClass(d.kind)}`}>{d.kind}</div>
+            <FileIcon path={d.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
               <div className="changes-row-name">{d.name}</div>
               <div className="changes-row-path">{d.path}</div>
@@ -715,6 +717,7 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onSho
         return (
           <div key={change.path} className="changes-row">
             <div className={`changes-row-badge ${change.kind}`}>{change.kind}</div>
+            <FileIcon path={change.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
               <div className="changes-row-name">{name}</div>
               <div className="changes-row-path">{change.path}</div>
