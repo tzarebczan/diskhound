@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord } from "../../shared/contracts";
-import { formatBytes } from "../lib/format";
+import { formatBytes, humanAge } from "../lib/format";
 import { useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
@@ -19,7 +19,9 @@ interface ContextMenuState {
   file: ScanFileRecord;
 }
 
-const GAP = 1;
+// 0 = edge-to-edge (WinDirStat style). The cushion shading provides visual
+// separation without needing a gap between rects.
+const GAP = 0;
 
 export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,13 +91,27 @@ export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) 
       ctx.fillStyle = r.color;
       ctx.fillRect(x, y, w, h);
 
-      // Subtle bevel: light top-left edge, dark bottom-right
-      ctx.fillStyle = "rgba(255,255,255,0.08)";
-      ctx.fillRect(x, y, w, 1);
-      ctx.fillRect(x, y, 1, h);
-      ctx.fillStyle = "rgba(0,0,0,0.15)";
-      ctx.fillRect(x, y + h - 1, w, 1);
-      ctx.fillRect(x + w - 1, y, 1, h);
+      // Cushion shading: radial gradient from top-left gives each rect a
+      // "puffy" 3D look (à la WinDirStat). Skip for very small rects where
+      // the gradient cost isn't worth it.
+      if (w >= 6 && h >= 6) {
+        const radius = Math.max(w, h) * 0.9;
+        const grad = ctx.createRadialGradient(
+          x + w * 0.25, y + h * 0.2, 0,
+          x + w * 0.25, y + h * 0.2, radius,
+        );
+        grad.addColorStop(0, "rgba(255,255,255,0.28)");
+        grad.addColorStop(0.5, "rgba(255,255,255,0.04)");
+        grad.addColorStop(1, "rgba(0,0,0,0.30)");
+        ctx.fillStyle = grad;
+        ctx.fillRect(x, y, w, h);
+      } else {
+        // Flat bevel fallback for tiny rects
+        ctx.fillStyle = "rgba(255,255,255,0.08)";
+        ctx.fillRect(x, y, w, 1);
+        ctx.fillStyle = "rgba(0,0,0,0.15)";
+        ctx.fillRect(x, y + h - 1, w, 1);
+      }
 
       // Labels — render file name + size with text shadow for readability
       const pad = 4;
@@ -211,6 +227,7 @@ export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) 
           <span className="treemap-tooltip-size">{formatBytes(tooltip.file.size)}</span>
           <span className="treemap-tooltip-name">{tooltip.file.name}</span>
           <div className="treemap-tooltip-path">{tooltip.file.path}</div>
+          <div className="treemap-tooltip-meta">Modified {humanAge(tooltip.file.modifiedAt)}</div>
         </div>
       )}
 

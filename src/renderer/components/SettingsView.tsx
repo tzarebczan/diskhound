@@ -162,6 +162,7 @@ export function SettingsView() {
           value={settings.monitoring.enabled}
           onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, enabled: v } })}
         />
+        <RunNowRow defaultRootPath={settings.scanning.defaultRootPath} />
         <NumberRow
           label="Check interval (minutes)"
           value={settings.monitoring.checkIntervalMinutes}
@@ -236,6 +237,40 @@ export function SettingsView() {
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, safeDeleteToTrash: v } })} />
       </div>
       </div>
+    </div>
+  );
+}
+
+function RunNowRow({ defaultRootPath }: { defaultRootPath: string }) {
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    const r = await nativeApi.runScheduledScanNow();
+    setBusy(false);
+    if (r?.ok) toast("success", "Scheduled rescan started", r.message);
+    else toast("warning", "Couldn't start scheduled rescan", r?.message ?? "Unknown error");
+  };
+
+  const hasPath = Boolean(defaultRootPath);
+
+  return (
+    <div className="setting-row">
+      <div>
+        <div className="setting-label">Run a scheduled scan now</div>
+        <div className="setting-desc">
+          {hasPath
+            ? `Triggers an immediate scan of ${defaultRootPath} as if the interval had elapsed.`
+            : "Set a default scan path above, or run a manual scan once — DiskHound auto-fills this after the first scan."}
+        </div>
+      </div>
+      <button
+        className="action-btn"
+        disabled={busy || !hasPath}
+        onClick={() => void run()}
+      >
+        {busy ? "Starting..." : "Run now"}
+      </button>
     </div>
   );
 }

@@ -234,7 +234,8 @@ void app.whenReady().then(async () => {
 
         const settings = settingsStore?.get();
 
-        // Record in recent scans
+        // Record in recent scans, and auto-seed defaultRootPath so monitoring
+        // has a target to rescan without the user having to set one manually.
         if (settings && message.snapshot.rootPath) {
           const MAX_RECENT = 10;
           const recent = settings.recentScans.filter(
@@ -247,7 +248,18 @@ void app.whenReady().then(async () => {
             bytesFound: message.snapshot.bytesSeen,
           });
           if (recent.length > MAX_RECENT) recent.length = MAX_RECENT;
-          void settingsStore!.set({ ...settings, recentScans: recent });
+
+          const shouldSeedDefaultPath =
+            session.trigger === "manual" && !settings.scanning.defaultRootPath;
+          const nextScanning = shouldSeedDefaultPath
+            ? { ...settings.scanning, defaultRootPath: message.snapshot.rootPath }
+            : settings.scanning;
+
+          void settingsStore!.set({
+            ...settings,
+            scanning: nextScanning,
+            recentScans: recent,
+          });
         }
 
         if (settings?.notifications.scanComplete) {
@@ -517,6 +529,44 @@ void app.whenReady().then(async () => {
     startScan(rootPath, scanOptions),
   );
   ipcMain.handle("diskhound:cancel-scan", () => cancelActiveScan());
+
+  // File icon cache keyed by extension (case-insensitive). Most files share
+  // an extension, so we only hit the OS once per type.
+  const iconCache = new Map<string, string | null>();
+
+  ipcMain.handle("diskhound:get-file-icon", async (_event, filePath: string, size: "small" | "normal" | "large" = "small") => {
+    const ext = Path.extname(filePath).toLowerCase() || "(no-ext)";
+    const key = `${ext}:${size}`;
+    if (iconCache.has(key)) return iconCache.get(key) ?? null;
+
+    try {
+      const image = await app.getFileIcon(filePath, { size });
+      if (image.isEmpty()) {
+        iconCache.set(key, null);
+        return null;
+      }
+      const dataUrl = image.toDataURL();
+      iconCache.set(key, dataUrl);
+      return dataUrl;
+    } catch {
+      iconCache.set(key, null);
+      return null;
+    }
+  });
+
+  ipcMain.handle("diskhound:run-scheduled-scan-now", async () => {
+    const settings = settingsStore?.get();
+    if (!settings) return { ok: false, message: "Settings unavailable" };
+    const path = settings.scanning.defaultRootPath;
+    if (!path) {
+      return { ok: false, message: "Set a default scan path first, or run a manual scan to auto-populate it." };
+    }
+    if (activeScan) {
+      return { ok: false, message: "A scan is already running." };
+    }
+    await startScan(path, defaultScanOptions(), "scheduled");
+    return { ok: true, message: `Scheduled rescan started for ${path}` };
+  });
 
   // ── IPC: Path Actions ─────────────────────────────────────
 

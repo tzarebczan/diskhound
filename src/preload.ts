@@ -23,6 +23,8 @@ const api: DiskhoundNativeApi = {
   getCurrentSnapshot: () => ipcRenderer.invoke("diskhound:get-current-snapshot"),
   startScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-scan", rootPath, options),
   cancelScan: () => ipcRenderer.invoke("diskhound:cancel-scan"),
+  runScheduledScanNow: () => ipcRenderer.invoke("diskhound:run-scheduled-scan-now"),
+  getFileIcon: (path, size) => ipcRenderer.invoke("diskhound:get-file-icon", path, size),
 
   // Path actions
   revealPath: (targetPath) => ipcRenderer.invoke("diskhound:reveal-path", targetPath),

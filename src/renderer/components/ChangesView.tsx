@@ -91,8 +91,15 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const [detailTab, setDetailTab] = useState<DetailTab>("files");
   const [fullDiff, setFullDiff] = useState<FullDiffResult | null>(null);
   const [fullDiffLoading, setFullDiffLoading] = useState(false);
+  const [monitoringEnabled, setMonitoringEnabled] = useState<boolean | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const prevStatusRef = useRef(snapshot.status);
+
+  useEffect(() => {
+    void nativeApi.getSettings().then((s) => {
+      if (s) setMonitoringEnabled(s.monitoring.enabled);
+    });
+  }, []);
 
   // Resolve all time ranges from history (pure, no IPC)
   const resolvedRanges = useMemo(
@@ -215,8 +222,19 @@ export function ChangesView({ rootPath, snapshot }: Props) {
           </div>
           <div className="changes-empty-text">No previous scan to compare</div>
           <div className="changes-empty-hint">
-            Run another scan of the same path to see what changed.
-            {history.length === 1 && " One scan recorded so far."}
+            {history.length === 1 ? "One scan recorded so far." : "Run a scan of this path first."}
+          </div>
+          <div className="changes-empty-paths">
+            <div className="changes-empty-path-title">How to get diffs</div>
+            <ol className="changes-empty-path-list">
+              <li><strong>Rescan manually</strong> — hit the Rescan button. Each run adds a history entry and the diff updates instantly.</li>
+              <li>
+                <strong>Enable Background Monitoring</strong> in Settings.{" "}
+                {monitoringEnabled === false && "It's currently off."}{" "}
+                {monitoringEnabled === true && "Already on — scheduled rescans will start running in the background."}
+                {" "}Once on, DiskHound rescans your default path on a schedule (24h by default).
+              </li>
+            </ol>
           </div>
         </div>
       </div>

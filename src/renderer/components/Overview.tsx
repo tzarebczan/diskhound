@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "preact/hooks";
 
 import type { ExtensionBucket, ScanSnapshot } from "../../shared/contracts";
-import { formatBytes, formatCount, formatElapsed } from "../lib/format";
+import { formatBytes, formatCount, formatElapsed, humanAge } from "../lib/format";
 import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import {
   buildTreemapComposition,
@@ -9,6 +9,7 @@ import {
   type TreemapFeaturedItem,
 } from "../lib/treemap";
 import { nativeApi } from "../nativeApi";
+import { FileIcon } from "./FileIcon";
 import { Treemap } from "./Treemap";
 
 interface Props {
@@ -195,13 +196,16 @@ function FeaturedFileCard({ item, rank, isBusy, safeDeleteOnly, onReveal, onOpen
         <div className="treemap-featured-share">{Math.round(item.share * 100)}%</div>
       </div>
       <div className="treemap-featured-name-row">
-        <span className="ext-dot" style={{ background: color }} />
+        <FileIcon path={item.file.path} className="treemap-featured-icon" fallback={<span className="ext-dot" style={{ background: color }} />} />
         <span className="treemap-featured-name">{item.file.name}</span>
       </div>
       <div className="treemap-featured-path">{item.file.path}</div>
       <div className="treemap-featured-size-row">
         <span className="treemap-featured-size">{formatBytes(item.file.size)}</span>
         <span className="treemap-featured-type">{item.file.extension}</span>
+      </div>
+      <div className="treemap-featured-modified">
+        Modified {humanAge(item.file.modifiedAt)}
       </div>
       <div className="treemap-featured-bar">
         <div

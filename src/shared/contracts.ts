@@ -398,6 +398,9 @@ export interface DiskhoundNativeApi {
   getCurrentSnapshot: () => Promise<ScanSnapshot>;
   startScan: (rootPath: string, options: ScanOptions) => Promise<ScanSnapshot>;
   cancelScan: () => Promise<ScanSnapshot>;
+  runScheduledScanNow: () => Promise<PathActionResult>;
+  /** Returns a data-URL PNG of the OS-provided file icon, or null if unavailable. */
+  getFileIcon: (path: string, size?: "small" | "normal" | "large") => Promise<string | null>;
 
   // Path actions
   revealPath: (targetPath: string) => Promise<PathActionResult>;
@@ -470,7 +473,7 @@ export function defaultSettings(): AppSettings {
     },
     scanning: {
       defaultRootPath: "",
-      topFileLimit: 200,
+      topFileLimit: 2000,
       topDirectoryLimit: 1000,
     },
     monitoring: {

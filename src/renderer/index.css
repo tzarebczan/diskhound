@@ -899,6 +899,23 @@ button, input, select, textarea { font: inherit; }
   text-overflow: ellipsis;
   max-width: 360px;
 }
+.treemap-tooltip-meta {
+  font-size: 10px;
+  color: var(--text-tertiary);
+  margin-top: 2px;
+}
+.treemap-featured-modified {
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.treemap-featured-icon {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
 
 /* ── Treemap Context Menu ── */
 .treemap-ctx-menu {
@@ -1164,7 +1181,7 @@ button, input, select, textarea { font: inherit; }
 /* Column header row */
 .file-col-header {
   display: grid;
-  grid-template-columns: 28px 90px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
   align-items: center;
   gap: 8px;
   padding: 0 12px;
@@ -1200,7 +1217,7 @@ button, input, select, textarea { font: inherit; }
 
 .file-row {
   display: grid;
-  grid-template-columns: 28px 90px 1fr 80px 64px auto;
+  grid-template-columns: 28px 90px 18px 1fr 80px 64px auto;
   align-items: center;
   gap: 8px;
   padding: 6px 12px;
@@ -1215,6 +1232,19 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
   justify-content: center;
 }
+
+/* File icon (OS-provided thumbnail) shown in list rows */
+.file-row-icon,
+.changes-row-file-icon,
+.duplicate-file-icon-img {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  object-fit: contain;
+}
+.file-row-icon-hdr { width: 18px; }
+
 .file-check input {
   width: 14px;
   height: 14px;
@@ -2575,6 +2605,34 @@ button, input, select, textarea { font: inherit; }
   margin-bottom: 2px;
 }
 
+.changes-empty-paths {
+  margin-top: 20px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-row);
+  max-width: 520px;
+  text-align: left;
+}
+.changes-empty-path-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.changes-empty-path-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+.changes-empty-path-list li + li { margin-top: 8px; }
+.changes-empty-path-list strong { color: var(--text); font-weight: 600; }
+
 .changes-history-date {
   display: flex;
   align-items: center;
@@ -3372,7 +3430,7 @@ button, input, select, textarea { font: inherit; }
   .search-bar::after {
     display: none;
   }
-  .file-row { grid-template-columns: 28px 80px 1fr 60px auto; }
+  .file-row { grid-template-columns: 28px 80px 18px 1fr 60px auto; }
   .file-age { display: none; }
   .cleanup-grid { grid-template-columns: 1fr; }
   .picker-card { max-width: 100%; padding: 20px; }

@@ -9,6 +9,7 @@ import type {
 import { formatBytes, humanAge } from "../lib/format";
 import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 
 interface Props {
@@ -297,6 +298,7 @@ function GroupCard({ group, isExpanded, busy, safeDeleteOnly, onToggle, onKeepNe
               const isBusy = busy.has(file.path);
               return (
                 <div key={file.path} className="duplicate-file-row">
+                  <FileIcon path={file.path} className="duplicate-file-icon-img" />
                   <div className="duplicate-file-info">
                     <span className="duplicate-file-path">{file.path}</span>
                     <span className="duplicate-file-meta">

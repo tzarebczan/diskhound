@@ -4,6 +4,7 @@ import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../share
 import { formatBytes, humanAge, relativePath } from "../lib/format";
 import { useBusySet, useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 
 type QuickFilter = "all" | "video" | "archives" | "installers" | "images" | "audio" | "documents";
@@ -251,6 +252,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
       <div className="file-col-header">
         <div className="file-check" />
         <SortableHeader field="size" label="Size" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
+        <div className="file-row-icon-hdr" />
         <SortableHeader field="name" label="Name" current={sortField} dir={sortDir} onToggle={toggleSort} />
         <SortableHeader field="ext" label="Type" current={sortField} dir={sortDir} onToggle={toggleSort} align="center" />
         <SortableHeader field="age" label="Age" current={sortField} dir={sortDir} onToggle={toggleSort} align="right" />
@@ -338,6 +340,7 @@ function FileRow(props: {
         <input type="checkbox" checked={selected} onChange={onToggle} />
       </div>
       <div className="file-size">{formatBytes(file.size)}</div>
+      <FileIcon path={file.path} className="file-row-icon" />
       <div className="file-info">
         <div className="file-name">{file.name}</div>
         <div className="file-path">{relativePath(file.path, rootPath)}</div>
