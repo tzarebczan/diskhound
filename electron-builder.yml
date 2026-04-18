@@ -36,17 +36,18 @@ win:
   artifactName: "${productName}-${version}-Setup.${ext}"
 
 nsis:
+  # Per-user install (no UAC needed). This matters for runAfterFinish:
+  # the finish-page launch only works reliably when the installer isn't
+  # elevated, because an elevated installer can't launch an unelevated child.
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  allowElevation: true
+  allowElevation: false
   deleteAppDataOnUninstall: false
   createDesktopShortcut: always
   createStartMenuShortcut: true
   shortcutName: DiskHound
   runAfterFinish: true
-  installerSidebar: null
-  uninstallerSidebar: null
 
 mac:
   target:

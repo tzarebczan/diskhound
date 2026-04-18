@@ -137,7 +137,26 @@ function createTrayIconImage(): Electron.NativeImage {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
+// Log startup diagnostics so "app silently fails to launch" is debuggable.
+// Writes to %APPDATA%/DiskHound/startup.log (or equivalent on other OSes).
+function writeStartupLog(message: string): void {
+  try {
+    const logPath = Path.join(app.getPath("userData"), "startup.log");
+    FS.mkdir(Path.dirname(logPath), { recursive: true }).catch(() => {});
+    FS.appendFile(logPath, `[${new Date().toISOString()}] ${message}\n`).catch(() => {});
+  } catch { /* best effort */ }
+}
+
+// Surface uncaught exceptions so a silent crash at least shows up.
+process.on("uncaughtException", (err) => {
+  writeStartupLog(`UNCAUGHT: ${err?.stack ?? err?.message ?? String(err)}`);
+  try {
+    dialog.showErrorBox("DiskHound — Unexpected error", String(err?.stack ?? err?.message ?? err));
+  } catch { /* noop */ }
+});
+
 void app.whenReady().then(async () => {
+  writeStartupLog("whenReady fired");
   if (process.platform === "win32") {
     app.setAppUserModelId("com.diskhound.app");
   }
@@ -960,6 +979,7 @@ void app.whenReady().then(async () => {
 
   restartMonitoring(settings);
   await createWindow();
+  writeStartupLog("window created and loaded");
 
   // Check if launched with --start-minimized (from login item)
   const canLaunchToTray = settings.general.minimizeToTray && Boolean(tray);
@@ -985,7 +1005,9 @@ void app.whenReady().then(async () => {
       autoUpdater = require("electron-updater").autoUpdater;
       autoUpdater.autoDownload = false;
       autoUpdater.autoInstallOnAppQuit = true;
-      if (process.platform === "win32") autoUpdater.allowElevation = true;
+      // Per-user install location (LocalAppData) doesn't need elevation; setting
+      // this false lets the silent updater run without a UAC prompt.
+      autoUpdater.allowElevation = false;
 
       autoUpdater.on("checking-for-update", () => {
         emitUpdateStatus({ phase: "checking", currentVersion });
@@ -1026,7 +1048,9 @@ void app.whenReady().then(async () => {
   ipcMain.on("diskhound:quit-and-install", () => {
     if (!autoUpdater) return;
     isQuitting = true;
-    try { autoUpdater.quitAndInstall(); } catch { /* ignore */ }
+    // Silent install + auto-relaunch after update.
+    // isSilent=true → skip NSIS UI; isForceRunAfter=true → relaunch DiskHound once install finishes.
+    try { autoUpdater.quitAndInstall(true, true); } catch { /* ignore */ }
   });
 
   app.on("activate", () => {
@@ -1050,6 +1074,11 @@ void app.whenReady().then(async () => {
       tray = null;
     }
   });
+}).catch((err) => {
+  writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);
+  try {
+    dialog.showErrorBox("DiskHound — Startup failed", String(err?.stack ?? err?.message ?? err));
+  } catch { /* noop */ }
 });
 
 app.on("window-all-closed", () => {
