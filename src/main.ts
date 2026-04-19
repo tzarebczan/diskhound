@@ -26,6 +26,7 @@ import {
   type ScanFileRecord,
   type ScanOptions,
   type ScanSnapshot,
+  type SystemMemorySnapshot,
   type ToastMessage,
   type WorkerToMainMessage,
 } from "./shared/contracts";
@@ -606,8 +607,58 @@ void app.whenReady().then(async () => {
 
   // ── IPC: Process / Memory viewer ──────────────────────────
 
-  ipcMain.handle("diskhound:get-memory-snapshot", async () => {
-    return sampleSystemMemory();
+  // Module-scope cache so subsequent calls (tab switches, renderer remounts)
+  // can return instantly. A single in-flight promise dedupes concurrent
+  // refresh requests so we don't stack PowerShell invocations.
+  let memoryCache: SystemMemorySnapshot | null = null;
+  let memorySamplePromise: Promise<SystemMemorySnapshot> | null = null;
+
+  const refreshMemorySample = (): Promise<SystemMemorySnapshot> => {
+    if (memorySamplePromise) return memorySamplePromise;
+    memorySamplePromise = sampleSystemMemory()
+      .then((snap) => {
+        memoryCache = snap;
+        memorySamplePromise = null;
+        return snap;
+      })
+      .catch((err) => {
+        memorySamplePromise = null;
+        throw err;
+      });
+    return memorySamplePromise;
+  };
+
+  ipcMain.handle("diskhound:get-memory-snapshot", () => refreshMemorySample());
+
+  // Instant cached read — returns null if nothing sampled yet. The renderer
+  // uses this on mount to paint the list immediately, then kicks off a
+  // real refresh in the background.
+  ipcMain.handle("diskhound:get-cached-memory-snapshot", () => {
+    if (!memoryCache) return null;
+    return { ...memoryCache, isStale: true };
+  });
+
+  // Per-path icon cache for executables — unlike get-file-icon (which keys
+  // by extension), each .exe typically has its OWN icon, so we must cache
+  // by full path.
+  const exeIconCache = new Map<string, string | null>();
+  ipcMain.handle("diskhound:get-executable-icon", async (_event, filePath: string, size: "small" | "normal" | "large" = "small") => {
+    if (!filePath) return null;
+    const key = `${filePath}:${size}`;
+    if (exeIconCache.has(key)) return exeIconCache.get(key) ?? null;
+    try {
+      const image = await app.getFileIcon(filePath, { size });
+      if (image.isEmpty()) {
+        exeIconCache.set(key, null);
+        return null;
+      }
+      const dataUrl = image.toDataURL();
+      exeIconCache.set(key, dataUrl);
+      return dataUrl;
+    } catch {
+      exeIconCache.set(key, null);
+      return null;
+    }
   });
 
   ipcMain.handle("diskhound:kill-process", async (_event, pid: number, signal: "soft" | "hard"): Promise<PathActionResult> => {

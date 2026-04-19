@@ -369,12 +369,16 @@ export interface ProcessInfo {
   name: string;
   /** Resident set size in bytes (real RAM used) */
   memoryBytes: number;
-  /** CPU percent when available (Windows wmic gives instantaneous; Unix ps gives %CPU). */
+  /** CPU percent when available — computed from delta between samples. */
   cpuPercent: number | null;
   /** True when the user owns the process. On Windows we can't always tell cheaply — may be true for all. */
   userOwned: boolean;
   /** Full command line or executable path, when we can get it. */
   commandLine?: string;
+  /** Full path to the executable, when known. Used for icon resolution. */
+  exePath?: string | null;
+  /** Cumulative CPU time in ms — used to compute cpuPercent between samples. */
+  cpuTimeMs?: number;
 }
 
 export interface SystemMemorySnapshot {
@@ -389,6 +393,10 @@ export interface SystemMemorySnapshot {
   processes: ProcessInfo[];
   sampledAt: number;
   errorMessage?: string;
+  /** True when this snapshot came from cache and is being refreshed. */
+  isStale?: boolean;
+  /** Elapsed ms the most recent sample took — useful for UX feedback. */
+  sampleElapsedMs?: number;
 }
 
 export type KillSignal = "soft" | "hard";
@@ -462,7 +470,14 @@ export interface DiskhoundNativeApi {
 
   // Process / memory viewer
   getMemorySnapshot: () => Promise<SystemMemorySnapshot>;
+  /** Returns the last sampled snapshot without triggering a fresh sample —
+   *  use for instant paint on tab switch. Returns null on cold boot. */
+  getCachedMemorySnapshot: () => Promise<SystemMemorySnapshot | null>;
   killProcess: (pid: number, signal: KillSignal) => Promise<PathActionResult>;
+  /** Icon for a specific executable, keyed by full path (unlike
+   *  getFileIcon which keys by extension — each .exe typically has its
+   *  own unique icon). */
+  getExecutableIcon: (path: string, size?: "small" | "normal" | "large") => Promise<string | null>;
 
   // Path actions
   revealPath: (targetPath: string) => Promise<PathActionResult>;

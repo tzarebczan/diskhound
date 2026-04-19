@@ -47,6 +47,8 @@ const api: DiskhoundNativeApi = {
   getDiskSpace: () => ipcRenderer.invoke("diskhound:get-disk-space"),
   getDiskDeltaHistory: () => ipcRenderer.invoke("diskhound:get-disk-delta-history"),
   getScanScheduleInfo: () => ipcRenderer.invoke("diskhound:get-scan-schedule-info"),
+  getCachedMemorySnapshot: () => ipcRenderer.invoke("diskhound:get-cached-memory-snapshot"),
+  getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis
   analyzeCleanup: (rootPath, files, dirs) =>
