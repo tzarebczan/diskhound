@@ -24,10 +24,24 @@ export function indexFilePath(id: string): string {
   return Path.join(indexDir, `${id}${INDEX_SUFFIX}`);
 }
 
-/** Short NDJSON record: `{"p":"<path>","s":<size>,"m":<mtime>}` */
+/**
+ * Short NDJSON record: `{"p":"<path>","s":<size>,"m":<mtime>}` for files.
+ * Directory entries have no `s` field: `{"p":"<dir-path>","t":"d","m":<mtime>}`.
+ * The `t` discriminator is absent/ignored for file entries to keep the format
+ * backward-compatible with pre-v0.2.5 indexes (which only had file entries).
+ */
 export interface IndexRecord {
   p: string;
   s: number;
+  m: number;
+  /** Optional type: "d" for directories, absent/"f" for files. */
+  t?: "d" | "f";
+}
+
+/** Directory-mtime record in the same NDJSON stream (no size). */
+export interface DirIndexRecord {
+  p: string;
+  t: "d";
   m: number;
 }
 
@@ -71,12 +85,77 @@ export async function loadIndex(filePath: string): Promise<Map<string, IndexReco
     if (!line) continue;
     try {
       const rec = JSON.parse(line) as IndexRecord;
-      if (rec && typeof rec.p === "string") {
+      if (rec && typeof rec.p === "string" && rec.t !== "d") {
+        // Only file entries belong in the file-diff map.
         map.set(normPath(rec.p), rec);
       }
     } catch { /* skip malformed lines */ }
   }
   return map;
+}
+
+/**
+ * Load directory mtimes from an index file into a path-keyed Map.
+ * Used by the Phase-1 smart-rescan optimization to skip unchanged subtrees.
+ * Returns an empty map for legacy indexes (pre-v0.2.5) that don't include
+ * directory entries.
+ */
+export async function loadDirMtimes(filePath: string): Promise<Map<string, number>> {
+  const map = new Map<string, number>();
+  if (!FS.existsSync(filePath)) return map;
+
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  source.pipe(gunzip);
+
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    try {
+      const rec = JSON.parse(line) as IndexRecord;
+      if (rec && rec.t === "d" && typeof rec.p === "string" && typeof rec.m === "number") {
+        map.set(normPath(rec.p), rec.m);
+      }
+    } catch { /* skip malformed lines */ }
+  }
+  return map;
+}
+
+/**
+ * Stream every file record from an index into the given per-dir bucket. Used
+ * by Phase-1 incremental scanning: when a directory's mtime matches the
+ * baseline, we inherit all files under it rather than re-walking.
+ *
+ * Returns a map from parent-directory path (normalized) to the file records
+ * whose parent is that directory.
+ */
+export async function loadFilesByParent(
+  filePath: string,
+): Promise<Map<string, IndexRecord[]>> {
+  const byParent = new Map<string, IndexRecord[]>();
+  if (!FS.existsSync(filePath)) return byParent;
+
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  source.pipe(gunzip);
+
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    try {
+      const rec = JSON.parse(line) as IndexRecord;
+      if (!rec || typeof rec.p !== "string" || rec.t === "d") continue;
+      if (typeof rec.s !== "number") continue;
+      const parent = normPath(Path.dirname(rec.p));
+      let list = byParent.get(parent);
+      if (!list) {
+        list = [];
+        byParent.set(parent, list);
+      }
+      list.push(rec);
+    } catch { /* skip malformed lines */ }
+  }
+  return byParent;
 }
 
 /** Diff two indexes → FullDiffResult (sorted by absolute impact, capped at limit). */
@@ -187,6 +266,8 @@ export async function loadLargestFiles(
       rec = JSON.parse(line) as IndexRecord;
     } catch { continue; }
     if (!rec || typeof rec.s !== "number" || rec.s < minBytes) continue;
+    // Skip directory entries — they carry mtime only, no size.
+    if (rec.t === "d") continue;
 
     if (top.length < limit) {
       top.push(rec);

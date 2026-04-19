@@ -597,6 +597,72 @@ button, input, select, textarea { font: inherit; }
   background: var(--bg);
 }
 
+/* ── Monitoring nudge (top of Overview when monitoring is disabled) ── */
+.monitoring-nudge {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 12px 0;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(139,92,246,0.08));
+  border: 1px solid rgba(59,130,246,0.35);
+  font-size: 13px;
+  animation: monitoring-nudge-in 0.3s ease-out;
+}
+:root.light .monitoring-nudge {
+  background: linear-gradient(135deg, rgba(59,130,246,0.08), rgba(139,92,246,0.06));
+}
+@keyframes monitoring-nudge-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.monitoring-nudge-icon {
+  color: rgb(96, 165, 250);
+  flex-shrink: 0;
+}
+.monitoring-nudge-text {
+  flex: 1;
+  color: var(--text);
+  line-height: 1.45;
+}
+.monitoring-nudge-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.monitoring-nudge-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.action-btn.primary {
+  background: rgb(59, 130, 246);
+  color: white;
+  border-color: rgb(59, 130, 246);
+}
+.action-btn.primary:hover:not(:disabled) {
+  background: rgb(37, 99, 235);
+  border-color: rgb(37, 99, 235);
+}
+.monitoring-nudge-dismiss {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.monitoring-nudge-dismiss:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.05);
+}
+:root.light .monitoring-nudge-dismiss:hover {
+  background: rgba(0,0,0,0.05);
+}
+
 .metric {
   display: flex;
   align-items: baseline;

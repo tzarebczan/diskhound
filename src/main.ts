@@ -1,4 +1,5 @@
 import * as FS from "node:fs/promises";
+import * as FS_SYNC from "node:fs";
 import * as Path from "node:path";
 import { Worker } from "node:worker_threads";
 
@@ -369,6 +370,22 @@ void app.whenReady().then(async () => {
     );
   };
 
+  /**
+   * Locate the most recent completed scan's index file for the given root —
+   * used as the Phase-1 baseline so the next scan can skip unchanged subtrees.
+   * Returns undefined if no prior scan exists or if the index file is missing.
+   */
+  const resolveBaselineIndexFor = (rootPath: string): string | undefined => {
+    const history = getScanHistory(rootPath);
+    for (const entry of history) {
+      const candidate = indexFilePath(entry.id);
+      try {
+        if (FS_SYNC.existsSync(candidate)) return candidate;
+      } catch { /* ignore */ }
+    }
+    return undefined;
+  };
+
   const createWorkerSession = (
     rootPath: string,
     scanOptions: ScanOptions,
@@ -377,6 +394,7 @@ void app.whenReady().then(async () => {
     const worker = new Worker(scanWorkerEntry);
     const startingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "js-worker");
     const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
+    const baselineIndex = resolveBaselineIndexFor(rootPath);
 
     const session: WorkerScanSession = {
       kind: "worker",
@@ -412,6 +430,7 @@ void app.whenReady().then(async () => {
         rootPath,
         options: scanOptions,
         indexOutput: tempIndexPath,
+        baselineIndex,
       },
     });
 
@@ -425,6 +444,7 @@ void app.whenReady().then(async () => {
   ): { session: ActiveScanSession; startingSnapshot: ScanSnapshot } => {
     const nativeStartingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "native-sidecar");
     const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
+    const baselineIndex = resolveBaselineIndexFor(rootPath);
 
     // Buffer for messages that arrive before the session is fully wired
     const earlyMessages: WorkerToMainMessage[] = [];
@@ -433,7 +453,7 @@ void app.whenReady().then(async () => {
 
     const nativeResult = createNativeScannerSession(
       projectRoot,
-      { rootPath, options: scanOptions, indexOutput: tempIndexPath },
+      { rootPath, options: scanOptions, indexOutput: tempIndexPath, baselineIndex },
       {
         onMessage: (message) => {
           if (!sessionRef) {

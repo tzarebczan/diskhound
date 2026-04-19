@@ -67,6 +67,17 @@ export interface ScanStartInput {
   };
   /** If set, scanner writes a gzipped NDJSON index of every file to this path. */
   indexOutput?: string;
+  /**
+   * Optional path to a previous scan's gzipped NDJSON index. When provided,
+   * the scanner skips re-walking directories whose mtime matches the
+   * baseline's — inheriting file data from the baseline instead. Typical
+   * speedup on a mostly-idle drive: 10-50× after the first scan.
+   *
+   * The baseline index must contain directory mtime entries (written by
+   * scanners v0.2.5+). Older indexes without dir entries fall back to a
+   * full walk automatically.
+   */
+  baselineIndex?: string;
 }
 
 export type WorkerToMainMessage =

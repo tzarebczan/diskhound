@@ -10,7 +10,10 @@ import {
 } from "../lib/treemap";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
+import { toast } from "./Toasts";
 import { Treemap } from "./Treemap";
+
+const MONITORING_NUDGE_DISMISSED_KEY = "diskhound:monitoring-nudge-dismissed";
 
 interface Props {
   snapshot: ScanSnapshot;
@@ -85,6 +88,7 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
 
   return (
     <div className="overview">
+      <MonitoringNudge />
       <div className="metrics-strip">
         <Metric value={formatBytes(bytesSeen)} label="scanned" accent />
         <Metric value={formatCount(filesVisited)} label="files" />
@@ -256,6 +260,80 @@ function Metric({ value, label, accent }: { value: string; label: string; accent
     <div className="metric">
       <span className={`metric-value ${accent ? "accent" : ""}`}>{value}</span>
       <span className="metric-label">{label}</span>
+    </div>
+  );
+}
+
+/**
+ * Dismissible banner that nudges the user to turn on background monitoring.
+ * Shows only when monitoring is currently off AND the user hasn't dismissed
+ * it previously (persisted via localStorage). Clicking "Enable" flips the
+ * setting on and dismisses the banner; clicking the × just dismisses.
+ */
+function MonitoringNudge() {
+  const [monitoringEnabled, setMonitoringEnabled] = useState<boolean | null>(null);
+  const [dismissed, setDismissed] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(MONITORING_NUDGE_DISMISSED_KEY) === "1";
+  });
+  const [enabling, setEnabling] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void nativeApi.getSettings().then((s) => {
+      if (!cancelled && s) setMonitoringEnabled(s.monitoring.enabled);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const dismiss = () => {
+    setDismissed(true);
+    try { window.localStorage.setItem(MONITORING_NUDGE_DISMISSED_KEY, "1"); } catch { /* ignore */ }
+  };
+
+  const enable = async () => {
+    setEnabling(true);
+    try {
+      const s = await nativeApi.getSettings();
+      if (!s) return;
+      await nativeApi.updateSettings({
+        ...s,
+        monitoring: { ...s.monitoring, enabled: true },
+      });
+      setMonitoringEnabled(true);
+      toast("success", "Background monitoring enabled",
+        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60}min and tell you what changed.`);
+      dismiss();
+    } finally {
+      setEnabling(false);
+    }
+  };
+
+  if (monitoringEnabled !== false || dismissed) return null;
+
+  return (
+    <div className="monitoring-nudge">
+      <div className="monitoring-nudge-icon" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
+          <path d="M12 2a6 6 0 0 0-6 6v3.6c0 .6-.3 1.2-.8 1.6L4 14v1h16v-1l-1.2-.8a2 2 0 0 1-.8-1.6V8a6 6 0 0 0-6-6z" />
+          <path d="M10 18a2 2 0 0 0 4 0" />
+        </svg>
+      </div>
+      <div className="monitoring-nudge-text">
+        <strong>Turn on background monitoring</strong>
+        <span>
+          {" "}— DiskHound will quietly rescan on a schedule (~50× faster after the first scan
+          thanks to incremental walks) and the Changes tab will fill in automatically.
+        </span>
+      </div>
+      <div className="monitoring-nudge-actions">
+        <button className="action-btn primary" disabled={enabling} onClick={() => void enable()}>
+          {enabling ? "Enabling…" : "Enable"}
+        </button>
+        <button className="monitoring-nudge-dismiss" onClick={dismiss} title="Dismiss">
+          ×
+        </button>
+      </div>
     </div>
   );
 }

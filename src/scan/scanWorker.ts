@@ -1,8 +1,9 @@
 import type { Dirent, Stats } from "node:fs";
-import { createWriteStream, mkdirSync } from "node:fs";
+import { createReadStream, createWriteStream, existsSync, mkdirSync } from "node:fs";
 import * as FS from "node:fs/promises";
 import * as Path from "node:path";
-import { createGzip } from "node:zlib";
+import { createInterface } from "node:readline";
+import { createGunzip, createGzip } from "node:zlib";
 import { parentPort } from "node:worker_threads";
 
 import {
@@ -13,6 +14,20 @@ import {
   type ScanFileRecord,
   type ScanSnapshot,
 } from "../shared/contracts";
+
+/**
+ * Parsed baseline state used by the Phase-1 smart-rescan optimization. For
+ * each directory we remember its mtime + all file records whose parent is
+ * that directory. If the directory's mtime on disk still matches the
+ * baseline's, we inherit all those file records without re-walking the
+ * subtree.
+ */
+interface Baseline {
+  dirMtimes: Map<string, number>;
+  filesByParent: Map<string, ScanFileRecord[]>;
+  /** Set of all directory paths known in the baseline (for subtree inheritance). */
+  dirs: Set<string>;
+}
 
 // Generous internal caps — large enough that no user reasonably hits them,
 // small enough that a multi-million-file scan stays memory-safe. The full
@@ -86,6 +101,14 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       indexGzip = null;
     }
   };
+  const writeDirEntry = (path: string, mtime: number) => {
+    if (!indexGzip) return;
+    try {
+      indexGzip.write(JSON.stringify({ p: path, t: "d", m: mtime }) + "\n");
+    } catch {
+      indexGzip = null;
+    }
+  };
   const finalizeIndex = async () => {
     if (!indexGzip) return;
     await new Promise<void>((resolve) => {
@@ -93,6 +116,19 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     });
     indexGzip = null;
   };
+
+  // Load baseline (Phase 1 smart-rescan). On any parse failure we silently
+  // fall back to a full walk.
+  let baseline: Baseline | null = null;
+  let inheritedFiles = 0;
+  let inheritedDirs = 0;
+  if (input.baselineIndex && existsSync(input.baselineIndex)) {
+    try {
+      baseline = await loadBaseline(input.baselineIndex);
+    } catch {
+      baseline = null;
+    }
+  }
 
   directoryTotals.set(rootPath, {
     path: rootPath,
@@ -144,6 +180,50 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     }
 
     directoriesVisited += 1;
+
+    // Phase-1 mtime skip: if we have a baseline and this directory's mtime
+    // hasn't changed, inherit the entire subtree from the baseline instead
+    // of re-walking it. This also records the dir entry in the new index
+    // so the *next* scan can do the same trick.
+    let currentDirMtime: number | null = null;
+    try {
+      const st = await FS.stat(directoryPath);
+      currentDirMtime = st.mtimeMs;
+    } catch {
+      skippedEntries += 1;
+      maybeEmitProgress();
+      continue;
+    }
+
+    if (baseline) {
+      const baselineMtime = baseline.dirMtimes.get(Path.resolve(directoryPath));
+      if (baselineMtime !== undefined && Math.abs(baselineMtime - currentDirMtime) < 2) {
+        // mtime unchanged (within 2ms tolerance for FS quirks) — inherit
+        const inherited = inheritSubtree(directoryPath, baseline);
+        for (const fileRecord of inherited) {
+          filesVisited += 1;
+          bytesSeen += fileRecord.size;
+          upsertRankedFile(largestFiles, fileRecord, TOP_FILE_LIMIT);
+          rollupDirectorySize(rootPath, fileRecord.parentPath, fileRecord.size, directoryTotals, hottestDirectories, TOP_DIRECTORY_LIMIT);
+          rollupExtension(extensionTotals, fileRecord.extension, fileRecord.size);
+          writeIndexEntry(fileRecord.path, fileRecord.size, fileRecord.modifiedAt);
+        }
+        // Also re-emit the directory entries under the subtree so the new
+        // index remains self-contained for the next scan's baseline.
+        for (const subdir of subtreeDirs(directoryPath, baseline)) {
+          const subMtime = baseline.dirMtimes.get(subdir);
+          if (subMtime !== undefined) writeDirEntry(subdir, subMtime);
+        }
+        writeDirEntry(Path.resolve(directoryPath), currentDirMtime);
+        inheritedFiles += inherited.length;
+        inheritedDirs += 1;
+        maybeEmitProgress();
+        continue;
+      }
+    }
+
+    // Record this directory's mtime so the next scan can skip it too.
+    writeDirEntry(Path.resolve(directoryPath), currentDirMtime);
 
     let entries: Dirent[];
     try {
@@ -227,6 +307,15 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
   }
 
   await finalizeIndex();
+  if (baseline) {
+    // Diagnostic: surfaces whether Phase-1 fast-path actually fired, and
+    // how much of the tree we inherited vs. walked. Shows up in the
+    // worker thread's stderr (captured by Electron's console).
+    console.error(
+      `[scanWorker] Phase-1 inheritance: ${inheritedDirs} dirs skipped, ` +
+      `${inheritedFiles} files inherited from baseline`,
+    );
+  }
   emitSnapshot("done");
 
   function maybeEmitProgress() {
@@ -345,4 +434,102 @@ function rollupExtension(
   existing.size += fileSize;
   existing.count += 1;
   extensionTotals.set(extension, existing);
+}
+
+// ── Baseline loading (Phase-1 smart-rescan) ────────────────────────────────
+
+/**
+ * Parse a gzipped NDJSON index into a Baseline suitable for mtime-skip lookup.
+ * Pre-v0.2.5 indexes have no "t:d" directory entries — in that case the
+ * returned Baseline has an empty dirMtimes map and effectively disables the
+ * skip optimization (it's not available until a v0.2.5+ scan writes the
+ * new format, which happens automatically on the next scan).
+ */
+async function loadBaseline(filePath: string): Promise<Baseline> {
+  const dirMtimes = new Map<string, number>();
+  const filesByParent = new Map<string, ScanFileRecord[]>();
+  const dirs = new Set<string>();
+
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  source.pipe(gunzip);
+
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line) continue;
+    let rec: { p?: string; s?: number; m?: number; t?: string };
+    try {
+      rec = JSON.parse(line);
+    } catch { continue; }
+    if (!rec || typeof rec.p !== "string") continue;
+
+    const normalized = Path.resolve(rec.p);
+    if (rec.t === "d") {
+      if (typeof rec.m === "number") {
+        dirMtimes.set(normalized, rec.m);
+        dirs.add(normalized);
+      }
+      continue;
+    }
+
+    if (typeof rec.s !== "number" || typeof rec.m !== "number") continue;
+
+    const name = Path.basename(rec.p);
+    const parentPath = Path.resolve(Path.dirname(rec.p));
+    const fileRecord: ScanFileRecord = {
+      path: normalized,
+      name,
+      parentPath,
+      extension: getExtension(name),
+      size: rec.s,
+      modifiedAt: rec.m,
+    };
+
+    let list = filesByParent.get(parentPath);
+    if (!list) {
+      list = [];
+      filesByParent.set(parentPath, list);
+    }
+    list.push(fileRecord);
+  }
+
+  return { dirMtimes, filesByParent, dirs };
+}
+
+/**
+ * Return all file records under the given directory (direct + descendants)
+ * from the baseline. Used when we skip walking an unchanged subtree.
+ */
+function inheritSubtree(dirPath: string, baseline: Baseline): ScanFileRecord[] {
+  const norm = Path.resolve(dirPath);
+  const out: ScanFileRecord[] = [];
+  const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
+
+  // Direct children first (hot path — avoid iterating the full map when
+  // the subtree is a leaf)
+  const direct = baseline.filesByParent.get(norm);
+  if (direct) out.push(...direct);
+
+  // Descendants: anyone whose parentPath starts with our prefix
+  for (const [parent, list] of baseline.filesByParent) {
+    if (parent === norm) continue;
+    if (parent.startsWith(prefix)) out.push(...list);
+  }
+
+  return out;
+}
+
+/**
+ * Return all directory paths under the given directory that were present in
+ * the baseline. Used to re-emit their dir entries in the new index so the
+ * next scan's baseline retains mtime info even for subtrees we skipped.
+ */
+function subtreeDirs(dirPath: string, baseline: Baseline): string[] {
+  const norm = Path.resolve(dirPath);
+  const prefix = norm.endsWith(Path.sep) ? norm : norm + Path.sep;
+  const out: string[] = [];
+  for (const dir of baseline.dirs) {
+    if (dir !== norm && dir.startsWith(prefix)) out.push(dir);
+  }
+  return out;
 }

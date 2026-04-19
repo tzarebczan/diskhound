@@ -85,6 +85,11 @@ export function createNativeScannerSession(
   if (input.indexOutput) {
     args.push("--index-output", input.indexOutput);
   }
+  // Phase-1 smart-rescan: pass the previous scan's index so the Rust
+  // scanner can skip unchanged subtrees.
+  if (input.baselineIndex) {
+    args.push("--baseline-index", input.baselineIndex);
+  }
 
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {
