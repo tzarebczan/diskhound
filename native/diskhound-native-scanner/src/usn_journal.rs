@@ -136,6 +136,15 @@ enum OutputLine {
     JournalError {
         message: String,
     },
+    CursorQuery {
+        #[serde(rename = "journalId")]
+        journal_id: u64,
+        #[serde(rename = "nextUsn")]
+        next_usn: i64,
+        #[serde(rename = "firstUsn")]
+        first_usn: i64,
+        volume: String,
+    },
 }
 
 /// Open a raw volume handle like `\\.\C:` with read access. Requires the
@@ -438,6 +447,27 @@ pub fn run_journal_mode(drive_letter: char, start_cursor: Option<i64>) -> Result
         journal_id: info.journal_id,
         records_emitted: emitted,
         records_dropped: dropped,
+    });
+
+    unsafe { CloseHandle(volume) };
+    Ok(())
+}
+
+/// Cheap query of the current journal state. Used right after a full scan
+/// completes so we can anchor the next incremental read to a cursor that
+/// represents "everything up to now." Emits a single JSON line and exits.
+pub fn query_cursor(drive_letter: char) -> Result<(), String> {
+    let volume = open_volume(drive_letter)
+        .map_err(|e| format!("Failed to open volume {drive_letter}: {e}"))?;
+
+    let info = query_journal(volume)
+        .map_err(|e| format!("Failed to query USN journal on {drive_letter}: {e}"))?;
+
+    let _ = emit(&OutputLine::CursorQuery {
+        journal_id: info.journal_id,
+        next_usn: info.next_usn,
+        first_usn: info.first_usn,
+        volume: format!("{drive_letter}:"),
     });
 
     unsafe { CloseHandle(volume) };

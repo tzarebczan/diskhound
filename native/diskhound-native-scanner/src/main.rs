@@ -335,13 +335,24 @@ fn main() {
     // On Unix, SIGTERM and SIGINT are caught.
     register_signal_handler();
 
-    // Dispatch to the USN-journal subcommand before the standard scan path
-    // so we don't require --root in that mode.
+    // Dispatch to USN-related subcommands before the standard scan path
+    // so we don't require --root in those modes.
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
-    if raw_args.iter().any(|a| a == "--mode=journal") || matches_flag(&raw_args, "--mode", "journal") {
+
+    let is_journal_mode = raw_args.iter().any(|a| a == "--mode=journal")
+        || matches_flag(&raw_args, "--mode", "journal");
+    let is_cursor_query = raw_args.iter().any(|a| a == "--mode=query-cursor")
+        || matches_flag(&raw_args, "--mode", "query-cursor");
+
+    if is_journal_mode || is_cursor_query {
         #[cfg(windows)]
         {
-            if let Err(error) = run_journal_mode(&raw_args) {
+            let result = if is_cursor_query {
+                run_cursor_query(&raw_args)
+            } else {
+                run_journal_mode(&raw_args)
+            };
+            if let Err(error) = result {
                 let _ = emit_message(&Message::Error { message: error });
                 std::process::exit(1);
             }
@@ -419,6 +430,33 @@ fn run_journal_mode(args: &[String]) -> Result<(), String> {
         .ok_or_else(|| String::from("--volume <drive-letter> required in journal mode"))?;
 
     usn_journal::run_journal_mode(drive_letter, cursor)
+}
+
+#[cfg(windows)]
+fn run_cursor_query(args: &[String]) -> Result<(), String> {
+    let mut drive_letter: Option<char> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--mode" => { let _ = iter.next(); }
+            "--mode=query-cursor" => {}
+            "--volume" => {
+                let v = iter
+                    .next()
+                    .ok_or_else(|| String::from("Expected drive letter after --volume"))?;
+                let trimmed = v.trim_end_matches(':').trim_end_matches('\\');
+                let ch = trimmed
+                    .chars()
+                    .next()
+                    .ok_or_else(|| String::from("Empty --volume"))?;
+                drive_letter = Some(ch.to_ascii_uppercase());
+            }
+            unknown => return Err(format!("Unknown query-cursor arg: {unknown}")),
+        }
+    }
+    let drive_letter = drive_letter
+        .ok_or_else(|| String::from("--volume <drive-letter> required in query-cursor mode"))?;
+    usn_journal::query_cursor(drive_letter)
 }
 
 fn register_signal_handler() {

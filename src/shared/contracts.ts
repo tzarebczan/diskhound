@@ -1,7 +1,7 @@
 // ── Scan Types ──────────────────────────────────────────────
 
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
-export type ScanEngine = "js-worker" | "native-sidecar";
+export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
 
 export interface ScanFileRecord {
   path: string;

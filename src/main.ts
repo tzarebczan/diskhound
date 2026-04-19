@@ -62,6 +62,13 @@ import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates"
 import { randomUUID } from "node:crypto";
 import { analyzeForCleanup } from "./shared/suggestions";
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
+import { initUsnCursorStore } from "./shared/usnCursorStore";
+import {
+  captureCursorAfterScan,
+  getCursorForRoot,
+  runIncrementalScan,
+} from "./usnMonitor";
+import { resolveNativeScannerBinary } from "./nativeScanner";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
@@ -183,6 +190,7 @@ void app.whenReady().then(async () => {
   // Initialize scan history + full-file indexes
   initScanHistory(app.getPath("userData"));
   initScanIndex(app.getPath("userData"));
+  await initUsnCursorStore(app.getPath("userData"));
 
   // ── Scan helpers ──────────────────────────────────────────
 
@@ -254,6 +262,18 @@ void app.whenReady().then(async () => {
         session.active = false;
         if (activeScan === session) activeScan = null;
         markFullScan();
+
+        // Phase-2b: capture the volume's current USN cursor so the next
+        // monitoring tick can do a cheap incremental scan. Best-effort —
+        // non-NTFS volumes, missing native binary, etc., will silently
+        // skip capture and leave the next tick to fall back to full scan.
+        if (message.snapshot.rootPath && message.snapshot.status === "done") {
+          const binaryPath = resolveNativeScannerBinary(projectRoot);
+          if (binaryPath) {
+            void captureCursorAfterScan(binaryPath, message.snapshot.rootPath)
+              .catch(() => { /* non-fatal */ });
+          }
+        }
 
         const settings = settingsStore?.get();
 
@@ -907,7 +927,10 @@ void app.whenReady().then(async () => {
         }
       }
 
-      // Scheduled full rescan if interval has elapsed
+      // Scheduled rescan if interval has elapsed. Phase 2b adds an
+      // incremental-first path: if we have a valid USN cursor for the
+      // root's volume, try reading the journal before spinning up a full
+      // scan. If incremental fails for any reason, fall through to full.
       if (settings.monitoring.fullScanIntervalMinutes > 0) {
         const lastScan = getLastFullScanAt();
         const intervalMs = settings.monitoring.fullScanIntervalMinutes * 60_000;
@@ -916,14 +939,91 @@ void app.whenReady().then(async () => {
         if (lastScan === null || now - lastScan >= intervalMs) {
           const defaultPath = settings.scanning.defaultRootPath;
           if (defaultPath && !activeScan) {
-            void startScan(defaultPath, defaultScanOptions(), "scheduled");
-            const intervalLabel = formatScanIntervalLabel(settings.monitoring.fullScanIntervalMinutes);
-            sendToast("info", "Scheduled rescan started",
-              `Rescanning ${defaultPath} after ${intervalLabel} interval.`);
+            const incrementalWorked = await tryIncrementalScan(defaultPath);
+            if (!incrementalWorked) {
+              void startScan(defaultPath, defaultScanOptions(), "scheduled");
+              const intervalLabel = formatScanIntervalLabel(settings.monitoring.fullScanIntervalMinutes);
+              sendToast("info", "Scheduled rescan started",
+                `Rescanning ${defaultPath} after ${intervalLabel} interval.`);
+            }
           }
         }
       }
     }, checkMs);
+  };
+
+  /**
+   * Attempt an incremental (USN-journal) rescan. Returns true if it
+   * succeeded and a new snapshot was broadcast — caller skips the full
+   * rescan. Returns false if we couldn't run incremental (no cursor, no
+   * binary, parse error, wrap, etc), in which case caller does full.
+   */
+  const tryIncrementalScan = async (rootPath: string): Promise<boolean> => {
+    const binaryPath = resolveNativeScannerBinary(projectRoot);
+    if (!binaryPath) return false;
+
+    const cursor = getCursorForRoot(rootPath);
+    if (!cursor) return false;
+
+    // Find the most recent index for this root to serve as the delta base.
+    const history = getScanHistory(rootPath);
+    const mostRecent = history[0];
+    if (!mostRecent) return false;
+    const previousIndexPath = indexFilePath(mostRecent.id);
+    if (!FS_SYNC.existsSync(previousIndexPath)) return false;
+
+    const newIndexPath = indexFilePath(`pending-${randomUUID()}`);
+
+    let result;
+    try {
+      result = await runIncrementalScan({
+        rootPath,
+        scannerPath: binaryPath,
+        previousIndexPath,
+        newIndexPath,
+        cursor,
+      });
+    } catch {
+      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
+      return false;
+    }
+
+    if (!result) {
+      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
+      return false;
+    }
+
+    // Save the incremental result to history and update cursor.
+    const historyId = await saveScanToHistory(result.snapshot);
+    if (!historyId) {
+      try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
+      return false;
+    }
+
+    try {
+      await FS.rename(newIndexPath, indexFilePath(historyId));
+    } catch { /* ignore */ }
+
+    for (const prunedId of consumeLastPrunedIds()) {
+      void deleteIndex(prunedId);
+    }
+
+    await broadcastSnapshot(result.snapshot);
+    markFullScan();
+
+    // Persist the new cursor so the NEXT tick picks up from here.
+    await import("./shared/usnCursorStore").then((m) => m.setCursor(result!.newCursor));
+
+    if (settings.notifications.scanComplete) {
+      const { additions, modifications, deletions, elapsedMs } = result.stats;
+      const totalChanges = additions + modifications + deletions;
+      if (totalChanges > 0) {
+        sendToast("info", "Changes detected",
+          `${totalChanges} change(s) in ${elapsedMs}ms: +${additions} / ~${modifications} / -${deletions}`);
+      }
+    }
+
+    return true;
   };
 
   // ── System Tray ───────────────────────────────────────────
