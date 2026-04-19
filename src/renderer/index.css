@@ -694,6 +694,10 @@ button, input, select, textarea { font: inherit; }
   display: grid;
   grid-template-columns: 1fr 260px;
   overflow: hidden;
+  transition: grid-template-columns 0.2s ease;
+}
+.overview-body.ext-collapsed {
+  grid-template-columns: 1fr 32px;
 }
 
 .overview-main {
@@ -739,6 +743,15 @@ button, input, select, textarea { font: inherit; }
   font-size: 10px;
   color: var(--text-tertiary);
   white-space: nowrap;
+}
+
+.treemap-toolbar-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .treemap-mode-switch {
@@ -1113,8 +1126,16 @@ button, input, select, textarea { font: inherit; }
   flex-direction: column;
   overflow: hidden;
   border-left: 1px solid var(--border);
+  min-width: 0;
+}
+.ext-sidebar.collapsed {
+  overflow: visible;
 }
 .ext-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
   padding: 10px 14px;
   font-size: 10.5px;
   font-weight: 600;
@@ -1122,6 +1143,53 @@ button, input, select, textarea { font: inherit; }
   letter-spacing: 0.08em;
   color: var(--text-muted);
   border-bottom: 1px solid var(--border);
+}
+.ext-sidebar-toggle {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color 0.12s, background 0.12s;
+}
+.ext-sidebar-toggle:hover {
+  color: var(--text);
+  background: rgba(255,255,255,0.06);
+}
+:root.light .ext-sidebar-toggle:hover {
+  background: rgba(0,0,0,0.05);
+}
+.ext-sidebar-collapsed-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+  padding: 12px 4px;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s;
+}
+.ext-sidebar-collapsed-tab:hover {
+  color: var(--text);
+  background: var(--bg-row-hover);
+}
+.ext-sidebar-collapsed-label {
+  writing-mode: vertical-rl;
+  text-orientation: mixed;
+  transform: rotate(180deg);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 .ext-sidebar-list {
   flex: 1;

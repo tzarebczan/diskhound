@@ -5,11 +5,18 @@ import { formatBytes, humanAge } from "../lib/format";
 import { useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
-import { buildTreemapRects, type TreemapAreaMode, type TreemapRect } from "../lib/treemap";
+import {
+  buildTreemapRects,
+  type TreemapAreaMode,
+  type TreemapLayout,
+  type TreemapRect,
+} from "../lib/treemap";
 
 interface Props {
   files: ScanFileRecord[];
   areaMode?: TreemapAreaMode;
+  /** Flat squarified by size (default) vs. hierarchical by folder. */
+  layout?: TreemapLayout;
   onFileClick?: (file: ScanFileRecord) => void;
 }
 
@@ -23,7 +30,7 @@ interface ContextMenuState {
 // separation without needing a gap between rects.
 const GAP = 0;
 
-export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) {
+export function Treemap({ files, areaMode = "compressed", layout = "size", onFileClick }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -76,7 +83,7 @@ export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) 
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dims.w, dims.h);
 
-    const rects = buildTreemapRects(files, dims.w, dims.h, areaMode);
+    const rects = buildTreemapRects(files, dims.w, dims.h, areaMode, layout);
     rectsRef.current = rects;
 
     for (const r of rects) {
@@ -152,7 +159,7 @@ export function Treemap({ files, areaMode = "compressed", onFileClick }: Props) 
         }
       }
     }
-  }, [files, dims, areaMode]);
+  }, [files, dims, areaMode, layout]);
 
   const hitTest = useCallback((e: MouseEvent): ScanFileRecord | null => {
     const canvas = canvasRef.current;

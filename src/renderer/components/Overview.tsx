@@ -11,6 +11,7 @@ import {
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
+import type { TreemapLayout } from "../lib/treemap";
 import { Treemap } from "./Treemap";
 
 const MONITORING_NUDGE_DISMISSED_KEY = "diskhound:monitoring-nudge-dismissed";
@@ -22,6 +23,8 @@ interface Props {
 
 type TreemapMode = "condensed" | "all";
 const TREEMAP_MODE_STORAGE_KEY = "diskhound:treemap-mode";
+const TREEMAP_LAYOUT_STORAGE_KEY = "diskhound:treemap-layout";
+const EXT_SIDEBAR_COLLAPSED_KEY = "diskhound:ext-sidebar-collapsed";
 
 function getInitialTreemapMode(): TreemapMode {
   if (typeof window === "undefined") {
@@ -32,6 +35,17 @@ function getInitialTreemapMode(): TreemapMode {
   return stored === "all" ? "all" : "condensed";
 }
 
+function getInitialTreemapLayout(): TreemapLayout {
+  if (typeof window === "undefined") return "size";
+  const stored = window.localStorage.getItem(TREEMAP_LAYOUT_STORAGE_KEY);
+  return stored === "tree" ? "tree" : "size";
+}
+
+function getInitialExtSidebarCollapsed(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(EXT_SIDEBAR_COLLAPSED_KEY) === "1";
+}
+
 // Dense treemap default — render up to this many files from the full file
 // index on disk. 10k is plenty dense for a WinDirStat feel without hurting
 // canvas render performance.
@@ -40,6 +54,8 @@ const DENSE_TREEMAP_LIMIT = 10_000;
 export function Overview({ snapshot, onFilterExtension }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries, elapsedMs } = snapshot;
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
+  const [treemapLayout, setTreemapLayout] = useState<TreemapLayout>(getInitialTreemapLayout);
+  const [extSidebarCollapsed, setExtSidebarCollapsed] = useState<boolean>(getInitialExtSidebarCollapsed);
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
@@ -70,7 +86,10 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
     [sourceFiles],
   );
   const hasDominantFiles = treemapComposition.featuredFiles.length > 0;
-  const condensedMode = hasDominantFiles && treemapMode === "condensed";
+  // "Condensed" extraction of dominant files only applies to the Size
+  // layout. In Tree layout every file lives inside its parent dir and
+  // pulling files out as cards breaks the hierarchy — so we bypass.
+  const condensedMode = hasDominantFiles && treemapMode === "condensed" && treemapLayout === "size";
   const treemapFiles = condensedMode ? treemapComposition.mapFiles : sourceFiles;
   const featuredBytes = treemapComposition.featuredFiles.reduce(
     (sum, item) => sum + item.file.size,
@@ -86,6 +105,17 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
     window.localStorage.setItem(TREEMAP_MODE_STORAGE_KEY, treemapMode);
   }, [treemapMode]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(TREEMAP_LAYOUT_STORAGE_KEY, treemapLayout);
+  }, [treemapLayout]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EXT_SIDEBAR_COLLAPSED_KEY, extSidebarCollapsed ? "1" : "0");
+  }, [extSidebarCollapsed]);
+
+
   return (
     <div className="overview">
       <MonitoringNudge />
@@ -97,40 +127,67 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
         <Metric value={formatElapsed(elapsedMs)} label="elapsed" />
       </div>
 
-      <div className="overview-body">
+      <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
         <div className="overview-main">
           <div className="treemap-panel">
-            {hasDominantFiles && (
-              <div className="treemap-toolbar">
-                <div className="treemap-toolbar-copy">
-                  <div className="treemap-toolbar-title">Treemap</div>
+            <div className="treemap-toolbar">
+              <div className="treemap-toolbar-copy">
+                <div className="treemap-toolbar-title">Treemap</div>
+                {hasDominantFiles && (
                   <div className="treemap-toolbar-meta">
                     {formatCount(treemapComposition.featuredFiles.length)} dominant item
                     {treemapComposition.featuredFiles.length === 1 ? "" : "s"}
                   </div>
-                </div>
-                <div className="treemap-mode-switch" role="tablist" aria-label="Treemap mode">
-                  <button
-                    type="button"
-                    className={`treemap-mode-btn ${treemapMode === "condensed" ? "active" : ""}`}
-                    aria-pressed={treemapMode === "condensed"}
-                    title="Separate dominant items so the rest of the map stays explorable"
-                    onClick={() => setTreemapMode("condensed")}
-                  >
-                    Condensed
-                  </button>
-                  <button
-                    type="button"
-                    className={`treemap-mode-btn ${treemapMode === "all" ? "active" : ""}`}
-                    aria-pressed={treemapMode === "all"}
-                    title="Show the full all-in-one treemap with exact area sizing"
-                    onClick={() => setTreemapMode("all")}
-                  >
-                    All
-                  </button>
-                </div>
+                )}
               </div>
-            )}
+              <div className="treemap-toolbar-controls">
+                {/* Layout: how rects are arranged within the treemap */}
+                <div className="treemap-mode-switch" role="tablist" aria-label="Treemap layout">
+                  <button
+                    type="button"
+                    className={`treemap-mode-btn ${treemapLayout === "size" ? "active" : ""}`}
+                    aria-pressed={treemapLayout === "size"}
+                    title="Squarified by size — largest files dominate, ordered globally"
+                    onClick={() => setTreemapLayout("size")}
+                  >
+                    Size
+                  </button>
+                  <button
+                    type="button"
+                    className={`treemap-mode-btn ${treemapLayout === "tree" ? "active" : ""}`}
+                    aria-pressed={treemapLayout === "tree"}
+                    title="Hierarchical (WinDirStat style) — files cluster inside their folder"
+                    onClick={() => setTreemapLayout("tree")}
+                  >
+                    Tree
+                  </button>
+                </div>
+                {/* Mode: whether to extract dominant files into cards (only
+                    meaningful for Size layout) */}
+                {hasDominantFiles && treemapLayout === "size" && (
+                  <div className="treemap-mode-switch" role="tablist" aria-label="Treemap mode">
+                    <button
+                      type="button"
+                      className={`treemap-mode-btn ${treemapMode === "condensed" ? "active" : ""}`}
+                      aria-pressed={treemapMode === "condensed"}
+                      title="Separate dominant items so the rest of the map stays explorable"
+                      onClick={() => setTreemapMode("condensed")}
+                    >
+                      Condensed
+                    </button>
+                    <button
+                      type="button"
+                      className={`treemap-mode-btn ${treemapMode === "all" ? "active" : ""}`}
+                      aria-pressed={treemapMode === "all"}
+                      title="Show the full all-in-one treemap with exact area sizing"
+                      onClick={() => setTreemapMode("all")}
+                    >
+                      All
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
 
             {condensedMode && (
               <div className={`treemap-featured ${dominantExpanded ? "expanded" : "collapsed"}`}>
@@ -178,29 +235,59 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
             )}
 
             <div className="treemap-stage">
-              <Treemap files={treemapFiles} areaMode={treemapAreaMode} />
+              <Treemap files={treemapFiles} areaMode={treemapAreaMode} layout={treemapLayout} />
             </div>
           </div>
         </div>
 
-        <div className="ext-sidebar">
-          <div className="ext-sidebar-header">Extensions</div>
-          <div className="ext-sidebar-list">
-            {snapshot.topExtensions.length === 0 ? (
-              <div className="empty-view" style={{ height: "100%" }}>
-                <span>No data yet</span>
+        <div className={`ext-sidebar ${extSidebarCollapsed ? "collapsed" : ""}`}>
+          {extSidebarCollapsed ? (
+            <button
+              className="ext-sidebar-collapsed-tab"
+              onClick={() => setExtSidebarCollapsed(false)}
+              title="Show extensions"
+              aria-label="Show extensions"
+              aria-expanded={false}
+            >
+              <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
+                <path d="M7 2L3 5L7 8" />
+              </svg>
+              <span className="ext-sidebar-collapsed-label">Extensions</span>
+            </button>
+          ) : (
+            <>
+              <div className="ext-sidebar-header">
+                <span>Extensions</span>
+                <button
+                  className="ext-sidebar-toggle"
+                  onClick={() => setExtSidebarCollapsed(true)}
+                  title="Hide extensions"
+                  aria-label="Hide extensions"
+                  aria-expanded={true}
+                >
+                  <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.6">
+                    <path d="M3 2L7 5L3 8" />
+                  </svg>
+                </button>
               </div>
-            ) : (
-              snapshot.topExtensions.map((b) => (
-                <ExtRow
-                  key={b.extension}
-                  bucket={b}
-                  totalBytes={bytesSeen}
-                  onClick={() => onFilterExtension(b.extension)}
-                />
-              ))
-            )}
-          </div>
+              <div className="ext-sidebar-list">
+                {snapshot.topExtensions.length === 0 ? (
+                  <div className="empty-view" style={{ height: "100%" }}>
+                    <span>No data yet</span>
+                  </div>
+                ) : (
+                  snapshot.topExtensions.map((b) => (
+                    <ExtRow
+                      key={b.extension}
+                      bucket={b}
+                      totalBytes={bytesSeen}
+                      onClick={() => onFilterExtension(b.extension)}
+                    />
+                  ))
+                )}
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

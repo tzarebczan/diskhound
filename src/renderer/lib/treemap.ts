@@ -16,6 +16,17 @@ export interface TreemapFeaturedItem {
 
 export type TreemapAreaMode = "compressed" | "exact";
 
+/**
+ * Layout strategy for the treemap.
+ * - `size`: classic squarified layout where every file is placed by area,
+ *   ordered globally by size. Largest-first, scattered across the canvas.
+ * - `tree`: WinDirStat-style hierarchical layout. Files are recursively
+ *   grouped inside their directory's rectangle so siblings cluster
+ *   physically. Better for understanding structure ("what's eating my
+ *   Downloads folder") at the cost of less obvious size ranking.
+ */
+export type TreemapLayout = "size" | "tree";
+
 export interface TreemapComposition {
   featuredFiles: TreemapFeaturedItem[];
   mapFiles: ScanFileRecord[];
@@ -146,8 +157,13 @@ export function buildTreemapRects(
   width: number,
   height: number,
   areaMode: TreemapAreaMode = "compressed",
+  layout: TreemapLayout = "size",
 ): TreemapRect[] {
   if (files.length === 0 || width <= 0 || height <= 0) return [];
+
+  if (layout === "tree") {
+    return buildTreeLayout(files, width, height, areaMode);
+  }
 
   // Square-root compression: reduces the visual dominance of very large files
   // while preserving relative ordering. A 48GB file vs 100MB goes from 480:1
@@ -163,6 +179,229 @@ export function buildTreemapRects(
   const rects: TreemapRect[] = [];
   squarify(weighted, { x: 0, y: 0, w: width, h: height }, totalWeight, rects);
   return rects;
+}
+
+// ── Tree layout (WinDirStat-style folder grouping) ─────────────────────────
+
+const PATH_SEP = /[\\/]+/;
+
+interface TreeNode {
+  /** Display name for this node — last component of its path. */
+  name: string;
+  /** Sum of all leaf file sizes under this node. */
+  totalSize: number;
+  /** True when this node represents a single file. */
+  isFile: boolean;
+  /** Set when isFile=true — the original file record. */
+  file?: ScanFileRecord;
+  /** Child nodes keyed by name for fast lookup during construction. */
+  children: Map<string, TreeNode>;
+}
+
+/**
+ * Build a hierarchical layout where files cluster inside their directory's
+ * rectangle. Recursively squarifies — each directory gets an area
+ * proportional to its total size, then its children fill that area.
+ *
+ * Note: we always use square-root compression here (not the raw size)
+ * because at the directory level a single huge subtree can still dominate
+ * the parent's area. The compression keeps small folders visible.
+ */
+function buildTreeLayout(
+  files: ScanFileRecord[],
+  width: number,
+  height: number,
+  _areaMode: TreemapAreaMode,
+): TreemapRect[] {
+  if (files.length === 0) return [];
+
+  const root = buildTree(files);
+  const out: TreemapRect[] = [];
+  squarifyTree(root, { x: 0, y: 0, w: width, h: height }, out);
+  return out;
+}
+
+function buildTree(files: ScanFileRecord[]): TreeNode {
+  const root: TreeNode = {
+    name: "<root>",
+    totalSize: 0,
+    isFile: false,
+    children: new Map(),
+  };
+
+  for (const file of files) {
+    const components = file.parentPath.split(PATH_SEP).filter(Boolean);
+    let current = root;
+
+    // Walk down (or create) directory nodes corresponding to the file's
+    // parent path. We bubble totalSize up at the end in a single pass.
+    for (const comp of components) {
+      let child = current.children.get(comp);
+      if (!child) {
+        child = {
+          name: comp,
+          totalSize: 0,
+          isFile: false,
+          children: new Map(),
+        };
+        current.children.set(comp, child);
+      }
+      current = child;
+    }
+
+    // Drop the file as a leaf under its parent dir. Use a unique key in
+    // case two files in the same dir have identical names (shouldn't
+    // happen on disk but defend anyway).
+    const leafKey = current.children.has(file.name)
+      ? `${file.name}\u0000${file.path}`
+      : file.name;
+    current.children.set(leafKey, {
+      name: file.name,
+      totalSize: file.size,
+      isFile: true,
+      file,
+      children: new Map(),
+    });
+  }
+
+  // Bubble totalSize bottom-up.
+  computeTotalSize(root);
+
+  // Collapse single-child chains at the top — if every file is in
+  // C:\Users\foo\... we don't want three nested rectangles for C:, Users,
+  // foo before the meaningful content. Walk down through any node that
+  // has exactly one non-file child until we hit a branch point.
+  let pruned: TreeNode = root;
+  while (pruned.children.size === 1) {
+    const onlyChild = pruned.children.values().next().value!;
+    if (onlyChild.isFile) break;
+    pruned = onlyChild;
+  }
+  return pruned;
+}
+
+function computeTotalSize(node: TreeNode): number {
+  if (node.isFile) return node.totalSize;
+  let total = 0;
+  for (const child of node.children.values()) {
+    total += computeTotalSize(child);
+  }
+  node.totalSize = total;
+  return total;
+}
+
+function squarifyTree(node: TreeNode, bounds: Rect, out: TreemapRect[]): void {
+  if (bounds.w < 1 || bounds.h < 1 || node.totalSize <= 0) return;
+
+  if (node.isFile && node.file) {
+    out.push({
+      ...bounds,
+      file: node.file,
+      color: colorForExtension(node.file.extension),
+    });
+    return;
+  }
+
+  const children = Array.from(node.children.values()).filter(
+    (c) => c.totalSize > 0,
+  );
+  if (children.length === 0) return;
+
+  // Use the same sqrt-compression at every level so deeply-nested big files
+  // don't completely swallow their containing folder.
+  const sorted = children.slice().sort((a, b) => b.totalSize - a.totalSize);
+  const weighted: Weighted<TreeNode>[] = sorted.map((child) => ({
+    item: child,
+    weight: Math.sqrt(child.totalSize),
+  }));
+  const totalWeight = weighted.reduce((sum, w) => sum + w.weight, 0);
+  if (totalWeight === 0) return;
+
+  const childPlacements: Array<{ item: TreeNode; bounds: Rect }> = [];
+  squarifyGeneric(weighted, bounds, totalWeight, childPlacements);
+
+  for (const { item, bounds: childBounds } of childPlacements) {
+    squarifyTree(item, childBounds, out);
+  }
+}
+
+// ── Generic squarify (used by both flat and tree layouts) ──────────────────
+
+interface Weighted<T> {
+  item: T;
+  weight: number;
+}
+
+function squarifyGeneric<T>(
+  items: Weighted<T>[],
+  bounds: Rect,
+  totalWeight: number,
+  out: Array<{ item: T; bounds: Rect }>,
+): void {
+  if (items.length === 0 || bounds.w <= 0 || bounds.h <= 0) return;
+
+  if (items.length === 1) {
+    out.push({ item: items[0]!.item, bounds });
+    return;
+  }
+
+  const isWide = bounds.w >= bounds.h;
+  const sideLen = isWide ? bounds.h : bounds.w;
+  const totalArea = bounds.w * bounds.h;
+
+  let rowItems: Weighted<T>[] = [];
+  let rowWeight = 0;
+  let bestAspect = Infinity;
+  let splitIndex = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i]!;
+    const nextRowWeight = rowWeight + item.weight;
+    const nextRowLen = (nextRowWeight / totalWeight) * (isWide ? bounds.w : bounds.h);
+
+    const nextItems = [...rowItems, item];
+    let worstAspect = 0;
+    for (const ri of nextItems) {
+      const itemLen = sideLen > 0 && nextRowLen > 0
+        ? (ri.weight / totalWeight) * totalArea / nextRowLen
+        : 1;
+      const aspect = Math.max(nextRowLen / itemLen, itemLen / nextRowLen);
+      worstAspect = Math.max(worstAspect, aspect);
+    }
+
+    if (worstAspect <= bestAspect || rowItems.length === 0) {
+      bestAspect = worstAspect;
+      rowItems = nextItems;
+      rowWeight = nextRowWeight;
+      splitIndex = i + 1;
+    } else {
+      break;
+    }
+  }
+
+  const rowFraction = rowWeight / totalWeight;
+  const rowLen = isWide ? bounds.w * rowFraction : bounds.h * rowFraction;
+
+  let offset = 0;
+  for (const item of rowItems) {
+    const itemFraction = rowWeight > 0 ? item.weight / rowWeight : 1 / rowItems.length;
+    const itemLen = sideLen * itemFraction;
+
+    const itemBounds: Rect = isWide
+      ? { x: bounds.x, y: bounds.y + offset, w: rowLen, h: itemLen }
+      : { x: bounds.x + offset, y: bounds.y, w: itemLen, h: rowLen };
+
+    out.push({ item: item.item, bounds: itemBounds });
+    offset += itemLen;
+  }
+
+  const remaining = items.slice(splitIndex);
+  if (remaining.length > 0) {
+    const newBounds: Rect = isWide
+      ? { x: bounds.x + rowLen, y: bounds.y, w: bounds.w - rowLen, h: bounds.h }
+      : { x: bounds.x, y: bounds.y + rowLen, w: bounds.w, h: bounds.h - rowLen };
+    squarifyGeneric(remaining, newBounds, totalWeight - rowWeight, out);
+  }
 }
 
 interface WeightedFile {
