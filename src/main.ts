@@ -30,6 +30,7 @@ import {
 } from "./shared/contracts";
 import {
   checkDiskDeltas,
+  getDiskDeltaHistory,
   getDiskSpace,
   getLastFullScanAt,
   getMonitoringSnapshot,
@@ -740,6 +741,24 @@ void app.whenReady().then(async () => {
   // ── IPC: Monitoring ───────────────────────────────────────
 
   ipcMain.handle("diskhound:get-monitoring-snapshot", () => getMonitoringSnapshot());
+  ipcMain.handle("diskhound:get-disk-delta-history", () => getDiskDeltaHistory());
+  ipcMain.handle("diskhound:get-scan-schedule-info", () => {
+    const settings = settingsStore?.get();
+    const lastScan = getLastFullScanAt();
+    const intervalMin = settings?.monitoring.fullScanIntervalMinutes ?? 0;
+    const enabled = Boolean(settings?.monitoring.enabled);
+    const nextScanAt =
+      enabled && intervalMin > 0 && lastScan !== null
+        ? lastScan + intervalMin * 60_000
+        : null;
+    return {
+      enabled,
+      intervalMinutes: intervalMin,
+      lastScanAt: lastScan,
+      nextScanAt,
+      defaultRootPath: settings?.scanning.defaultRootPath ?? "",
+    };
+  });
   ipcMain.handle("diskhound:get-disk-space", () => getDiskSpace());
 
   // ── IPC: Cleanup Analysis ─────────────────────────────────
@@ -869,17 +888,18 @@ void app.whenReady().then(async () => {
       }
 
       // Scheduled full rescan if interval has elapsed
-      if (settings.monitoring.fullScanIntervalHours > 0) {
+      if (settings.monitoring.fullScanIntervalMinutes > 0) {
         const lastScan = getLastFullScanAt();
-        const intervalMs = settings.monitoring.fullScanIntervalHours * 3_600_000;
+        const intervalMs = settings.monitoring.fullScanIntervalMinutes * 60_000;
         const now = Date.now();
 
         if (lastScan === null || now - lastScan >= intervalMs) {
           const defaultPath = settings.scanning.defaultRootPath;
           if (defaultPath && !activeScan) {
             void startScan(defaultPath, defaultScanOptions(), "scheduled");
+            const intervalLabel = formatScanIntervalLabel(settings.monitoring.fullScanIntervalMinutes);
             sendToast("info", "Scheduled rescan started",
-              `Rescanning ${defaultPath} after ${settings.monitoring.fullScanIntervalHours}h interval.`);
+              `Rescanning ${defaultPath} after ${intervalLabel} interval.`);
           }
         }
       }
@@ -1115,4 +1135,14 @@ function formatBytesShort(bytes: number): string {
   const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
   const val = bytes / 1024 ** exp;
   return `${val.toFixed(val >= 100 || exp === 0 ? 0 : 1)} ${units[exp]}`;
+}
+
+function formatScanIntervalLabel(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = minutes / 60;
+  if (hours < 24) {
+    return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
+  }
+  const days = hours / 24;
+  return Number.isInteger(days) ? `${days}d` : `${days.toFixed(1)}d`;
 }

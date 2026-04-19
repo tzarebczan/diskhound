@@ -45,6 +45,8 @@ const api: DiskhoundNativeApi = {
   // Monitoring
   getMonitoringSnapshot: () => ipcRenderer.invoke("diskhound:get-monitoring-snapshot"),
   getDiskSpace: () => ipcRenderer.invoke("diskhound:get-disk-space"),
+  getDiskDeltaHistory: () => ipcRenderer.invoke("diskhound:get-disk-delta-history"),
+  getScanScheduleInfo: () => ipcRenderer.invoke("diskhound:get-scan-schedule-info"),
 
   // Cleanup analysis
   analyzeCleanup: (rootPath, files, dirs) =>

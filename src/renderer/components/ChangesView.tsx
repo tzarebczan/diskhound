@@ -8,11 +8,13 @@ import type {
   FullFileChange,
   ScanDiffResult,
   ScanHistoryEntry,
+  ScanScheduleInfo,
   ScanSnapshot,
 } from "../../shared/contracts";
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
+import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
 
 interface Props {
@@ -92,15 +94,64 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const [detailTab, setDetailTab] = useState<DetailTab>("files");
   const [fullDiff, setFullDiff] = useState<FullDiffResult | null>(null);
   const [fullDiffLoading, setFullDiffLoading] = useState(false);
-  const [monitoringEnabled, setMonitoringEnabled] = useState<boolean | null>(null);
+  const [scheduleInfo, setScheduleInfo] = useState<ScanScheduleInfo | null>(null);
+  const [enablingMonitoring, setEnablingMonitoring] = useState(false);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const prevStatusRef = useRef(snapshot.status);
 
-  useEffect(() => {
-    void nativeApi.getSettings().then((s) => {
-      if (s) setMonitoringEnabled(s.monitoring.enabled);
-    });
+  // Schedule info: fetch on mount + refresh every 30s so the "next scan in X"
+  // label stays roughly current. Also refresh after scans complete.
+  const refreshScheduleInfo = useCallback(async () => {
+    const info = await nativeApi.getScanScheduleInfo();
+    if (info) setScheduleInfo(info);
   }, []);
+
+  useEffect(() => {
+    void refreshScheduleInfo();
+    const id = window.setInterval(() => { void refreshScheduleInfo(); }, 30_000);
+    return () => window.clearInterval(id);
+  }, [refreshScheduleInfo]);
+
+  const monitoringEnabled = scheduleInfo?.enabled ?? null;
+
+  // Scan from within the Changes tab — either runs the scheduled job immediately
+  // or falls back to a direct rescan of the current root.
+  const rescanNow = useCallback(async () => {
+    if (snapshot.status === "running") {
+      toast("info", "Scan already in progress");
+      return;
+    }
+    const targetPath = scheduleInfo?.defaultRootPath || rootPath;
+    if (!targetPath) {
+      toast("warning", "Pick a root first from the Overview tab.");
+      return;
+    }
+    const result = await nativeApi.startScan(targetPath, {});
+    if (result?.status === "error") {
+      toast("error", "Rescan failed", result.errorMessage ?? "Unknown error");
+    }
+    void refreshScheduleInfo();
+  }, [rootPath, scheduleInfo?.defaultRootPath, snapshot.status, refreshScheduleInfo]);
+
+  const enableMonitoring = useCallback(async () => {
+    setEnablingMonitoring(true);
+    try {
+      const s = await nativeApi.getSettings();
+      if (!s) return;
+      await nativeApi.updateSettings({
+        ...s,
+        monitoring: { ...s.monitoring, enabled: true },
+      });
+      toast(
+        "success",
+        "Background monitoring enabled",
+        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60} min.`,
+      );
+      await refreshScheduleInfo();
+    } finally {
+      setEnablingMonitoring(false);
+    }
+  }, [refreshScheduleInfo]);
 
   // Resolve all time ranges from history (pure, no IPC)
   const resolvedRanges = useMemo(
@@ -159,7 +210,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     prevStatusRef.current = snapshot.status;
 
     if (prevStatus !== "done" && snapshot.status === "done" && rootPath) {
-      // Scan just finished — reload history + diff
+      // Scan just finished — reload history + diff and refresh schedule info.
       void (async () => {
         const data = await loadData(rootPath);
         if (data.history) setHistory(data.history);
@@ -171,9 +222,10 @@ export function ChangesView({ rootPath, snapshot }: Props) {
             .find((resolved) => resolved.entry?.id === data.diff!.baselineId);
           setActiveQuickSelect(matchingQuickSelect?.range.id ?? null);
         }
+        await refreshScheduleInfo();
       })();
     }
-  }, [snapshot.status, rootPath, loadData]);
+  }, [snapshot.status, rootPath, loadData, refreshScheduleInfo]);
 
   // Compare against a different baseline
   const selectBaseline = async (baselineId: string) => {
@@ -214,6 +266,13 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   if (!diff) {
     return (
       <div className="changes-view">
+        <ScheduleStatusStrip
+          info={scheduleInfo}
+          isScanning={snapshot.status === "running"}
+          onRescan={() => void rescanNow()}
+          onEnableMonitoring={() => void enableMonitoring()}
+          enablingMonitoring={enablingMonitoring}
+        />
         <div className="changes-empty">
           <div className="changes-empty-icon">
             <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
@@ -228,12 +287,11 @@ export function ChangesView({ rootPath, snapshot }: Props) {
           <div className="changes-empty-paths">
             <div className="changes-empty-path-title">How to get diffs</div>
             <ol className="changes-empty-path-list">
-              <li><strong>Rescan manually</strong> — hit the Rescan button. Each run adds a history entry and the diff updates instantly.</li>
+              <li><strong>Hit "Rescan now"</strong> above — each run adds a history entry and the diff updates instantly.</li>
               <li>
-                <strong>Enable Background Monitoring</strong> in Settings.{" "}
-                {monitoringEnabled === false && "It's currently off."}{" "}
-                {monitoringEnabled === true && "Already on — scheduled rescans will start running in the background."}
-                {" "}Once on, DiskHound rescans your default path on a schedule (24h by default).
+                <strong>Background monitoring</strong> rescans your default path on a schedule (1h by default).{" "}
+                {monitoringEnabled === false && "It's currently off — use the banner above to turn it on."}
+                {monitoringEnabled === true && "Already on — scheduled rescans run in the background."}
               </li>
             </ol>
           </div>
@@ -248,8 +306,18 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const netLabel = isZeroDelta ? "unchanged" : gained ? "grew" : "freed";
   const netColorClass = isZeroDelta ? "neutral" : gained ? "negative" : "positive";
 
+  const isScanning = snapshot.status === "running";
+
   return (
     <div className="changes-view">
+      <ScheduleStatusStrip
+        info={scheduleInfo}
+        isScanning={isScanning}
+        onRescan={() => void rescanNow()}
+        onEnableMonitoring={() => void enableMonitoring()}
+        enablingMonitoring={enablingMonitoring}
+      />
+
       {/* ── Summary strip ── */}
       <div className="changes-summary">
         <div className="changes-summary-net">
@@ -420,6 +488,108 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 }
 
 // ── Sub-components ─────────────────────────────────────────
+
+/**
+ * Top-of-Changes-tab strip that makes the scanning schedule legible: when the
+ * last scan happened, when the next is due, and one-click actions (Rescan now
+ * + Enable monitoring). The first thing users should see when they open the
+ * tab and wonder "why aren't there any new changes?"
+ */
+function ScheduleStatusStrip({
+  info,
+  isScanning,
+  onRescan,
+  onEnableMonitoring,
+  enablingMonitoring,
+}: {
+  info: ScanScheduleInfo | null;
+  isScanning: boolean;
+  onRescan: () => void;
+  onEnableMonitoring: () => void;
+  enablingMonitoring: boolean;
+}) {
+  if (!info) {
+    // Fetching — render a lightweight placeholder so layout doesn't shift.
+    return <div className="changes-schedule-strip changes-schedule-strip-loading" aria-hidden="true" />;
+  }
+
+  const lastLabel = info.lastScanAt ? relativeTime(info.lastScanAt) : "never";
+
+  let nextLabel: string;
+  if (isScanning) {
+    nextLabel = "scanning now…";
+  } else if (!info.enabled) {
+    nextLabel = "monitoring off";
+  } else if (info.intervalMinutes === 0) {
+    nextLabel = "auto-rescan disabled";
+  } else if (info.nextScanAt === null) {
+    nextLabel = `every ${formatScanIntervalMinutes(info.intervalMinutes)}`;
+  } else {
+    const msUntil = info.nextScanAt - Date.now();
+    nextLabel = msUntil <= 0 ? "due now" : `in ${formatDurationMs(msUntil)}`;
+  }
+
+  const showEnableCta = info.enabled === false;
+
+  return (
+    <div className={`changes-schedule-strip ${showEnableCta ? "attention" : ""}`}>
+      {showEnableCta ? (
+        <div className="changes-schedule-banner">
+          <div className="changes-schedule-banner-text">
+            <strong>Background monitoring is off.</strong>{" "}
+            Turn it on so the Changes tab fills up automatically.
+          </div>
+          <button
+            className="action-btn"
+            disabled={enablingMonitoring}
+            onClick={onEnableMonitoring}
+          >
+            {enablingMonitoring ? "Enabling…" : "Enable monitoring"}
+          </button>
+        </div>
+      ) : (
+        <div className="changes-schedule-status">
+          <div className="changes-schedule-meta">
+            <span className="changes-schedule-label">Last scan</span>
+            <span className="changes-schedule-value">{lastLabel}</span>
+          </div>
+          <div className="changes-schedule-divider" />
+          <div className="changes-schedule-meta">
+            <span className="changes-schedule-label">Next scan</span>
+            <span className="changes-schedule-value">{nextLabel}</span>
+          </div>
+        </div>
+      )}
+      <div className="changes-schedule-spacer" />
+      <button
+        className="action-btn"
+        disabled={isScanning}
+        onClick={onRescan}
+        title="Run a fresh scan of your default path now"
+      >
+        {isScanning ? "Scanning…" : "Rescan now"}
+      </button>
+    </div>
+  );
+}
+
+function formatScanIntervalMinutes(minutes: number): string {
+  if (minutes < 60) return `${minutes}m`;
+  const hours = minutes / 60;
+  if (hours < 24) return Number.isInteger(hours) ? `${hours}h` : `${hours.toFixed(1)}h`;
+  const days = hours / 24;
+  return Number.isInteger(days) ? `${days}d` : `${days.toFixed(1)}d`;
+}
+
+function formatDurationMs(ms: number): string {
+  const totalMin = Math.max(0, Math.round(ms / 60_000));
+  if (totalMin < 60) return `${totalMin}m`;
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  if (h < 24) return m > 0 ? `${h}h ${m}m` : `${h}h`;
+  const d = Math.floor(h / 24);
+  return `${d}d ${h % 24}h`;
+}
 
 function QuickSelectPills({ resolvedRanges, activeId, onSelect }: {
   resolvedRanges: ResolvedRange[];

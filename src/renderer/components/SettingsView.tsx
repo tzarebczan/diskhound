@@ -171,12 +171,12 @@ export function SettingsView() {
           onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, alertThresholdPercent: v } })}
         />
         <NumberRow
-          label="Full re-scan interval (hours)"
-          value={settings.monitoring.fullScanIntervalHours}
+          label="Full re-scan interval (minutes)"
+          value={settings.monitoring.fullScanIntervalMinutes}
           min={0}
-          max={720}
-          desc="Set 0 to disable. Uses the default scan path above."
-          onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, fullScanIntervalHours: v } })}
+          max={30 * 24 * 60}
+          desc="How often to rescan the default path. Set 0 to disable. Fresh scans populate the Changes tab."
+          onChange={(v) => void save({ ...settings, monitoring: { ...settings.monitoring, fullScanIntervalMinutes: v } })}
         />
         <ToggleRow
           label="Only scan when idle"

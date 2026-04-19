@@ -7,6 +7,12 @@ import type { DiskDelta, DiskSpaceInfo, MonitoringSnapshot } from "./contracts";
 
 const execFileAsync = promisify(execFile);
 const BASELINE_FILE = "disk-baselines.json";
+/**
+ * How many historical drive-level deltas to keep. With a 30-min check cadence
+ * this is ~10 days of signal — plenty to render a timeline on the Changes tab
+ * without bloating the persisted JSON beyond ~50 KB.
+ */
+const DELTA_HISTORY_CAP = 500;
 
 interface PersistedState {
   previousDrives: Record<string, DiskSpaceInfo>;
@@ -14,6 +20,8 @@ interface PersistedState {
   lastDrives?: DiskSpaceInfo[];
   lastDeltas?: DiskDelta[];
   lastCheckedAt?: number;
+  /** Rolling history of drive-level deltas (newest first). */
+  deltaHistory?: DiskDelta[];
 }
 
 let previousDriveMap = new Map<string, DiskSpaceInfo>();
@@ -22,6 +30,7 @@ let persistDir: string | null = null;
 let lastDrives: DiskSpaceInfo[] = [];
 let lastDeltas: DiskDelta[] = [];
 let lastCheckedAt = 0;
+let deltaHistory: DiskDelta[] = [];
 
 // ── Initialization (call once at startup) ───────────────────
 
@@ -38,6 +47,9 @@ export async function initDiskMonitor(dataDir: string): Promise<void> {
       typeof state.lastCheckedAt === "number" && Number.isFinite(state.lastCheckedAt)
         ? state.lastCheckedAt
         : 0;
+    deltaHistory = Array.isArray(state.deltaHistory)
+      ? state.deltaHistory.slice(0, DELTA_HISTORY_CAP)
+      : [];
   } catch {
     // No existing baseline — fresh start
   }
@@ -51,6 +63,7 @@ async function persistState(): Promise<void> {
     lastDrives,
     lastDeltas,
     lastCheckedAt,
+    deltaHistory,
   };
   try {
     await FS.mkdir(persistDir, { recursive: true });
@@ -104,6 +117,13 @@ export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
   lastDrives = drives;
   lastDeltas = deltas;
   lastCheckedAt = now;
+
+  // Append any meaningful deltas from this check to the rolling timeline so
+  // the UI can render drive-level events between full scans.
+  if (deltas.length > 0) {
+    deltaHistory = [...deltas, ...deltaHistory].slice(0, DELTA_HISTORY_CAP);
+  }
+
   void persistState();
 
   return {
@@ -130,6 +150,11 @@ export function markFullScan(): void {
 
 export function getLastFullScanAt(): number | null {
   return lastFullScanAt;
+}
+
+/** Return the rolling drive-level delta timeline, newest first. */
+export function getDiskDeltaHistory(): DiskDelta[] {
+  return deltaHistory.slice();
 }
 
 // ── Platform-specific disk space queries ────────────────────

@@ -111,7 +111,7 @@ export interface MonitoringSettings {
   checkIntervalMinutes: number;
   alertThresholdBytes: number; // alert when free space drops by this much
   alertThresholdPercent: number; // or by this percentage
-  fullScanIntervalHours: number; // periodic full re-scan
+  fullScanIntervalMinutes: number; // periodic full re-scan (in minutes)
   requireIdle: boolean; // only scan when system is idle
   idleMinutes: number; // how long idle before scanning
 }
@@ -154,6 +154,20 @@ export interface MonitoringSnapshot {
   deltas: DiskDelta[];
   lastFullScanAt: number | null;
   lastCheckedAt: number;
+}
+
+/** Scan-schedule metadata surfaced by the main process for the Changes tab. */
+export interface ScanScheduleInfo {
+  /** Whether background monitoring is currently enabled. */
+  enabled: boolean;
+  /** Minutes between scheduled full scans. 0 means disabled. */
+  intervalMinutes: number;
+  /** Epoch ms of the last completed full scan (any root). */
+  lastScanAt: number | null;
+  /** Epoch ms of the next expected scheduled scan, or null if disabled/unknown. */
+  nextScanAt: number | null;
+  /** Configured default scan path (may be empty). */
+  defaultRootPath: string;
 }
 
 // ── AI Cleanup Suggestion Types ─────────────────────────────
@@ -453,6 +467,10 @@ export interface DiskhoundNativeApi {
   // Monitoring
   getMonitoringSnapshot: () => Promise<MonitoringSnapshot>;
   getDiskSpace: () => Promise<DiskSpaceInfo[]>;
+  /** Rolling timeline of drive-level free-space deltas (newest first). */
+  getDiskDeltaHistory: () => Promise<DiskDelta[]>;
+  /** Schedule info for the Changes tab — last scan, next scan, interval, etc. */
+  getScanScheduleInfo: () => Promise<ScanScheduleInfo>;
 
   // Cleanup analysis
   analyzeCleanup: (rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => Promise<CleanupAnalysis>;
@@ -518,12 +536,12 @@ export function defaultSettings(): AppSettings {
       defaultRootPath: "",
     },
     monitoring: {
-      enabled: false,
+      enabled: true, // on by default — DiskHound's value is continuous change tracking
       checkIntervalMinutes: 30,
       alertThresholdBytes: 1024 * 1024 * 1024, // 1 GB
       alertThresholdPercent: 5,
-      fullScanIntervalHours: 24,
-      requireIdle: true,
+      fullScanIntervalMinutes: 60, // hourly scans so the Changes tab has fresh data
+      requireIdle: false, // don't block scheduled scans on idle — scans are background-friendly
       idleMinutes: 10,
     },
     notifications: {
@@ -548,6 +566,33 @@ function clampInteger(value: unknown, minimum: number, maximum: number, fallback
 
   const rounded = Math.round(value);
   return Math.min(maximum, Math.max(minimum, rounded));
+}
+
+/**
+ * Resolve the scan interval in minutes, migrating users from the pre-v0.2.4
+ * `fullScanIntervalHours` field if present. Clamped to [0, 30 days] minutes —
+ * 0 disables scheduled full scans.
+ */
+function resolveFullScanIntervalMinutes(
+  monitoring: Partial<MonitoringSettings> & { fullScanIntervalHours?: unknown },
+  fallback: number,
+): number {
+  const MIN = 0;
+  const MAX = 30 * 24 * 60;
+
+  const minutes = monitoring.fullScanIntervalMinutes;
+  if (typeof minutes === "number" && Number.isFinite(minutes)) {
+    return Math.min(MAX, Math.max(MIN, Math.round(minutes)));
+  }
+
+  // Migrate legacy hours → minutes. Old files persisted `fullScanIntervalHours`;
+  // multiply and drop the old key.
+  const hours = monitoring.fullScanIntervalHours;
+  if (typeof hours === "number" && Number.isFinite(hours)) {
+    return Math.min(MAX, Math.max(MIN, Math.round(hours * 60)));
+  }
+
+  return fallback;
 }
 
 function isThemeValue(value: unknown): value is GeneralSettings["theme"] {
@@ -601,11 +646,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         100,
         defaults.monitoring.alertThresholdPercent,
       ),
-      fullScanIntervalHours: clampInteger(
-        merged.monitoring.fullScanIntervalHours,
-        0,
-        24 * 30,
-        defaults.monitoring.fullScanIntervalHours,
+      fullScanIntervalMinutes: resolveFullScanIntervalMinutes(
+        merged.monitoring,
+        defaults.monitoring.fullScanIntervalMinutes,
       ),
       requireIdle: Boolean(merged.monitoring.requireIdle),
       idleMinutes: clampInteger(

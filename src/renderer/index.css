@@ -2809,8 +2809,8 @@ button, input, select, textarea { font: inherit; }
 
 /* ── Changes View ─────────────────────────────── */
 .changes-view {
-  display: grid;
-  grid-template-rows: auto 1fr;
+  display: flex;
+  flex-direction: column;
   height: 100%;
   overflow: hidden;
 }
@@ -2819,6 +2819,75 @@ button, input, select, textarea { font: inherit; }
   grid-template-columns: 220px 1fr;
   overflow: hidden;
   min-height: 0;
+  flex: 1;
+}
+
+/* ── Schedule status strip (top of Changes tab) ── */
+.changes-schedule-strip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.02);
+  min-height: 44px;
+  flex-wrap: wrap;
+  flex-shrink: 0;
+}
+:root.light .changes-schedule-strip {
+  background: rgba(0, 0, 0, 0.015);
+}
+.changes-schedule-strip.attention {
+  background: rgba(59, 130, 246, 0.08);
+  border-bottom-color: rgba(59, 130, 246, 0.3);
+}
+.changes-schedule-strip-loading {
+  opacity: 0.3;
+}
+.changes-schedule-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+.changes-schedule-banner-text {
+  font-size: 13px;
+  color: var(--text);
+  flex: 1;
+}
+.changes-schedule-banner-text strong {
+  color: var(--text);
+  font-weight: 600;
+}
+.changes-schedule-status {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.changes-schedule-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.changes-schedule-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+.changes-schedule-value {
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 500;
+}
+.changes-schedule-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--border);
+}
+.changes-schedule-spacer {
+  flex: 1;
 }
 .changes-detail {
   display: grid;
