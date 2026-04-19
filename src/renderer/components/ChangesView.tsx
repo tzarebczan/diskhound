@@ -7,6 +7,7 @@ import type {
   FullDiffResult,
   FullFileChange,
   ScanDiffResult,
+  ScanEngine,
   ScanHistoryEntry,
   ScanScheduleInfo,
   ScanSnapshot,
@@ -114,6 +115,22 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
   const monitoringEnabled = scheduleInfo?.enabled ?? null;
 
+  // Renderer-side diff cache. Keyed "<baselineId>::<currentId>" so flicking
+  // back to a previously viewed baseline is instant. Pruned to the most
+  // recent N entries so we don't grow unbounded for users with long history.
+  const diffCache = useRef<Map<string, ScanDiffResult>>(new Map());
+  const DIFF_CACHE_LIMIT = 16;
+
+  const cacheDiff = useCallback((d: ScanDiffResult) => {
+    const key = `${d.baselineId}::${d.currentId}`;
+    diffCache.current.set(key, d);
+    while (diffCache.current.size > DIFF_CACHE_LIMIT) {
+      const firstKey = diffCache.current.keys().next().value;
+      if (firstKey) diffCache.current.delete(firstKey);
+      else break;
+    }
+  }, []);
+
   // Scan from within the Changes tab — either runs the scheduled job immediately
   // or falls back to a direct rescan of the current root.
   const rescanNow = useCallback(async () => {
@@ -191,6 +208,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
       if (cancelled) return;
       if (data.history) setHistory(data.history);
       if (data.diff) {
+        cacheDiff(data.diff);
         setDiff(data.diff);
         setSelectedBaseline(data.diff.baselineId);
         const matchingQuickSelect = TIME_RANGES
@@ -202,7 +220,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     })();
 
     return () => { cancelled = true; };
-  }, [rootPath, loadData]);
+  }, [rootPath, loadData, cacheDiff]);
 
   // Auto-refresh when a scan completes (status transitions to "done")
   useEffect(() => {
@@ -211,10 +229,14 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
     if (prevStatus !== "done" && snapshot.status === "done" && rootPath) {
       // Scan just finished — reload history + diff and refresh schedule info.
+      // Invalidate the renderer-side diff cache; some entries may now be
+      // stale (e.g. the "current" pointer has moved to the new scan).
+      diffCache.current.clear();
       void (async () => {
         const data = await loadData(rootPath);
         if (data.history) setHistory(data.history);
         if (data.diff) {
+          cacheDiff(data.diff);
           setDiff(data.diff);
           setSelectedBaseline(data.diff.baselineId);
           const matchingQuickSelect = TIME_RANGES
@@ -225,18 +247,38 @@ export function ChangesView({ rootPath, snapshot }: Props) {
         await refreshScheduleInfo();
       })();
     }
-  }, [snapshot.status, rootPath, loadData, refreshScheduleInfo]);
+  }, [snapshot.status, rootPath, loadData, refreshScheduleInfo, cacheDiff]);
 
-  // Compare against a different baseline
+  // Compare against a different baseline. Critical: we never blank the
+  // screen while waiting for the diff. We optimistically swap to a cached
+  // result if available, else show the previous diff with a subtle
+  // "switching" overlay until the new result lands.
+  const switchSeqRef = useRef(0);
+  const [switching, setSwitching] = useState(false);
   const selectBaseline = async (baselineId: string) => {
     if (!history.length) return;
     const currentId = history[0].id;
     setSelectedBaseline(baselineId);
     setFullDiff(null); // invalidate — applies to different baseline now
-    setLoading(true);
+
+    const cacheKey = `${baselineId}::${currentId}`;
+    const cached = diffCache.current.get(cacheKey);
+    if (cached) {
+      setDiff(cached);
+      return; // instant — no IPC needed
+    }
+
+    // Bump a sequence so a slow IPC for a previous baseline doesn't
+    // overwrite a fresher selection.
+    const seq = ++switchSeqRef.current;
+    setSwitching(true);
     const d = await nativeApi.computeScanDiff(baselineId, currentId);
-    if (d) setDiff(d);
-    setLoading(false);
+    if (seq !== switchSeqRef.current) return; // stale — user switched again
+    if (d) {
+      cacheDiff(d);
+      setDiff(d);
+    }
+    setSwitching(false);
   };
 
   const loadFullDiff = async () => {
@@ -309,7 +351,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const isScanning = snapshot.status === "running";
 
   return (
-    <div className="changes-view">
+    <div className={`changes-view ${switching ? "is-switching" : ""}`}>
       <ScheduleStatusStrip
         info={scheduleInfo}
         isScanning={isScanning}
@@ -317,6 +359,11 @@ export function ChangesView({ rootPath, snapshot }: Props) {
         onEnableMonitoring={() => void enableMonitoring()}
         enablingMonitoring={enablingMonitoring}
       />
+      {switching && (
+        <div className="changes-switching-bar" aria-hidden="true">
+          <div className="changes-switching-bar-fill" />
+        </div>
+      )}
 
       {/* ── Summary strip ── */}
       <div className="changes-summary">
@@ -372,6 +419,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                     <div className="changes-history-date">
                       {relativeTime(h.scannedAt)}
                       <span className="changes-history-badge">current</span>
+                      <EngineBadge engine={h.engine} />
                     </div>
                     <div className="changes-history-meta">
                       <span>{formatBytes(h.bytesSeen)}</span>
@@ -393,6 +441,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 >
                   <div className="changes-history-date">
                     {relativeTime(h.scannedAt)}
+                    <EngineBadge engine={h.engine} />
                   </div>
                   <div className="changes-history-meta">
                     <span>{formatBytes(h.bytesSeen)}</span>
@@ -571,6 +620,23 @@ function ScheduleStatusStrip({
       </button>
     </div>
   );
+}
+
+/**
+ * Compact "fast" / "full" badge surfacing how a snapshot in history was
+ * produced. USN-journal scans are near-instant incremental reads of the
+ * NTFS change log; everything else is a full directory walk. Knowing
+ * which is which helps users understand why some history entries are
+ * minutes apart and others aren't.
+ */
+function EngineBadge({ engine }: { engine?: ScanEngine }) {
+  if (engine === "usn-journal") {
+    return (
+      <span className="changes-engine-badge usn" title="Incremental scan via NTFS USN journal">fast</span>
+    );
+  }
+  // Don't badge "full" — it's the default and we don't want to clutter every entry.
+  return null;
 }
 
 function formatScanIntervalMinutes(minutes: number): string {

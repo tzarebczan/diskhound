@@ -35,7 +35,7 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "duplicates", label: "Duplicates", key: "4" },
   { id: "changes", label: "Changes", key: "5" },
   { id: "easyMove", label: "Easy Move", key: "6" },
-  { id: "memory", label: "Memory", key: "7" },
+  { id: "memory", label: "Processes", key: "7" },
   { id: "settings", label: "Settings", key: "8" },
 ];
 
@@ -497,7 +497,7 @@ export function App() {
               {view === "duplicates" && <ErrorBoundary name="Duplicates"><DuplicatesView snapshot={snapshot} /></ErrorBoundary>}
               {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
-              {view === "memory" && <ErrorBoundary name="Memory"><MemoryView /></ErrorBoundary>}
+              {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
               {view === "settings" && <ErrorBoundary name="Settings"><SettingsView /></ErrorBoundary>}
             </>
           )}

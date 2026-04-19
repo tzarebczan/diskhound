@@ -20,7 +20,7 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ["Ctrl", "4"], desc: "Duplicates" },
       { keys: ["Ctrl", "5"], desc: "Changes" },
       { keys: ["Ctrl", "6"], desc: "Easy Move" },
-      { keys: ["Ctrl", "7"], desc: "Memory" },
+      { keys: ["Ctrl", "7"], desc: "Processes" },
       { keys: ["Ctrl", "8"], desc: "Settings" },
     ],
   },

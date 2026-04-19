@@ -770,10 +770,35 @@ void app.whenReady().then(async () => {
     return getScanHistory(rootPath);
   });
 
+  // Tiny LRU cache so flicking between recent baselines in the Changes-tab
+  // sidebar doesn't re-read + re-parse the same multi-megabyte JSON each
+  // time. We keep up to 8 parsed snapshots in memory (~8-16 MB worst case)
+  // — older entries get evicted on insert.
+  const snapshotCache = new Map<string, ScanSnapshot>();
+  const SNAPSHOT_CACHE_LIMIT = 8;
+  const loadHistoricalSnapshotCached = async (id: string): Promise<ScanSnapshot | null> => {
+    const cached = snapshotCache.get(id);
+    if (cached) {
+      // LRU: re-insert moves to end of insertion order
+      snapshotCache.delete(id);
+      snapshotCache.set(id, cached);
+      return cached;
+    }
+    const snap = await loadHistoricalSnapshot(id);
+    if (snap) {
+      if (snapshotCache.size >= SNAPSHOT_CACHE_LIMIT) {
+        const firstKey = snapshotCache.keys().next().value;
+        if (firstKey) snapshotCache.delete(firstKey);
+      }
+      snapshotCache.set(id, snap);
+    }
+    return snap;
+  };
+
   ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
     const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshot(baselineId),
-      loadHistoricalSnapshot(currentId),
+      loadHistoricalSnapshotCached(baselineId),
+      loadHistoricalSnapshotCached(currentId),
     ]);
     if (!baseline || !current) return null;
     return computeDiff(baseline, current, baselineId, currentId);
@@ -822,8 +847,8 @@ void app.whenReady().then(async () => {
     const pair = getLatestPair(rootPath);
     if (!pair) return null;
     const [baseline, current] = await Promise.all([
-      loadHistoricalSnapshot(pair.baseline.id),
-      loadHistoricalSnapshot(pair.current.id),
+      loadHistoricalSnapshotCached(pair.baseline.id),
+      loadHistoricalSnapshotCached(pair.current.id),
     ]);
     if (!baseline || !current) return null;
     return computeDiff(baseline, current, pair.baseline.id, pair.current.id);

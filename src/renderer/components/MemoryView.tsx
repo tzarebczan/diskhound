@@ -267,6 +267,54 @@ export function MemoryView() {
 
 // ── List view ──────────────────────────────────────────────────────────────
 
+/** A grouped row in the list view — either a multi-instance process family
+ *  (rendered as a collapsible parent) or a single instance. */
+interface ProcessGroup {
+  name: string;
+  processes: ProcessInfo[];
+  totalMemory: number;
+  totalCpu: number; // null cpuPercent treated as 0
+  exePath: string | null;
+  isSystem: boolean;
+}
+
+function buildGroups(processes: ProcessInfo[], sortField: SortField, sortDir: SortDir): ProcessGroup[] {
+  const byName = new Map<string, ProcessInfo[]>();
+  for (const p of processes) {
+    const existing = byName.get(p.name);
+    if (existing) existing.push(p);
+    else byName.set(p.name, [p]);
+  }
+
+  const groups: ProcessGroup[] = [];
+  for (const [name, procs] of byName) {
+    const totalMemory = procs.reduce((s, p) => s + p.memoryBytes, 0);
+    const totalCpu = procs.reduce((s, p) => s + (p.cpuPercent ?? 0), 0);
+    const exePath = procs.find((p) => p.exePath)?.exePath ?? null;
+    const isSystem = procs.every((p) => !p.userOwned);
+    groups.push({ name, processes: procs, totalMemory, totalCpu, exePath, isSystem });
+  }
+
+  // Sort group-level by the chosen field (using totals).
+  const m = sortDir === "asc" ? 1 : -1;
+  groups.sort((a, b) => {
+    switch (sortField) {
+      case "memory": return (a.totalMemory - b.totalMemory) * m;
+      case "cpu":    return (a.totalCpu - b.totalCpu) * m;
+      case "name":   return a.name.localeCompare(b.name) * m;
+      case "pid":    return (a.processes[0]!.pid - b.processes[0]!.pid) * m;
+    }
+  });
+
+  // Sort children within each group by memory (always desc), so the heaviest
+  // child surfaces first when expanded.
+  for (const g of groups) {
+    g.processes.sort((a, b) => b.memoryBytes - a.memoryBytes);
+  }
+
+  return groups;
+}
+
 function ProcessList(props: {
   processes: ProcessInfo[];
   total: number;
@@ -279,11 +327,28 @@ function ProcessList(props: {
   onKill: (p: ProcessInfo, hard: boolean) => void;
 }) {
   const { processes, total, totalBytes, filter, sortField, sortDir, onToggleSort, killingPid, onKill } = props;
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
-  // Max memory used by any visible process — used to scale the memory bar
-  // so the largest process fills the bar. Relative visualization is more
-  // useful than absolute-to-total because most processes are <1% of RAM.
-  const maxMem = processes.reduce((max, p) => Math.max(max, p.memoryBytes), 0);
+  const groups = useMemo(
+    () => buildGroups(processes, sortField, sortDir),
+    [processes, sortField, sortDir],
+  );
+
+  // Max memory across single rows AND group totals — keeps bars proportional
+  // even when groups dominate.
+  const maxMem = useMemo(
+    () => groups.reduce((max, g) => Math.max(max, g.totalMemory), 0),
+    [groups],
+  );
+
+  const toggleGroup = (name: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(name)) next.delete(name);
+      else next.add(name);
+      return next;
+    });
+  };
 
   return (
     <>
@@ -296,23 +361,107 @@ function ProcessList(props: {
         <div />
       </div>
       <div className="memory-list-scroll">
-        {processes.length === 0 ? (
+        {groups.length === 0 ? (
           <div className="empty-view">
             <span>{filter ? "No processes match the filter" : `No processes visible (of ${total})`}</span>
           </div>
         ) : (
-          processes.map((p) => (
-            <ProcessRow
-              key={p.pid}
-              proc={p}
-              maxMem={maxMem}
-              totalBytes={totalBytes}
-              isBusy={killingPid === p.pid}
-              onKill={onKill}
-            />
-          ))
+          groups.map((g) => {
+            if (g.processes.length === 1) {
+              const p = g.processes[0]!;
+              return (
+                <ProcessRow
+                  key={`solo-${p.pid}`}
+                  proc={p}
+                  maxMem={maxMem}
+                  totalBytes={totalBytes}
+                  isBusy={killingPid === p.pid}
+                  onKill={onKill}
+                />
+              );
+            }
+            return (
+              <ProcessGroupRows
+                key={`group-${g.name}`}
+                group={g}
+                maxMem={maxMem}
+                totalBytes={totalBytes}
+                isExpanded={expanded.has(g.name)}
+                onToggle={() => toggleGroup(g.name)}
+                killingPid={killingPid}
+                onKill={onKill}
+              />
+            );
+          })
         )}
       </div>
+    </>
+  );
+}
+
+function ProcessGroupRows(props: {
+  group: ProcessGroup;
+  maxMem: number;
+  totalBytes: number;
+  isExpanded: boolean;
+  onToggle: () => void;
+  killingPid: number | null;
+  onKill: (p: ProcessInfo, hard: boolean) => void;
+}) {
+  const { group, maxMem, totalBytes, isExpanded, onToggle, killingPid, onKill } = props;
+  const memPct = maxMem > 0 ? (group.totalMemory / maxMem) * 100 : 0;
+  const totalPct = totalBytes > 0 ? (group.totalMemory / totalBytes) * 100 : 0;
+  const memClass = totalPct > 5 ? "high" : totalPct > 1 ? "mid" : "low";
+  const cpuPct = Math.min(100, group.totalCpu);
+  const cpuClass = cpuPct > 50 ? "high" : cpuPct > 15 ? "mid" : "low";
+
+  return (
+    <>
+      <div
+        className={`memory-row memory-row-group ${isExpanded ? "expanded" : ""}`}
+        onClick={onToggle}
+        title={`${group.processes.length} instances · click to ${isExpanded ? "collapse" : "expand"}`}
+      >
+        <div className="memory-row-icon memory-row-chevron">
+          <svg
+            width="10" height="10" viewBox="0 0 10 10"
+            fill="none" stroke="currentColor" strokeWidth="1.5"
+            style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform 0.12s" }}
+          >
+            <path d="M3 2L7 5L3 8" />
+          </svg>
+        </div>
+        <div className="memory-row-mem">
+          <span className={`memory-row-mem-value ${memClass}`}>{formatBytes(group.totalMemory)}</span>
+          <div className="memory-row-mem-bar">
+            <div className={`memory-row-mem-bar-fill ${memClass}`} style={{ width: `${memPct}%` }} />
+          </div>
+        </div>
+        <div className="memory-row-cpu">
+          <span className={`memory-row-cpu-value ${cpuClass}`}>{group.totalCpu.toFixed(1)}%</span>
+          <div className="memory-row-cpu-bar">
+            <div className={`memory-row-cpu-bar-fill ${cpuClass}`} style={{ width: `${cpuPct}%` }} />
+          </div>
+        </div>
+        <div className="memory-row-pid memory-row-count">&times;{group.processes.length}</div>
+        <div className="memory-row-name memory-row-name-group">
+          <ProcessIcon exePath={group.exePath} className="memory-row-icon-img memory-row-icon-inline" />
+          {group.name}
+          {group.isSystem && <span className="memory-row-system-badge" title="System processes">sys</span>}
+        </div>
+        <div className="memory-row-actions" />
+      </div>
+      {isExpanded && group.processes.map((p) => (
+        <ProcessRow
+          key={p.pid}
+          proc={p}
+          maxMem={maxMem}
+          totalBytes={totalBytes}
+          isBusy={killingPid === p.pid}
+          onKill={onKill}
+          isChild
+        />
+      ))}
     </>
   );
 }
@@ -323,15 +472,19 @@ function ProcessRow(props: {
   totalBytes: number;
   isBusy: boolean;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  isChild?: boolean;
 }) {
-  const { proc, maxMem, totalBytes, isBusy, onKill } = props;
+  const { proc, maxMem, totalBytes, isBusy, onKill, isChild } = props;
   const memPct = maxMem > 0 ? (proc.memoryBytes / maxMem) * 100 : 0;
   const totalPct = totalBytes > 0 ? (proc.memoryBytes / totalBytes) * 100 : 0;
   const memClass = totalPct > 5 ? "high" : totalPct > 1 ? "mid" : "low";
+  const cpuRaw = proc.cpuPercent ?? 0;
+  const cpuPct = Math.min(100, cpuRaw);
+  const cpuClass = cpuPct > 50 ? "high" : cpuPct > 15 ? "mid" : "low";
 
   return (
     <div
-      className="memory-row"
+      className={`memory-row ${isChild ? "memory-row-child" : ""}`}
       title={proc.commandLine ?? proc.exePath ?? proc.name}
     >
       <div className="memory-row-icon">
@@ -344,10 +497,18 @@ function ProcessRow(props: {
         </div>
       </div>
       <div className="memory-row-cpu">
-        {proc.cpuPercent !== null ? `${proc.cpuPercent.toFixed(1)}%` : "—"}
+        <span className={`memory-row-cpu-value ${cpuClass}`}>
+          {proc.cpuPercent !== null ? `${cpuRaw.toFixed(1)}%` : "—"}
+        </span>
+        {proc.cpuPercent !== null && (
+          <div className="memory-row-cpu-bar">
+            <div className={`memory-row-cpu-bar-fill ${cpuClass}`} style={{ width: `${cpuPct}%` }} />
+          </div>
+        )}
       </div>
       <div className="memory-row-pid">{proc.pid}</div>
       <div className="memory-row-name">
+        {isChild && <span className="memory-row-child-prefix">{"\u2514"}</span>}
         {proc.name}
         {!proc.userOwned && <span className="memory-row-system-badge" title="System process">sys</span>}
       </div>

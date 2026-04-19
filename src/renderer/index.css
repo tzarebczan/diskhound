@@ -2816,12 +2816,84 @@ button, input, select, textarea { font: inherit; }
   gap: 6px;
 }
 
-.memory-row-cpu,
+.memory-row-cpu {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  align-items: flex-end;
+  min-width: 0;
+}
+.memory-row-cpu-value {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  font-weight: 500;
+}
+.memory-row-cpu-value.high { color: var(--red); }
+.memory-row-cpu-value.mid  { color: var(--amber); }
+.memory-row-cpu-value.low  { color: var(--text-secondary); }
+.memory-row-cpu-bar {
+  width: 100%;
+  height: 3px;
+  background: rgba(255,255,255,0.04);
+  border-radius: 1.5px;
+  overflow: hidden;
+}
+.memory-row-cpu-bar-fill {
+  height: 100%;
+  border-radius: 1.5px;
+  transition: width 0.25s;
+}
+.memory-row-cpu-bar-fill.high { background: var(--red); }
+.memory-row-cpu-bar-fill.mid  { background: var(--amber); }
+.memory-row-cpu-bar-fill.low  { background: var(--green); opacity: 0.5; }
+
 .memory-row-pid {
   font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-secondary);
   text-align: right;
+}
+.memory-row-count {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* ── Group rows + child rows ── */
+.memory-row-group {
+  cursor: pointer;
+  background: rgba(255,255,255,0.015);
+}
+:root.light .memory-row-group { background: rgba(0,0,0,0.015); }
+.memory-row-group:hover { background: var(--bg-row-hover); }
+.memory-row-group.expanded {
+  background: rgba(59,130,246,0.05);
+}
+:root.light .memory-row-group.expanded { background: rgba(59,130,246,0.04); }
+.memory-row-chevron {
+  color: var(--text-muted);
+}
+.memory-row-name-group {
+  font-weight: 500;
+}
+.memory-row-icon-inline {
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.memory-row-child {
+  background: rgba(0,0,0,0.08);
+  font-size: 12px;
+}
+:root.light .memory-row-child { background: rgba(0,0,0,0.025); }
+.memory-row-child .memory-row-name {
+  color: var(--text-secondary);
+  padding-left: 6px;
+}
+.memory-row-child-prefix {
+  color: var(--text-muted);
+  margin-right: 4px;
+  font-family: var(--font-mono);
+  opacity: 0.6;
 }
 .memory-row-name {
   display: flex;
@@ -3257,6 +3329,37 @@ button, input, select, textarea { font: inherit; }
 .changes-schedule-spacer {
   flex: 1;
 }
+
+/* ── Snapshot-switch indicator (Changes tab) ── */
+.changes-switching-bar {
+  position: relative;
+  height: 2px;
+  background: rgba(59, 130, 246, 0.08);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.changes-switching-bar-fill {
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgb(96, 165, 250),
+    transparent
+  );
+  animation: changes-switching-slide 1.1s ease-in-out infinite;
+}
+@keyframes changes-switching-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(380%); }
+}
+.changes-view.is-switching .changes-detail-scroll {
+  /* Subtle dim so users see "this is updating" without losing context */
+  opacity: 0.55;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
 .changes-detail {
   display: grid;
   grid-template-rows: auto 1fr;
@@ -3441,6 +3544,21 @@ button, input, select, textarea { font: inherit; }
   color: var(--blue);
   font-weight: 600;
   text-transform: uppercase;
+}
+.changes-engine-badge {
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  display: inline-block;
+  vertical-align: middle;
+}
+.changes-engine-badge.usn {
+  background: rgba(16,185,129,0.14);
+  color: rgb(52,211,153);
 }
 .changes-history-meta {
   display: flex;

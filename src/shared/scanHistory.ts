@@ -67,6 +67,7 @@ export async function saveScanToHistory(snapshot: ScanSnapshot): Promise<string 
     directoriesVisited: snapshot.directoriesVisited,
     bytesSeen: snapshot.bytesSeen,
     elapsedMs: snapshot.elapsedMs,
+    engine: snapshot.engine,
   };
 
   // Write the full snapshot

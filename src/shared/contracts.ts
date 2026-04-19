@@ -270,6 +270,9 @@ export interface ScanHistoryEntry {
   directoriesVisited: number;
   bytesSeen: number;
   elapsedMs: number;
+  /** Which scanner produced this entry. Optional for backward-compat with
+   *  history written before v0.2.8 — older entries are treated as full. */
+  engine?: ScanEngine;
 }
 
 export type FileDeltaKind = "added" | "removed" | "grew" | "shrank";
