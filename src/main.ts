@@ -944,9 +944,18 @@ void app.whenReady().then(async () => {
 
   function applyLoginItemSettings(enabled: boolean) {
     try {
+      // `--autostart` signals "the OS auto-launched us at login" — only
+      // then does startMinimized take effect. Manual launches, post-
+      // install launches (NSIS "Finish"), and post-update restarts all
+      // come without this flag and therefore always show the window.
+      //
+      // Old flag name `--start-minimized` is still accepted at parse
+      // time so existing login-item entries from <= v0.2.15 keep
+      // working until applyLoginItemSettings() runs again and rewrites
+      // them.
       app.setLoginItemSettings({
         openAtLogin: enabled,
-        args: enabled ? ["--start-minimized"] : [],
+        args: enabled ? ["--autostart"] : [],
       });
     } catch {
       // Not supported on all platforms
@@ -1228,12 +1237,21 @@ void app.whenReady().then(async () => {
   await createWindow();
   writeStartupLog("window created and loaded");
 
-  // Check if launched with --start-minimized (from login item)
+  // "Start minimized" is an AUTOSTART-ONLY preference — we want a
+  // fresh-install launch, a post-update restart, and a user-initiated
+  // double-click to all surface the window, even when the user has
+  // opted into starting minimized on OS login. The distinguishing
+  // signal is the `--autostart` arg that applyLoginItemSettings wires
+  // into the registered login item. Legacy flag `--start-minimized`
+  // stays recognised so installs that ran on ≤ v0.2.15 don't
+  // double-foreground on their next OS-login launch before Settings
+  // is opened (which rewrites the arg).
+  const wasAutoStarted =
+    process.argv.includes("--autostart") ||
+    process.argv.includes("--start-minimized");
   const canLaunchToTray = settings.general.minimizeToTray && Boolean(tray);
-  const launchMinimized = canLaunchToTray && (
-    settings.general.startMinimized ||
-    process.argv.includes("--start-minimized")
-  );
+  const launchMinimized =
+    canLaunchToTray && wasAutoStarted && settings.general.startMinimized;
   if (launchMinimized) {
     mainWindow?.hide();
   }

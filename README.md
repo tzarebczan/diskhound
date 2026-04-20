@@ -73,6 +73,16 @@ Download the latest release for your platform from [**Releases**](https://github
       <sub><b>Settings</b> — theme, scanning, monitoring, cleanup</sub>
     </td>
   </tr>
+  <tr>
+    <td align="center">
+      <img src="docs/screenshots/processes-treemap.png" alt="Processes" width="100%" /><br>
+      <sub><b>Processes</b> — memory treemap with real exe icons; right-click any rect for reveal / kill actions</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/processes-heatmap.png" alt="CPU Heatmap" width="100%" /><br>
+      <sub><b>CPU Heatmap</b> — scrolling waterfall where the right edge is NOW; sparklines call out recent CPU activity</sub>
+    </td>
+  </tr>
 </table>
 
 ## Development

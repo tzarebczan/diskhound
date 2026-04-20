@@ -96,19 +96,30 @@ export function SettingsView() {
           })}
         />
         <ToggleRow
-          label="Start minimized"
-          desc={settings.general.minimizeToTray
-            ? "Launch hidden in the system tray"
-            : "Requires 'Minimize to tray'"}
-          value={settings.general.minimizeToTray && settings.general.startMinimized}
-          disabled={!settings.general.minimizeToTray}
-          onChange={(v) => void save({ ...settings, general: { ...settings.general, startMinimized: v } })}
-        />
-        <ToggleRow
           label="Launch on startup"
-          desc="Start DiskHound when you log in"
+          desc="Start DiskHound when you log in to your computer"
           value={settings.general.launchOnStartup}
           onChange={(v) => void save({ ...settings, general: { ...settings.general, launchOnStartup: v } })}
+        />
+        <ToggleRow
+          label="Start minimized on OS login"
+          desc={
+            !settings.general.minimizeToTray
+              ? "Requires 'Minimize to tray'"
+              : !settings.general.launchOnStartup
+                ? "Requires 'Launch on startup'"
+                : "When DiskHound auto-launches at OS login, hide in the tray instead of showing the window. Manual launches, post-install, and post-update restarts always show the window."
+          }
+          value={
+            settings.general.minimizeToTray &&
+            settings.general.launchOnStartup &&
+            settings.general.startMinimized
+          }
+          disabled={
+            !settings.general.minimizeToTray ||
+            !settings.general.launchOnStartup
+          }
+          onChange={(v) => void save({ ...settings, general: { ...settings.general, startMinimized: v } })}
         />
         <ToggleRow
           label="Auto-update"
