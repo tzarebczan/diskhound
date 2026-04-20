@@ -743,7 +743,8 @@ function ProcessRow(props: {
 // ── Treemap view ───────────────────────────────────────────────────────────
 
 /** Consistent color per process family — hashed from the name so repeat
- *  processes (e.g. all chrome.exe instances) group visually. */
+ *  processes (e.g. all chrome.exe instances) group visually when we don't
+ *  have an icon-derived color to use. */
 const COLOR_PALETTE = [
   "#3b82f6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6",
   "#ec4899", "#06b6d4", "#84cc16", "#f97316", "#6366f1",
@@ -756,6 +757,127 @@ function colorForProcessName(name: string): string {
     h = ((h << 5) - h + name.charCodeAt(i)) | 0;
   }
   return COLOR_PALETTE[Math.abs(h) % COLOR_PALETTE.length];
+}
+
+/**
+ * Strip `.exe` from a process name for display. Other extensions (`.bat`,
+ * `.ps1`, `.py`) stay — they carry genuine information about what kind
+ * of process this is. `.exe` is noise on Windows where nearly every
+ * process carries it.
+ */
+function prettyProcessName(name: string): string {
+  if (/\.exe$/i.test(name)) return name.slice(0, -4);
+  return name;
+}
+
+// ── Process appearance cache (icon + dominant color) ─────────────────────
+//
+// Loading icons + extracting a dominant color is async (IPC → image decode
+// → pixel sample) but the canvas draw loop is synchronous. We keep a
+// module-scoped cache so:
+//   - Results persist across MemoryView remounts (tab switches)
+//   - Every process sharing an exePath reuses the same icon + color
+//   - A simple version counter lets the treemap subscribe + redraw when
+//     new icons resolve, without each rect having its own useState.
+//
+// Cache state per exePath:
+//   - undefined        → never seen, safe to kick off a load
+//   - null (image)     → load in flight or failed; fallback color applies
+//   - HTMLImageElement → icon ready to draw
+//
+// Colors default to the hash-based palette and upgrade to icon-derived
+// once pixel sampling completes.
+
+interface ProcessAppearance {
+  icon: HTMLImageElement | null;
+  color: string;
+}
+
+const appearanceCache = new Map<string, ProcessAppearance>();
+const appearanceInFlight = new Set<string>();
+let appearanceVersion = 0;
+const appearanceSubscribers = new Set<() => void>();
+
+function notifyAppearanceSubscribers(): void {
+  appearanceVersion++;
+  for (const fn of appearanceSubscribers) fn();
+}
+
+/**
+ * Derive a dominant color from a fully-decoded icon. Renders the icon
+ * at 16x16, walks opaque pixels, and averages them with extra weight on
+ * saturated pixels so a brightly-colored logo wins over a field of grey
+ * chrome. Returns null if the icon had no opaque pixels.
+ */
+function extractDominantColor(img: HTMLImageElement): string | null {
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = 16;
+    canvas.height = 16;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, 0, 16, 16);
+    const data = ctx.getImageData(0, 0, 16, 16).data;
+    let r = 0, g = 0, b = 0, totalWeight = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      const alpha = data[i + 3];
+      if (alpha < 128) continue;
+      const rr = data[i]!, gg = data[i + 1]!, bb = data[i + 2]!;
+      const maxC = Math.max(rr, gg, bb);
+      const minC = Math.min(rr, gg, bb);
+      const saturation = maxC === 0 ? 0 : (maxC - minC) / maxC;
+      // Favor saturated pixels so tinted chrome doesn't swamp a brand accent.
+      const weight = 1 + saturation * 3;
+      r += rr * weight;
+      g += gg * weight;
+      b += bb * weight;
+      totalWeight += weight;
+    }
+    if (totalWeight === 0) return null;
+    // Darken slightly so light-icon processes (mostly-white icons) still
+    // read as distinct squares against the dark theme background.
+    const avgR = Math.round((r / totalWeight) * 0.85);
+    const avgG = Math.round((g / totalWeight) * 0.85);
+    const avgB = Math.round((b / totalWeight) * 0.85);
+    return `rgb(${avgR}, ${avgG}, ${avgB})`;
+  } catch {
+    return null;
+  }
+}
+
+function loadProcessAppearance(exePath: string, fallbackColor: string): void {
+  if (appearanceCache.has(exePath) || appearanceInFlight.has(exePath)) return;
+  appearanceInFlight.add(exePath);
+  void nativeApi.getExecutableIcon(exePath, "normal").then((url) => {
+    if (!url) {
+      appearanceCache.set(exePath, { icon: null, color: fallbackColor });
+      appearanceInFlight.delete(exePath);
+      notifyAppearanceSubscribers();
+      return;
+    }
+    const img = new Image();
+    img.src = url;
+    img.decode().then(() => {
+      const dominant = extractDominantColor(img);
+      appearanceCache.set(exePath, { icon: img, color: dominant ?? fallbackColor });
+      appearanceInFlight.delete(exePath);
+      notifyAppearanceSubscribers();
+    }).catch(() => {
+      appearanceCache.set(exePath, { icon: null, color: fallbackColor });
+      appearanceInFlight.delete(exePath);
+      notifyAppearanceSubscribers();
+    });
+  }).catch(() => {
+    appearanceCache.set(exePath, { icon: null, color: fallbackColor });
+    appearanceInFlight.delete(exePath);
+    notifyAppearanceSubscribers();
+  });
+}
+
+function getAppearance(proc: ProcessInfo): ProcessAppearance {
+  const fallback = { icon: null, color: colorForProcessName(proc.name) };
+  if (!proc.exePath) return fallback;
+  return appearanceCache.get(proc.exePath) ?? fallback;
 }
 
 interface TreemapRect {
@@ -867,6 +989,23 @@ function ProcessTreemap(props: {
   const [hover, setHover] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
   const [selected, setSelected] = useState<ProcessInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
+  // Bumped whenever a new process icon / dominant color finishes loading
+  // in the module cache. Treated as a render dependency so the canvas
+  // repaints once icons arrive.
+  const [, setAppearanceTick] = useState(0);
+  useEffect(() => {
+    const fn = () => setAppearanceTick((t) => t + 1);
+    appearanceSubscribers.add(fn);
+    return () => { appearanceSubscribers.delete(fn); };
+  }, []);
+  // Kick off appearance loads for any process we haven't seen yet.
+  // Bounded work per render: at most one load per unique exePath.
+  useEffect(() => {
+    for (const p of processes) {
+      if (!p.exePath) continue;
+      loadProcessAppearance(p.exePath, colorForProcessName(p.name));
+    }
+  }, [processes]);
 
   // Escape closes any open popover/menu. Centralised here so users can hit
   // Esc whether they opened the detail via left-click or the compact menu
@@ -943,7 +1082,10 @@ function ProcessTreemap(props: {
 
     for (const r of rects) {
       if (r.w < 1 || r.h < 1) continue;
-      ctx.fillStyle = r.color;
+      // Appearance-aware fill: icon-derived color when we have one,
+      // hash-based palette until the icon finishes loading.
+      const appearance = getAppearance(r.process);
+      ctx.fillStyle = appearance.color;
       ctx.fillRect(r.x, r.y, r.w, r.h);
 
       // Cushion shading (same vibe as disk treemap)
@@ -961,24 +1103,47 @@ function ProcessTreemap(props: {
       }
 
       const pad = 4;
-      const maxLabelW = r.w - pad * 2;
-      if (r.w > 44 && r.h > 20 && maxLabelW > 30) {
+      // Draw the app icon in the top-left when the rect is large enough
+      // to hold one without crowding the label. Icon size scales with
+      // rect size but is capped so it doesn't swamp a very tall tile.
+      let labelX = r.x + pad;
+      const labelY = r.y + pad;
+      if (appearance.icon && r.w >= 60 && r.h >= 36) {
+        const iconSize = Math.min(28, Math.max(14, Math.floor(Math.min(r.w, r.h) * 0.22)));
+        ctx.save();
+        ctx.shadowColor = "rgba(0,0,0,0.55)";
+        ctx.shadowBlur = 3;
+        ctx.shadowOffsetY = 1;
+        try {
+          ctx.drawImage(appearance.icon, r.x + pad, r.y + pad, iconSize, iconSize);
+        } catch {
+          // Drawing an undecoded image can throw; the appearance
+          // subscriber drives a redraw once it's ready.
+        }
+        ctx.restore();
+        labelX = r.x + pad + iconSize + 6;
+      }
+
+      const maxLabelW = r.w - (labelX - r.x) - pad;
+      if (r.w > 44 && r.h > 20 && maxLabelW > 24) {
         const fontSize = Math.min(12, Math.max(8, Math.min(r.w / 10, r.h / 3)));
         ctx.font = `500 ${fontSize}px "JetBrains Mono", monospace`;
         ctx.textBaseline = "top";
 
-        let label = r.process.name;
+        // Strip `.exe` on display — noise on Windows where nearly every
+        // process carries it. Other extensions (.bat, .ps1, .py) stay.
+        let label = prettyProcessName(r.process.name);
         let measured = ctx.measureText(label).width;
         if (measured > maxLabelW) {
           const charW = measured / label.length;
           const maxChars = Math.floor(maxLabelW / charW) - 1;
-          label = maxChars > 2 ? label.slice(0, maxChars) + "\u2026" : "";
+          label = maxChars > 2 ? label.slice(0, maxChars) + "…" : "";
         }
         if (label) {
           ctx.fillStyle = "rgba(0,0,0,0.5)";
-          ctx.fillText(label, r.x + pad + 1, r.y + pad + 1, maxLabelW);
+          ctx.fillText(label, labelX + 1, labelY + 1, maxLabelW);
           ctx.fillStyle = "rgba(255,255,255,0.95)";
-          ctx.fillText(label, r.x + pad, r.y + pad, maxLabelW);
+          ctx.fillText(label, labelX, labelY, maxLabelW);
         }
 
         if (r.h > fontSize + pad * 2 + 10) {
@@ -986,12 +1151,14 @@ function ProcessTreemap(props: {
           ctx.font = `400 ${sizeFont}px "JetBrains Mono", monospace`;
           const sizeLabel = formatBytes(r.process.memoryBytes);
           ctx.fillStyle = "rgba(0,0,0,0.4)";
-          ctx.fillText(sizeLabel, r.x + pad + 1, r.y + pad + fontSize + 2 + 1, maxLabelW);
+          ctx.fillText(sizeLabel, labelX + 1, labelY + fontSize + 2 + 1, maxLabelW);
           ctx.fillStyle = "rgba(255,255,255,0.75)";
-          ctx.fillText(sizeLabel, r.x + pad, r.y + pad + fontSize + 2, maxLabelW);
+          ctx.fillText(sizeLabel, labelX, labelY + fontSize + 2, maxLabelW);
         }
       }
     }
+    // Keep the appearance subscriber as a live render dependency.
+    void appearanceVersion;
   }, [processes, dims]);
 
   const hitTest = useCallback((e: MouseEvent): ProcessInfo | null => {

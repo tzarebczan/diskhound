@@ -432,6 +432,15 @@ export interface UpdateStatus {
   availableVersion?: string;
   downloadPercent?: number;
   errorMessage?: string;
+  /** Epoch ms of the last successful check attempt (available / up-to-date / error).
+   *  Persists across app restarts so the Settings UI doesn't say "Never checked"
+   *  after a cold boot that's about to trigger a check. */
+  lastCheckedAt?: number | null;
+}
+
+export interface UpdateState {
+  lastCheckedAt: number | null;
+  currentVersion: string;
 }
 
 // ── Duplicate Detection Types ──────────────────────────────
@@ -575,6 +584,20 @@ export interface DiskhoundNativeApi {
    * Powers the dense WinDirStat-style treemap visualization.
    */
   getTreemapFiles: (rootPath: string, limit?: number) => Promise<ScanFileRecord[]>;
+  /**
+   * Returns direct-child folders (with recursive size + file count) and
+   * top-N direct files for a given folder, sourced from the persisted
+   * index. Powers the Folders tab drill-in — prior versions relied on
+   * the snapshot's bounded top-N which showed "0B" for most subfolders
+   * and ballooned renderer memory on deep trees.
+   */
+  getFolderChildren: (
+    rootPath: string,
+    parentPath: string,
+  ) => Promise<{
+    dirs: { path: string; size: number; fileCount: number }[];
+    files: ScanFileRecord[];
+  }>;
 
   // Theme
   applyTheme: (theme: "dark" | "light") => void;
@@ -583,6 +606,9 @@ export interface DiskhoundNativeApi {
   checkForUpdates: () => Promise<void>;
   quitAndInstall: () => void;
   onUpdateStatus: (listener: (status: UpdateStatus) => void) => () => void;
+  /** Load the persisted updater state (lastCheckedAt) so the UI shows a
+   *  real timestamp across app restarts instead of "Never". */
+  getUpdateState: () => Promise<UpdateState>;
 
   // Tray
   minimizeToTray: () => void;

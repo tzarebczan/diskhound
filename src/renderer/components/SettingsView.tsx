@@ -144,7 +144,6 @@ export function SettingsView() {
         <MonitoringStatusPanel
           snapshot={monitoringSnapshot}
           enabled={settings.monitoring.enabled}
-          defaultRootPath={settings.scanning.defaultRootPath}
           excludedDrives={settings.monitoring.excludedDrives}
           onToggleDrive={(drive) => {
             const upper = drive.toUpperCase();
@@ -281,9 +280,22 @@ function RunNowRow({ defaultRootPath }: { defaultRootPath: string }) {
 function UpdateRow() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  // Seeded from the persisted updater-state.json so "Last checked 4h ago"
+  // survives restarts instead of falling back to "Never" every cold boot.
+  const [persistedLastCheckedAt, setPersistedLastCheckedAt] = useState<number | null>(null);
 
   useEffect(() => {
-    return nativeApi.onUpdateStatus(setStatus);
+    const unsub = nativeApi.onUpdateStatus((s) => {
+      setStatus(s);
+      if (typeof s.lastCheckedAt === "number") {
+        setPersistedLastCheckedAt(s.lastCheckedAt);
+      }
+    });
+    // Load the persisted last-checked timestamp on mount.
+    void nativeApi.getUpdateState().then((state) => {
+      if (state) setPersistedLastCheckedAt(state.lastCheckedAt);
+    });
+    return unsub;
   }, []);
 
   const check = async () => {
@@ -292,14 +304,28 @@ function UpdateRow() {
     setChecking(false);
   };
 
-  let statusText = "Never checked";
+  const formatLastChecked = (ts: number): string => {
+    const diff = Date.now() - ts;
+    if (diff < 60_000) return "just now";
+    if (diff < 60 * 60_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 24 * 60 * 60_000) return `${Math.floor(diff / (60 * 60_000))}h ago`;
+    return `${Math.floor(diff / (24 * 60 * 60_000))}d ago`;
+  };
+
+  let statusText = persistedLastCheckedAt
+    ? `Last checked ${formatLastChecked(persistedLastCheckedAt)}`
+    : "Never checked";
   if (status) {
     switch (status.phase) {
       case "checking":      statusText = "Checking..."; break;
       case "available":     statusText = `Update available: v${status.availableVersion}`; break;
       case "downloading":   statusText = `Downloading... ${status.downloadPercent ?? 0}%`; break;
       case "downloaded":    statusText = `Ready to install: v${status.availableVersion}`; break;
-      case "up-to-date":    statusText = `Up to date (v${status.currentVersion})`; break;
+      case "up-to-date":
+        statusText = `Up to date (v${status.currentVersion})${
+          persistedLastCheckedAt ? ` · checked ${formatLastChecked(persistedLastCheckedAt)}` : ""
+        }`;
+        break;
       case "error":         statusText = `Error: ${status.errorMessage ?? "unknown"}`; break;
     }
   }
@@ -380,13 +406,11 @@ function NumberRow({ label, value, onChange, desc, min, max }: {
 function MonitoringStatusPanel({
   snapshot,
   enabled,
-  defaultRootPath,
   excludedDrives,
   onToggleDrive,
 }: {
   snapshot: MonitoringSnapshot | null;
   enabled: boolean;
-  defaultRootPath: string;
   excludedDrives: string[];
   onToggleDrive: (drive: string) => void;
 }) {
@@ -413,11 +437,6 @@ function MonitoringStatusPanel({
         <MonitoringMeta
           label="Last full scan"
           value={snapshot?.lastFullScanAt ? formatMonitoringTime(snapshot.lastFullScanAt) : "No full scan yet"}
-        />
-        <MonitoringMeta
-          label="Scheduled root"
-          value={defaultRootPath || "Not set"}
-          mono
         />
       </div>
 

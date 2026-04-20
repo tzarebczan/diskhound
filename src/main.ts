@@ -56,6 +56,7 @@ import {
   diffIndexes,
   indexFilePath,
   initScanIndex,
+  loadDirectChildrenFromIndex,
   loadIndex,
   loadLargestFiles,
 } from "./shared/scanIndex";
@@ -919,6 +920,51 @@ void app.whenReady().then(async () => {
     }
   });
 
+  /**
+   * Direct-children-by-folder lookup for the Folders tab. Streams the
+   * persisted scan index and rolls up file records into:
+   *   - direct-child folders (with aggregate size + file count)
+   *   - top-N files that live directly in `parentPath`
+   *
+   * This replaces the prior renderer-side approach that relied on the
+   * snapshot's bounded top-N arrays — which showed "0B" for any folder
+   * that didn't make the hottest-dirs cut, and risked ballooning
+   * renderer memory as the user drilled in.
+   */
+  ipcMain.handle(
+    "diskhound:get-folder-children",
+    async (_event, rootPath: string, parentPath: string) => {
+      const history = getScanHistory(rootPath);
+      const currentId = history[0]?.id;
+      if (!currentId) return { dirs: [], files: [] };
+      try {
+        const result = await loadDirectChildrenFromIndex(
+          indexFilePath(currentId),
+          parentPath,
+          500,
+          500,
+        );
+        const files = result.files.map((r) => {
+          const name = Path.basename(r.p);
+          const parentPathPart = Path.dirname(r.p);
+          const dotIdx = name.lastIndexOf(".");
+          const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+          return {
+            path: r.p,
+            name,
+            parentPath: parentPathPart,
+            extension,
+            size: r.s,
+            modifiedAt: r.m,
+          };
+        });
+        return { dirs: result.dirs, files };
+      } catch {
+        return { dirs: [], files: [] };
+      }
+    },
+  );
+
   ipcMain.handle("diskhound:get-latest-diff", async (_event, rootPath: string) => {
     const pair = getLatestPair(rootPath);
     if (!pair) return null;
@@ -1464,9 +1510,48 @@ void app.whenReady().then(async () => {
   let autoUpdater: any = null;
   const UPDATE_STATUS_CHANNEL = "diskhound:update-status";
   const currentVersion = app.getVersion();
+  // Interval between automatic update checks once the app is running.
+  // 4 hours is a middle ground — fast enough to catch same-day releases
+  // without thrashing GitHub's rate limit on always-on installs.
+  const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+
+  /**
+   * Persisted timestamp of the last time we successfully *attempted* an
+   * update check (whether or not an update was available). Stored on
+   * the in-memory updateState stub — the renderer pulls it via
+   * getUpdateState() on mount so "last checked" survives restarts
+   * instead of reading "Never" every time the app cold-boots.
+   */
+  const updaterStatePath = Path.join(app.getPath("userData"), "updater-state.json");
+  type UpdaterState = { lastCheckedAt: number | null };
+  const readUpdaterState = (): UpdaterState => {
+    try {
+      const raw = FS_SYNC.readFileSync(updaterStatePath, "utf8");
+      const parsed = JSON.parse(raw) as Partial<UpdaterState>;
+      if (typeof parsed.lastCheckedAt === "number") {
+        return { lastCheckedAt: parsed.lastCheckedAt };
+      }
+    } catch { /* missing / corrupt — treat as "never checked" */ }
+    return { lastCheckedAt: null };
+  };
+  let updaterState: UpdaterState = readUpdaterState();
+  const persistUpdaterState = () => {
+    try {
+      FS_SYNC.writeFileSync(updaterStatePath, JSON.stringify(updaterState));
+    } catch { /* best effort */ }
+  };
 
   const emitUpdateStatus = (status: import("./shared/contracts").UpdateStatus) => {
-    mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, status);
+    const enriched = {
+      ...status,
+      lastCheckedAt: updaterState.lastCheckedAt,
+    };
+    mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, enriched);
+  };
+
+  const recordCheck = () => {
+    updaterState = { lastCheckedAt: Date.now() };
+    persistUpdaterState();
   };
 
   if (!isDevelopment) {
@@ -1482,11 +1567,13 @@ void app.whenReady().then(async () => {
         emitUpdateStatus({ phase: "checking", currentVersion });
       });
       autoUpdater.on("update-available", (info: any) => {
+        recordCheck();
         emitUpdateStatus({ phase: "available", currentVersion, availableVersion: info?.version });
         sendToast("info", "Update available", `DiskHound ${info?.version ?? ""} is available. Downloading...`);
         autoUpdater.downloadUpdate().catch(() => {});
       });
       autoUpdater.on("update-not-available", (info: any) => {
+        recordCheck();
         emitUpdateStatus({ phase: "up-to-date", currentVersion, availableVersion: info?.version });
       });
       autoUpdater.on("download-progress", (p: any) => {
@@ -1497,13 +1584,26 @@ void app.whenReady().then(async () => {
         sendToast("success", "Update ready", "Restart DiskHound to apply the update.");
       });
       autoUpdater.on("error", (err: Error) => {
+        // Still record the attempt — users ask "did it try?" and
+        // repeated network errors shouldn't look like no activity.
+        recordCheck();
         emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err?.message });
       });
 
+      const scheduleUpdateCheck = () => {
+        if (!settingsStore?.get().general.autoUpdate) return;
+        autoUpdater.checkForUpdates().catch(() => {});
+      };
+
       // Check on boot only if the user has auto-update enabled
       if (settings.general.autoUpdate) {
-        autoUpdater.checkForUpdates().catch(() => {});
+        scheduleUpdateCheck();
       }
+
+      // Re-check every UPDATE_CHECK_INTERVAL_MS so long-running installs
+      // pick up releases without needing a manual click. setInterval is
+      // cleared in before-quit.
+      setInterval(scheduleUpdateCheck, UPDATE_CHECK_INTERVAL_MS).unref?.();
     } catch {
       // electron-updater not available (dev mode or build issue)
     }
@@ -1512,6 +1612,16 @@ void app.whenReady().then(async () => {
   ipcMain.handle("diskhound:check-for-updates", async () => {
     if (!autoUpdater) return;
     try { await autoUpdater.checkForUpdates(); } catch { /* ignore */ }
+  });
+
+  // Returns the persisted last-checked timestamp so the Settings UI can
+  // show "Last checked 4h ago" immediately after app launch, instead of
+  // the stale-looking "Never" that the in-memory UpdateStatus gives us.
+  ipcMain.handle("diskhound:get-update-state", () => {
+    return {
+      lastCheckedAt: updaterState.lastCheckedAt,
+      currentVersion,
+    };
   });
 
   ipcMain.on("diskhound:quit-and-install", () => {

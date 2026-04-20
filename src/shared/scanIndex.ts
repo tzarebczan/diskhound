@@ -296,6 +296,103 @@ export async function loadLargestFiles(
   return top.sort((a, b) => b.s - a.s);
 }
 
+/**
+ * Stream the index and return the direct children of `parentPath` with
+ * their recursive sizes + file counts. Powers the Folders tab's drill-in
+ * navigation without forcing the renderer to hold millions of file
+ * records in memory.
+ *
+ * "Direct children" = for each file record under `parentPath`, either
+ * (a) the file itself if its parent === parentPath, or (b) the name of
+ * the folder one level deeper under parentPath, with size/count
+ * aggregated across all files in that folder's subtree.
+ *
+ * Returns { dirs, files } — both capped at `dirLimit` / `fileLimit` by
+ * largest size. Files array contains the top-N largest files directly
+ * IN `parentPath` (not in any subfolder).
+ *
+ * Memory: O(number of direct children) + O(fileLimit). For a drive's
+ * root this is typically dozens of dirs + the top few hundred files —
+ * orders of magnitude less than the whole index.
+ */
+export async function loadDirectChildrenFromIndex(
+  filePath: string,
+  parentPath: string,
+  dirLimit: number = 500,
+  fileLimit: number = 500,
+): Promise<{
+  dirs: { path: string; size: number; fileCount: number }[];
+  files: IndexRecord[];
+}> {
+  if (!FS.existsSync(filePath)) return { dirs: [], files: [] };
+
+  // Normalize to a consistent separator + no trailing slash, then build
+  // the "under parentPath" prefix we'll scan for.
+  const parentNorm = normPath(parentPath).replace(/[\\/]+$/, "");
+  const prefix = parentNorm.endsWith(":") ? parentNorm + Path.sep : parentNorm + Path.sep;
+
+  const childDirTotals = new Map<string, { size: number; fileCount: number }>();
+  const topFiles: IndexRecord[] = [];
+  let smallestInTop = 0;
+
+  const gunzip = createGunzip();
+  const source = createReadStream(filePath);
+  source.pipe(gunzip);
+  const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+
+  for await (const line of rl) {
+    if (!line) continue;
+    let rec: IndexRecord;
+    try { rec = JSON.parse(line) as IndexRecord; } catch { continue; }
+    if (!rec || typeof rec.p !== "string") continue;
+    // Skip directory entries — they carry mtime only, no size, and we
+    // roll up dirs from their file descendants anyway.
+    if (rec.t === "d") continue;
+    if (typeof rec.s !== "number") continue;
+
+    const filePathNorm = normPath(rec.p);
+    if (!filePathNorm.startsWith(prefix)) continue;
+
+    const rest = filePathNorm.slice(prefix.length);
+    const firstSep = rest.search(/[\\/]/);
+    if (firstSep === -1) {
+      // Direct file in parentPath — capture in top-N.
+      if (topFiles.length < fileLimit) {
+        topFiles.push(rec);
+        if (topFiles.length === fileLimit) {
+          topFiles.sort((a, b) => a.s - b.s);
+          smallestInTop = topFiles[0].s;
+        }
+      } else if (rec.s > smallestInTop) {
+        topFiles[0] = rec;
+        topFiles.sort((a, b) => a.s - b.s);
+        smallestInTop = topFiles[0].s;
+      }
+    } else {
+      // Belongs to a child subfolder — roll up into that folder's totals.
+      const childName = rest.slice(0, firstSep);
+      const childPath = parentNorm + Path.sep + childName;
+      const existing = childDirTotals.get(childPath);
+      if (existing) {
+        existing.size += rec.s;
+        existing.fileCount += 1;
+      } else {
+        childDirTotals.set(childPath, { size: rec.s, fileCount: 1 });
+      }
+    }
+  }
+
+  const dirs = Array.from(childDirTotals.entries())
+    .map(([path, totals]) => ({ path, size: totals.size, fileCount: totals.fileCount }))
+    .sort((a, b) => b.size - a.size)
+    .slice(0, dirLimit);
+
+  return {
+    dirs,
+    files: topFiles.sort((a, b) => b.s - a.s),
+  };
+}
+
 /** Delete an index file if it exists (best effort). */
 export async function deleteIndex(id: string): Promise<void> {
   try {

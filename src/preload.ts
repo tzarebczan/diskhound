@@ -84,6 +84,8 @@ const api: DiskhoundNativeApi = {
     ipcRenderer.invoke("diskhound:compute-full-scan-diff", baselineId, currentId, limit),
   getTreemapFiles: (rootPath, limit) =>
     ipcRenderer.invoke("diskhound:get-treemap-files", rootPath, limit),
+  getFolderChildren: (rootPath, parentPath) =>
+    ipcRenderer.invoke("diskhound:get-folder-children", rootPath, parentPath),
 
   // Easy Move
   easyMove: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move", sourcePath, destinationDir),
@@ -97,6 +99,7 @@ const api: DiskhoundNativeApi = {
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke("diskhound:check-for-updates"),
   quitAndInstall: () => ipcRenderer.send("diskhound:quit-and-install"),
+  getUpdateState: () => ipcRenderer.invoke("diskhound:get-update-state"),
   onUpdateStatus: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, status: UpdateStatus) => listener(status);
     ipcRenderer.on("diskhound:update-status", wrapped);

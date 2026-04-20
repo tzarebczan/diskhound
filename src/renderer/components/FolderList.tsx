@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
-import type { DirectoryHotspot, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount } from "../lib/format";
 import { usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -10,14 +10,32 @@ interface Props {
   snapshot: ScanSnapshot;
 }
 
+/**
+ * A direct-child folder under the currently-browsed path, with an
+ * aggregate size + file count rolled up from the persisted index.
+ * Lighter than DirectoryHotspot because we don't need depth metadata
+ * at this level.
+ */
+interface FolderChild {
+  path: string;
+  size: number;
+  fileCount: number;
+}
+
+// Render caps — the persisted index can yield thousands of direct
+// children on a huge folder, and Preact keeled over at ~4 GB RAM in
+// the wild when rendering them all at once. We surface the top-N
+// and show a footer explaining how many were trimmed.
+const MAX_DIRS_RENDERED = 200;
+const MAX_FILES_RENDERED = 200;
+
 // ── Path helpers ────────────────────────────────────────────
 
 const SEP = /[\\/]/;
 
-/** Get display name for a path — "C:\" for roots, last segment otherwise */
+/** Get display name for a path — "C:\" for roots, last segment otherwise. */
 function displayName(fullPath: string, rootPath: string | null): string {
   if (fullPath === rootPath) {
-    // Show drive root nicely: "C:" or "C:\" → "C:\"
     if (/^[A-Za-z]:[\\/]?$/.test(fullPath)) {
       return fullPath.charAt(0) + ":\\";
     }
@@ -27,27 +45,20 @@ function displayName(fullPath: string, rootPath: string | null): string {
   return parts[parts.length - 1] || fullPath;
 }
 
-/** Get the parent path */
 function parentPath(p: string): string | null {
-  // Drive root — no parent
   if (/^[A-Za-z]:[\\/]?$/.test(p)) return null;
   if (p === "/") return null;
-
   const trimmed = p.replace(/[\\/]+$/, "");
   const lastSep = Math.max(trimmed.lastIndexOf("\\"), trimmed.lastIndexOf("/"));
   if (lastSep <= 0) return null;
-
   const parent = trimmed.slice(0, lastSep);
-  // If we'd end up at "C:", normalize to "C:\"
   if (/^[A-Za-z]:$/.test(parent)) return parent + "\\";
   return parent;
 }
 
-/** Build breadcrumb segments from root to current */
 function buildBreadcrumbs(currentPath: string, rootPath: string): { label: string; path: string }[] {
   const crumbs: { label: string; path: string }[] = [];
   let p: string | null = currentPath;
-
   while (p) {
     const label = p === rootPath
       ? ((/^[A-Za-z]:[\\/]?$/.test(p)) ? p.charAt(0) + ":\\" : p)
@@ -55,124 +66,98 @@ function buildBreadcrumbs(currentPath: string, rootPath: string): { label: strin
     crumbs.unshift({ label, path: p });
     if (p === rootPath) break;
     p = parentPath(p);
-    // Safety: don't go above root
     if (p && !currentPath.startsWith(p)) break;
   }
-
   return crumbs;
-}
-
-/** Find direct children of parentDir, enriching with any deeper tracked paths. */
-function getDirectChildren(
-  dirs: DirectoryHotspot[],
-  files: { path: string; parentPath: string; size: number }[],
-  parentDir: string,
-): DirectoryHotspot[] {
-  const normalizedPrefix = (parentDir.replace(/[\\/]+$/, "") + "\\").replace(/\//g, "\\");
-  const parentKey = parentDir.replace(/[\\/]+$/, "").replace(/\//g, "\\");
-
-  // Start with tracked directories that are direct children.
-  const known = new Map<string, DirectoryHotspot>();
-  for (const d of dirs) {
-    if (d.path === parentDir) continue;
-    const normalized = d.path.replace(/\//g, "\\");
-    if (!normalized.startsWith(normalizedPrefix)) continue;
-    const rest = normalized.slice(normalizedPrefix.length);
-    if (rest.includes("\\")) continue; // not a direct child
-    known.set(normalized, d);
-  }
-
-  // Infer additional direct-child directory paths from tracked file/dir paths
-  // that live deeper in the tree. This surfaces folders too small to make the
-  // top-N list but still have tracked descendants.
-  const addInferred = (fullPath: string) => {
-    const normalized = fullPath.replace(/\//g, "\\");
-    if (!normalized.startsWith(normalizedPrefix)) return;
-    const rest = normalized.slice(normalizedPrefix.length);
-    if (!rest) return;
-    const firstSep = rest.indexOf("\\");
-    const childName = firstSep >= 0 ? rest.slice(0, firstSep) : rest;
-    if (!childName) return;
-    const childPath = `${parentKey}\\${childName}`;
-    if (known.has(childPath)) return;
-    known.set(childPath, {
-      path: childPath,
-      size: 0,
-      fileCount: 0,
-      depth: 0,
-    });
-  };
-
-  for (const d of dirs) addInferred(d.path);
-  for (const f of files) addInferred(f.parentPath);
-
-  return Array.from(known.values());
 }
 
 // ── Component ───────────────────────────────────────────────
 
 export function FolderList({ snapshot }: Props) {
   const rootPath = snapshot.rootPath ?? "";
-  const dirs = snapshot.hottestDirectories;
-  const allFiles = snapshot.largestFiles;
-
   const [currentPath, setCurrentPath] = useState(rootPath);
-  const { busy, runAction, handleEasyMove } = usePathActions();
+  const [children, setChildren] = useState<FolderChild[]>([]);
+  const [looseFiles, setLooseFiles] = useState<ScanFileRecord[]>([]);
+  const [loading, setLoading] = useState(false);
   const [showOtherFiles, setShowOtherFiles] = useState(false);
+  const { busy, runAction, handleEasyMove } = usePathActions();
 
-  // Reset navigation when scan root changes
+  // Reset navigation when the scan root changes (drive switch etc).
   useEffect(() => {
-    if (rootPath) { setCurrentPath(rootPath); setShowOtherFiles(false); }
+    if (rootPath) {
+      setCurrentPath(rootPath);
+      setShowOtherFiles(false);
+    }
   }, [rootPath]);
 
-  // Collapse "other" when navigating
   useEffect(() => {
     setShowOtherFiles(false);
   }, [currentPath]);
 
-  // Find current directory's record
-  const currentDir = useMemo(
-    () => dirs.find((d) => d.path === currentPath),
-    [dirs, currentPath],
-  );
+  // Fetch real children (size + count) from the persisted index every
+  // time the user navigates. The IPC streams the gzipped NDJSON once
+  // per call and rolls up — typically 1–3s on a drive-scale index,
+  // but for most drill-ins it's a couple hundred KB and returns
+  // instantly. We debounce by the currentPath dependency alone; the
+  // IPC is idempotent so a stale request landing after a newer one
+  // just gets ignored via the `cancelled` flag.
+  useEffect(() => {
+    if (!rootPath || !currentPath) {
+      setChildren([]);
+      setLooseFiles([]);
+      return;
+    }
+    let cancelled = false;
+    setLoading(true);
+    void nativeApi.getFolderChildren(rootPath, currentPath).then((res) => {
+      if (cancelled) return;
+      setChildren(res?.dirs ?? []);
+      setLooseFiles(res?.files ?? []);
+      setLoading(false);
+    }).catch(() => {
+      if (cancelled) return;
+      setChildren([]);
+      setLooseFiles([]);
+      setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [rootPath, currentPath]);
 
-  // Direct children sorted by size
-  const children = useMemo(
-    () => getDirectChildren(dirs, allFiles, currentPath).sort((a, b) => b.size - a.size),
-    [dirs, allFiles, currentPath],
-  );
-
-  // Calculate "other" — space not accounted for by listed children
+  // Child sizes are authoritative — no more inferring-with-0B or reading
+  // from the snapshot's bounded top-N. Total of this folder = sum of
+  // direct-child subtrees + loose-file totals (a very close approximation
+  // of the folder's recursive size; off only by any loose files that
+  // were outside the streaming top-N cap).
   const childrenTotal = useMemo(
     () => children.reduce((sum, c) => sum + c.size, 0),
     [children],
   );
-  const parentSize = currentDir?.size ?? 0;
-  const otherSize = Math.max(0, parentSize - childrenTotal);
+  const looseTotal = useMemo(
+    () => looseFiles.reduce((sum, f) => sum + f.size, 0),
+    [looseFiles],
+  );
+  const folderTotal = childrenTotal + looseTotal;
 
-  // Files inside the current directory tree (from the global top-files sample).
-  // This is a subset — only the largest files tracked by the scanner appear here.
-  const looseFiles = useMemo(() => {
-    const normalizedCurrent = currentPath.replace(/[\\/]+$/, "").replace(/\//g, "\\");
-    const childPaths = new Set(children.map((c) => c.path.replace(/\//g, "\\")));
-    return allFiles.filter((f) => {
-      const normalizedParent = f.parentPath.replace(/[\\/]+$/, "").replace(/\//g, "\\");
-      // Direct files in this directory
-      if (normalizedParent === normalizedCurrent) return true;
-      // Files deeper, but NOT inside a tracked child directory
-      if (!normalizedParent.startsWith(normalizedCurrent + "\\")) return false;
-      // Check if this file belongs to an already-listed child dir
-      for (const cp of childPaths) {
-        if (normalizedParent === cp || normalizedParent.startsWith(cp + "\\")) return false;
-      }
-      return true;
-    }).sort((a, b) => b.size - a.size);
-  }, [allFiles, currentPath, children]);
+  // Cap dirs rendered so we never ship thousands of rows into Preact.
+  // Files are already returned top-N from the IPC.
+  const dirsTruncated = children.length > MAX_DIRS_RENDERED;
+  const dirsToRender = useMemo(
+    () => dirsTruncated ? children.slice(0, MAX_DIRS_RENDERED) : children,
+    [children, dirsTruncated],
+  );
 
-  // Check if a directory has children (for drill-in affordance)
+  const filesTruncated = looseFiles.length > MAX_FILES_RENDERED;
+  const filesToRender = useMemo(
+    () => filesTruncated ? looseFiles.slice(0, MAX_FILES_RENDERED) : looseFiles,
+    [looseFiles, filesTruncated],
+  );
+
+  // Whether a directory is drillable — cheap heuristic: if we've seen any
+  // child at all it's worth the click. The real test happens after the
+  // next IPC call populates `children` with that folder's own kids.
   const hasChildren = useCallback(
-    (dirPath: string) => dirs.some((d) => d.path !== dirPath && d.path.startsWith(dirPath.replace(/[\\/]+$/, "") + "\\")),
-    [dirs],
+    (_dirPath: string) => true,
+    [],
   );
 
   const breadcrumbs = useMemo(
@@ -184,6 +169,14 @@ export function FolderList({ snapshot }: Props) {
     return (
       <div className="folder-explorer">
         <div className="empty-view"><span>Run a scan to explore folders</span></div>
+      </div>
+    );
+  }
+
+  if (snapshot.status === "running") {
+    return (
+      <div className="folder-explorer">
+        <div className="empty-view"><span>Scan in progress — folders available once it completes</span></div>
       </div>
     );
   }
@@ -220,11 +213,11 @@ export function FolderList({ snapshot }: Props) {
           ))}
         </div>
         <div className="folder-breadcrumb-spacer" />
-        {currentDir && (
+        {folderTotal > 0 && (
           <div className="folder-breadcrumb-size">
-            <span className="folder-breadcrumb-total">{formatBytes(parentSize)}</span>
+            <span className="folder-breadcrumb-total">{formatBytes(folderTotal)}</span>
             <span className="folder-breadcrumb-count">
-              {formatCount(currentDir.fileCount)} files
+              {formatCount(children.length + looseFiles.length)} items
             </span>
           </div>
         )}
@@ -241,17 +234,21 @@ export function FolderList({ snapshot }: Props) {
 
       {/* ── Directory list ── */}
       <div className="folder-list-scroll">
-        {children.length === 0 && otherSize === 0 ? (
+        {loading && children.length === 0 && looseFiles.length === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
-            <span>No subdirectories tracked at this level</span>
+            <span>Loading folder contents…</span>
+          </div>
+        ) : children.length === 0 && looseFiles.length === 0 ? (
+          <div className="empty-view" style={{ paddingTop: 48 }}>
+            <span>This folder appears empty in the scan index</span>
           </div>
         ) : (
           <>
-            {children.map((child) => (
+            {dirsToRender.map((child) => (
               <FolderRow
                 key={child.path}
                 dir={child}
-                parentSize={parentSize}
+                parentSize={folderTotal}
                 rootPath={rootPath}
                 canDrillIn={hasChildren(child.path)}
                 isBusy={busy.has(child.path)}
@@ -261,7 +258,12 @@ export function FolderList({ snapshot }: Props) {
                 onEasyMove={() => void handleEasyMove(child.path)}
               />
             ))}
-            {(otherSize > 0 || looseFiles.length > 0) && (
+            {dirsTruncated && (
+              <div className="folder-row folder-row-note">
+                +{formatCount(children.length - MAX_DIRS_RENDERED)} more folders (showing top {MAX_DIRS_RENDERED} by size)
+              </div>
+            )}
+            {looseFiles.length > 0 && (
               <>
                 <div
                   className="folder-row folder-row-other folder-row-clickable"
@@ -281,26 +283,24 @@ export function FolderList({ snapshot }: Props) {
                   </div>
                   <div className="folder-row-info">
                     <div className="folder-row-name folder-row-name-other">
-                      {looseFiles.length > 0
-                        ? `${formatCount(looseFiles.length)} largest files here (not in subfolders above)`
-                        : "Other files & untracked subfolders"}
+                      {formatCount(looseFiles.length)} file{looseFiles.length === 1 ? "" : "s"} in this folder
                     </div>
                   </div>
                   <div className="folder-row-bar-col">
                     <div className="folder-row-bar">
                       <div
                         className="folder-row-bar-fill other"
-                        style={{ width: `${parentSize > 0 ? (otherSize / parentSize) * 100 : 0}%` }}
+                        style={{ width: `${folderTotal > 0 ? (looseTotal / folderTotal) * 100 : 0}%` }}
                       />
                     </div>
                   </div>
-                  <div className="folder-row-size folder-row-size-other">{formatBytes(otherSize)}</div>
+                  <div className="folder-row-size folder-row-size-other">{formatBytes(looseTotal)}</div>
                   <div className="folder-row-meta-col" />
                   <div className="folder-row-actions-col" />
                 </div>
-                {showOtherFiles && looseFiles.length > 0 && (
+                {showOtherFiles && (
                   <div className="folder-loose-files">
-                    {looseFiles.map((f) => (
+                    {filesToRender.map((f) => (
                       <LooseFileRow
                         key={f.path}
                         file={f}
@@ -310,6 +310,11 @@ export function FolderList({ snapshot }: Props) {
                         onEasyMove={() => void handleEasyMove(f.path)}
                       />
                     ))}
+                    {filesTruncated && (
+                      <div className="folder-row folder-row-note">
+                        +{formatCount(looseFiles.length - MAX_FILES_RENDERED)} more files (showing top {MAX_FILES_RENDERED} by size)
+                      </div>
+                    )}
                   </div>
                 )}
               </>
@@ -324,7 +329,7 @@ export function FolderList({ snapshot }: Props) {
 // ── Row component ───────────────────────────────────────────
 
 function FolderRow(props: {
-  dir: DirectoryHotspot;
+  dir: FolderChild;
   parentSize: number;
   rootPath: string;
   canDrillIn: boolean;

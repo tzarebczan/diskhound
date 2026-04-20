@@ -60,7 +60,22 @@ function getInitialShowFolders(): boolean {
 const DENSE_TREEMAP_LIMIT = 10_000;
 
 export function Overview({ snapshot, onFilterExtension }: Props) {
-  const { bytesSeen, filesVisited, directoriesVisited, skippedEntries, elapsedMs } = snapshot;
+  const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
+  // Live-ticking elapsed: during a running scan the snapshot only updates
+  // ~5x/second via progress messages, so the "elapsed" metric would
+  // freeze between ticks — users reported seeing "0.0s" stuck on screen.
+  // Recompute from startedAt locally on a 250ms interval so the counter
+  // feels alive even when the scanner is mid-enumerate and hasn't
+  // emitted a progress message yet.
+  const [liveNow, setLiveNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (snapshot.status !== "running" || snapshot.startedAt === null) return;
+    const id = window.setInterval(() => setLiveNow(Date.now()), 250);
+    return () => window.clearInterval(id);
+  }, [snapshot.status, snapshot.startedAt]);
+  const displayElapsedMs = snapshot.status === "running" && snapshot.startedAt !== null
+    ? liveNow - snapshot.startedAt
+    : snapshot.elapsedMs;
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
   const [treemapLayout, setTreemapLayout] = useState<TreemapLayout>(getInitialTreemapLayout);
   const [extSidebarCollapsed, setExtSidebarCollapsed] = useState<boolean>(getInitialExtSidebarCollapsed);
@@ -138,7 +153,7 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
         <Metric value={formatCount(filesVisited)} label="files" />
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
-        <Metric value={formatElapsed(elapsedMs)} label="elapsed" />
+        <Metric value={formatElapsed(displayElapsedMs)} label="elapsed" />
       </div>
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
@@ -277,10 +292,14 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
                     </svg>
                   </div>
                   <div style={{ fontSize: 13, color: "var(--text)" }}>
-                    Scanning {snapshot.rootPath}…
+                    {snapshot.filesVisited > 0
+                      ? `Scanning ${snapshot.rootPath}…`
+                      : `Indexing ${snapshot.rootPath}…`}
                   </div>
                   <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                    {formatCount(snapshot.filesVisited)} files · {formatBytes(snapshot.bytesSeen)} so far
+                    {snapshot.filesVisited > 0
+                      ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
+                      : `Enumerating the root directory — largest files appear as soon as the first few are seen (${formatElapsed(displayElapsedMs)} elapsed)`}
                   </div>
                 </div>
               ) : snapshot.status === "idle" && snapshot.rootPath && treemapFiles.length === 0 ? (
