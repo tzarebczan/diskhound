@@ -264,12 +264,44 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
             )}
 
             <div className="treemap-stage">
-              <Treemap
-                files={treemapFiles}
-                areaMode={treemapAreaMode}
-                layout={treemapLayout}
-                showFolderOutlines={showFolders}
-              />
+              {/* A running scan on this root but no data yet → show scanning
+               * state, not the generic "Run a scan" empty state. This is
+               * the fix for the "came back to window and treemap says run
+               * a scan even though it's scanning" bug. */}
+              {snapshot.status === "running" && treemapFiles.length === 0 ? (
+                <div className="treemap-empty">
+                  <div className="treemap-empty-icon">
+                    <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.7">
+                      <circle cx="12" cy="12" r="9" strokeDasharray="6 4" />
+                      <path d="M12 2L12 6M12 18L12 22M2 12L6 12M18 12L22 12" />
+                    </svg>
+                  </div>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>
+                    Scanning {snapshot.rootPath}…
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    {formatCount(snapshot.filesVisited)} files · {formatBytes(snapshot.bytesSeen)} so far
+                  </div>
+                </div>
+              ) : snapshot.status === "idle" && snapshot.rootPath && treemapFiles.length === 0 ? (
+                // Valid root selected but never scanned — offer a clear CTA.
+                <div className="treemap-empty">
+                  <div className="treemap-empty-icon">&#x25A6;</div>
+                  <div style={{ fontSize: 13, color: "var(--text)" }}>
+                    No scan data for {snapshot.rootPath}
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    Hit "Rescan" in the header to run a scan on this drive.
+                  </div>
+                </div>
+              ) : (
+                <Treemap
+                  files={treemapFiles}
+                  areaMode={treemapAreaMode}
+                  layout={treemapLayout}
+                  showFolderOutlines={showFolders}
+                />
+              )}
             </div>
           </div>
         </div>

@@ -22,7 +22,8 @@ const api: DiskhoundNativeApi = {
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
   getCurrentSnapshot: () => ipcRenderer.invoke("diskhound:get-current-snapshot"),
   startScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-scan", rootPath, options),
-  cancelScan: () => ipcRenderer.invoke("diskhound:cancel-scan"),
+  cancelScan: (rootPath) => ipcRenderer.invoke("diskhound:cancel-scan", rootPath),
+  getActiveScanRoots: () => ipcRenderer.invoke("diskhound:get-active-scan-roots"),
   runScheduledScanNow: () => ipcRenderer.invoke("diskhound:run-scheduled-scan-now"),
   getFileIcon: (path, size) => ipcRenderer.invoke("diskhound:get-file-icon", path, size),
 
@@ -74,6 +75,7 @@ const api: DiskhoundNativeApi = {
 
   // Scan History & Diff
   getScanHistory: (rootPath) => ipcRenderer.invoke("diskhound:get-scan-history", rootPath),
+  getLatestSnapshotForRoot: (rootPath) => ipcRenderer.invoke("diskhound:get-latest-snapshot-for-root", rootPath),
   computeScanDiff: (baselineId, currentId) =>
     ipcRenderer.invoke("diskhound:compute-scan-diff", baselineId, currentId),
   getLatestDiff: (rootPath) => ipcRenderer.invoke("diskhound:get-latest-diff", rootPath),

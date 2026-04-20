@@ -45,7 +45,15 @@ export async function sampleSystemMemory(): Promise<SystemMemorySnapshot> {
   }
 
   // Derive cpuPercent from cumulative CPU time delta vs wall-clock delta.
-  // First sample has no baseline, so cpuPercent is null for all procs.
+  // First sample has no baseline, so both cpu fields stay null.
+  //
+  // We emit TWO flavors:
+  //   cpuPercent         — system-wide (divided by core count, 0–100).
+  //                        Matches Task Manager / Activity Monitor so
+  //                        numbers line up with what users already know.
+  //   cpuPercentPerCore  — per-core (can exceed 100% on multi-threaded
+  //                        workloads). For power users who want absolute
+  //                        single-core load instead of relative share.
   const nowMs = Date.now();
   if (lastCpuSample && processes.length > 0) {
     const wallDeltaMs = Math.max(1, nowMs - lastCpuSample.sampledAt);
@@ -55,10 +63,10 @@ export async function sampleSystemMemory(): Promise<SystemMemorySnapshot> {
       const prev = lastCpuSample.cpuTimeByPid.get(p.pid);
       if (prev === undefined) continue;
       const cpuDeltaMs = Math.max(0, p.cpuTimeMs - prev);
-      // CPU% normalized to a single core. 200% means 2 full cores used.
-      const pct = (cpuDeltaMs / wallDeltaMs) * 100;
-      // Cap at a sensible max (cores * 100) — noisy delta can briefly overshoot
-      p.cpuPercent = Math.min(cores * 100, Math.max(0, pct));
+      const perCorePct = (cpuDeltaMs / wallDeltaMs) * 100;
+      const perCoreClamped = Math.min(cores * 100, Math.max(0, perCorePct));
+      p.cpuPercentPerCore = perCoreClamped;
+      p.cpuPercent = Math.min(100, perCoreClamped / cores);
     }
   }
 
@@ -175,6 +183,7 @@ async function sampleViaPowerShell(): Promise<ProcessInfo[]> {
       name,
       memoryBytes,
       cpuPercent: null, // derived in sampleSystemMemory() using delta
+      cpuPercentPerCore: null,
       // Get-Process without -IncludeUserName doesn't give owner info, but
       // only processes we can enumerate (i.e. most user-accessible ones)
       // appear — default to true and let taskkill surface access-denied
@@ -235,6 +244,7 @@ async function runTasklist(verbose: boolean): Promise<ProcessInfo[]> {
       name,
       memoryBytes: memKb * 1024,
       cpuPercent: null, // tasklist doesn't give instantaneous CPU %
+      cpuPercentPerCore: null,
       userOwned: verbose ? !/\b(SYSTEM|LOCAL SERVICE|NETWORK SERVICE)\b/i.test(userName) : true,
     });
   }
@@ -298,11 +308,18 @@ async function sampleProcessesUnix(): Promise<ProcessInfo[]> {
 
     if (!Number.isFinite(pid) || pid <= 0 || !name) continue;
 
+    // On Unix `ps` already reports %CPU as system-wide percent (matches
+    // Activity Monitor). Multiply by cpuCount to derive per-core for
+    // parity with the Windows Get-Process path.
+    const cores = Math.max(1, OS.cpus().length);
+    const sysPct = Number.isFinite(cpu) ? cpu : null;
+    const perCore = sysPct !== null ? Math.min(cores * 100, sysPct * cores) : null;
     processes.push({
       pid,
       name,
       memoryBytes: rssKb * 1024,
-      cpuPercent: Number.isFinite(cpu) ? cpu : null,
+      cpuPercent: sysPct,
+      cpuPercentPerCore: perCore,
       userOwned: true,
     });
   }

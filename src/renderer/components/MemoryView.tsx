@@ -14,12 +14,19 @@ import { toast } from "./Toasts";
 type SortField = "memory" | "cpu" | "name" | "pid";
 type SortDir = "asc" | "desc";
 type ViewMode = "list" | "treemap" | "heatmap";
+export type CpuScale = "system" | "per-core";
 
 const DEFAULT_REFRESH_MS = 5_000;
 const MIN_REFRESH_MS = 2_000;
 const MAX_REFRESH_MS = 30_000;
 const VIEW_MODE_KEY = "diskhound:memory-view-mode";
 const REFRESH_MS_KEY = "diskhound:memory-refresh-ms";
+const CPU_SCALE_KEY = "diskhound:cpu-scale";
+
+function getInitialCpuScale(): CpuScale {
+  if (typeof window === "undefined") return "system";
+  return window.localStorage.getItem(CPU_SCALE_KEY) === "per-core" ? "per-core" : "system";
+}
 
 function getInitialViewMode(): ViewMode {
   if (typeof window === "undefined") return "list";
@@ -47,6 +54,7 @@ export function MemoryView() {
   const [paused, setPaused] = useState(false);
   const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode);
   const [refreshMs, setRefreshMs] = useState<number>(getInitialRefreshMs);
+  const [cpuScale, setCpuScale] = useState<CpuScale>(getInitialCpuScale);
   const [lastSampleMs, setLastSampleMs] = useState<number | null>(null);
   const timerRef = useRef<number | null>(null);
 
@@ -90,6 +98,25 @@ export function MemoryView() {
   useEffect(() => {
     try { window.localStorage.setItem(REFRESH_MS_KEY, String(refreshMs)); } catch { /* ignore */ }
   }, [refreshMs]);
+  useEffect(() => {
+    try { window.localStorage.setItem(CPU_SCALE_KEY, cpuScale); } catch { /* ignore */ }
+  }, [cpuScale]);
+
+  // Project the chosen CPU scale onto every process's cpuPercent so
+  // downstream consumers (list, treemap, heatmap, detail popover) don't
+  // each need a scale-aware code path. The raw per-core value stays
+  // available via cpuPercentPerCore for anyone who needs it.
+  const scaledSnapshot = useMemo<SystemMemorySnapshot | null>(() => {
+    if (!snapshot) return null;
+    if (cpuScale === "system") return snapshot;
+    return {
+      ...snapshot,
+      processes: snapshot.processes.map((p) => ({
+        ...p,
+        cpuPercent: p.cpuPercentPerCore,
+      })),
+    };
+  }, [snapshot, cpuScale]);
 
   // One-time: pull the cached snapshot (instant paint) then kick off a
   // fresh sample in the background. Subsequent remounts of the tab will
@@ -157,13 +184,13 @@ export function MemoryView() {
   };
 
   const visibleProcesses = useMemo(() => {
-    if (!snapshot) return [];
+    if (!scaledSnapshot) return [];
     const q = filter.trim().toLowerCase();
     let list = q
-      ? snapshot.processes.filter((p) =>
+      ? scaledSnapshot.processes.filter((p) =>
           p.name.toLowerCase().includes(q) || String(p.pid).includes(q),
         )
-      : snapshot.processes;
+      : scaledSnapshot.processes;
 
     const m = sortDir === "asc" ? 1 : -1;
     list = [...list].sort((a, b) => {
@@ -176,7 +203,7 @@ export function MemoryView() {
     });
 
     return list;
-  }, [snapshot, filter, sortField, sortDir]);
+  }, [scaledSnapshot, filter, sortField, sortDir]);
 
   const kill = async (proc: ProcessInfo, hard: boolean) => {
     const label = hard ? "Force kill" : "End";
@@ -303,6 +330,29 @@ export function MemoryView() {
           placeholder="Filter by name or PID..."
         />
         <div className="memory-toolbar-spacer" />
+        {/* CPU scale toggle — shown everywhere so List/Treemap/Heatmap all
+         * stay in sync. "System" matches Task Manager (divide by core
+         * count); "Per-core" is the raw metric where 100% = one core pinned. */}
+        <div className="memory-cpu-scale-switch" role="tablist" aria-label="CPU scale">
+          <button
+            type="button"
+            className={`memory-cpu-scale-btn ${cpuScale === "system" ? "active" : ""}`}
+            aria-pressed={cpuScale === "system"}
+            title="System-wide % (0-100, matches Task Manager)"
+            onClick={() => setCpuScale("system")}
+          >
+            System
+          </button>
+          <button
+            type="button"
+            className={`memory-cpu-scale-btn ${cpuScale === "per-core" ? "active" : ""}`}
+            aria-pressed={cpuScale === "per-core"}
+            title="Per-core % (100% = one full core pinned; can exceed 100% on multi-threaded workloads)"
+            onClick={() => setCpuScale("per-core")}
+          >
+            Per-core
+          </button>
+        </div>
         {loadingPhase === "refreshing" && (
           <span className="memory-refresh-indicator" title="Refreshing…">
             <span className="memory-refresh-dot" />
@@ -347,6 +397,8 @@ export function MemoryView() {
           history={historyRef.current}
           sampleCount={samplesCollected}
           filter={filter}
+          cpuScale={cpuScale}
+          cpuCount={snapshot.cpuCount}
           onKill={kill}
           onOpenContextMenu={openViewContextMenu}
         />

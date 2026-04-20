@@ -379,8 +379,19 @@ export interface ProcessInfo {
   name: string;
   /** Resident set size in bytes (real RAM used) */
   memoryBytes: number;
-  /** CPU percent when available — computed from delta between samples. */
+  /**
+   * CPU percent when available — SYSTEM-WIDE, 0–100 across all cores.
+   * Matches what Task Manager / Activity Monitor show. Computed as
+   * (cpu-time-delta / wall-clock-delta) / cpuCount * 100.
+   */
   cpuPercent: number | null;
+  /**
+   * CPU percent as a fraction of a single core. 200% means the process
+   * used 2 full cores' worth of compute between samples. Can exceed 100%
+   * on multi-threaded workloads. Preferred by some power users who want
+   * to see absolute per-core load rather than relative system share.
+   */
+  cpuPercentPerCore: number | null;
   /** True when the user owns the process. On Windows we can't always tell cheaply — may be true for all. */
   userOwned: boolean;
   /** Full command line or executable path, when we can get it. */
@@ -487,7 +498,12 @@ export interface DiskhoundNativeApi {
   pickRootPath: () => Promise<string | null>;
   getCurrentSnapshot: () => Promise<ScanSnapshot>;
   startScan: (rootPath: string, options: ScanOptions) => Promise<ScanSnapshot>;
-  cancelScan: () => Promise<ScanSnapshot>;
+  /** Cancel a specific root's active scan, or (omit rootPath) cancel all. */
+  cancelScan: (rootPath?: string) => Promise<ScanSnapshot | null>;
+  /** Returns the rootPaths of scans currently running. Used by the UI to
+   *  show per-drive progress indicators and skip re-triggering in-flight
+   *  scans. */
+  getActiveScanRoots: () => Promise<string[]>;
   runScheduledScanNow: () => Promise<PathActionResult>;
   /** Returns a data-URL PNG of the OS-provided file icon, or null if unavailable. */
   getFileIcon: (path: string, size?: "small" | "normal" | "large") => Promise<string | null>;
@@ -539,6 +555,10 @@ export interface DiskhoundNativeApi {
 
   // Scan History & Diff
   getScanHistory: (rootPath: string) => Promise<ScanHistoryEntry[]>;
+  /** Load the most recent saved snapshot for a root — used to restore
+   *  per-drive views when the user switches drives without triggering
+   *  a fresh scan. Returns null if the root has no saved history. */
+  getLatestSnapshotForRoot: (rootPath: string) => Promise<ScanSnapshot | null>;
   computeScanDiff: (baselineId: string, currentId: string) => Promise<ScanDiffResult | null>;
   getLatestDiff: (rootPath: string) => Promise<ScanDiffResult | null>;
   /** Compute the full per-file diff from the persisted index files (not top-N). */

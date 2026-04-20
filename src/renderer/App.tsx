@@ -70,9 +70,42 @@ function cycleThemePreference(theme: GeneralSettings["theme"]): GeneralSettings[
   }
 }
 
+/**
+ * Normalize a root path for use as a snapshotsByRoot key. Case-insensitive
+ * on Windows (where C:\ and c:\ are the same drive) and trims trailing
+ * separators so "C:\\" and "C:\\Users\\..." collide correctly.
+ */
+function rootKey(rootPath: string | null | undefined): string {
+  if (!rootPath) return "";
+  return rootPath.replace(/[\\/]+$/, "").toLowerCase();
+}
+
 export function App() {
-  const [snapshot, setSnapshot] = useState<ScanSnapshot>(createIdleScanSnapshot());
-  const [rootPath, setRootPath] = useState("");
+  // Per-root snapshot store — allows concurrent scans on different drives
+  // and lets users switch drive views without losing each drive's state.
+  // Each entry is the latest known snapshot for that root (from fresh
+  // IPC broadcasts or from scan history).
+  const [snapshotsByRoot, setSnapshotsByRoot] = useState<Map<string, ScanSnapshot>>(
+    () => new Map(),
+  );
+  const [currentRoot, setCurrentRoot] = useState<string>("");
+  /** Roots with an in-flight scan on the main process (normalized keys). */
+  const [activeScanKeys, setActiveScanKeys] = useState<Set<string>>(() => new Set());
+
+  // Derived snapshot for the currently-viewed root. Defaults to an idle
+  // snapshot that carries the current root so downstream views show the
+  // right "Run a scan on C:\" empty state instead of just "no scan yet".
+  const snapshot: ScanSnapshot = useMemo(() => {
+    const existing = snapshotsByRoot.get(rootKey(currentRoot));
+    if (existing) return existing;
+    const idle = createIdleScanSnapshot();
+    return currentRoot ? { ...idle, rootPath: currentRoot } : idle;
+  }, [snapshotsByRoot, currentRoot]);
+
+  // Setter used by the rest of the app — mirrors the old "rootPath" getter.
+  const rootPath = currentRoot;
+  const setRootPath = (path: string) => setCurrentRoot(path);
+
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
   const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
@@ -157,13 +190,55 @@ export function App() {
       }
     });
     void nativeApi.getDiskSpace().then((d) => { if (d) setDrives(d); });
+    // Seed the active-scan set so the UI's drive-pill progress
+    // indicators reflect scans that were already running when the
+    // renderer mounted (typical after a reload during a scheduled scan).
+    void nativeApi.getActiveScanRoots().then((roots) => {
+      if (!roots) return;
+      setActiveScanKeys(new Set(roots.map(rootKey)));
+    });
+
+    // Track a deduped set of "scan completion" toasts — the user was
+    // seeing duplicates because the IPC listener fires once per done
+    // snapshot AND we have multiple consumers that each reacted. With
+    // per-root state, we only toast the first "done" we see for a
+    // given (root, finishedAt) pair.
+    const toastedCompletions = new Set<string>();
 
     const unsub = nativeApi.onScanSnapshot((s) => {
-      syncSnapshot(s);
+      // Route the snapshot to its root in the map — DON'T steal the
+      // user's currently-viewed root. If they're scanning C: and looking
+      // at D:'s history, C:'s progress still streams in behind the
+      // scenes without hijacking the view. Explicit doScan() and drive
+      // clicks are the only things that change currentRoot.
+      storeSnapshot(s);
+
+      if (!s.rootPath) return;
+      const key = rootKey(s.rootPath);
+
       if (s.status === "running") {
+        setActiveScanKeys((prev) => new Set(prev).add(key));
         setShowPicker(false);
       }
+
+      if (s.status === "done" || s.status === "cancelled" || s.status === "error") {
+        setActiveScanKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(key);
+          return next;
+        });
+      }
+
       if (s.status === "done") {
+        const dedupeKey = `${key}:${s.finishedAt ?? 0}`;
+        if (toastedCompletions.has(dedupeKey)) return;
+        toastedCompletions.add(dedupeKey);
+        // Cap memory — toast-dedupe set only cares about recent scans.
+        if (toastedCompletions.size > 20) {
+          const first = toastedCompletions.values().next().value;
+          if (first) toastedCompletions.delete(first);
+        }
+
         // Refresh drives after scan
         void nativeApi.getDiskSpace().then((d) => { if (d) setDrives(d); });
         // Check for a diff against the previous scan
@@ -233,11 +308,33 @@ export function App() {
     }
   }, [isSearchableView, searchOpen]);
 
-  const syncSnapshot = useCallback((s: ScanSnapshot) => {
-    setSnapshot(s);
-    if (s.rootPath) setRootPath(s.rootPath);
+  /**
+   * Store a snapshot under its rootPath. Never changes which root the UI
+   * is currently viewing — that's up to the caller (drive-chip click,
+   * explicit scan, etc.). This routes incoming IPC broadcasts and
+   * history-restored snapshots both, so the UI stays consistent whether
+   * the update came from a live scan or a background load.
+   */
+  const storeSnapshot = useCallback((s: ScanSnapshot) => {
+    if (!s.rootPath) return;
+    const key = rootKey(s.rootPath);
+    setSnapshotsByRoot((prev) => {
+      const next = new Map(prev);
+      next.set(key, s);
+      return next;
+    });
     setScanOptions(s.scanOptions);
   }, []);
+
+  /**
+   * Set both the stored snapshot AND the currently-viewed root. Used
+   * whenever we want to navigate the UI to a specific scan state (e.g.
+   * after the user explicitly clicks "Rescan" or starts a new scan).
+   */
+  const syncSnapshot = useCallback((s: ScanSnapshot) => {
+    storeSnapshot(s);
+    if (s.rootPath) setCurrentRoot(s.rootPath);
+  }, [storeSnapshot]);
 
   const pickAndScan = async () => {
     const picked = await nativeApi.pickRootPath();
@@ -256,19 +353,38 @@ export function App() {
     syncSnapshot(s);
   };
 
-  const handleScanDrive = (drivePath: string) => {
-    // Normalize drive path: "C:" → "C:\" so Path.resolve doesn't use CWD
+  /**
+   * Drive-pill click. Switches the viewed root without triggering a
+   * scan — the user sees whatever's known about that drive (fresh
+   * snapshot if one exists in memory, otherwise the most recent saved
+   * snapshot from history). An empty state with a CTA is shown if
+   * nothing's been scanned yet. Users explicitly kick off a scan via
+   * "Rescan" or "New Scan".
+   *
+   * Rationale: the old behavior silently restarted a scan on every
+   * drive click, which wiped running state and triggered duplicate
+   * scan-complete toasts when users switched around.
+   */
+  const handleScanDrive = async (drivePath: string) => {
+    // Normalize "C:" → "C:\\" so Path.resolve doesn't use CWD
     const normalized = /^[A-Za-z]:$/.test(drivePath) ? drivePath + "\\" : drivePath;
+    setCurrentRoot(normalized);
+    setShowPicker(false);
 
-    // If we already have a completed scan for this path, just switch to it
-    if (snapshot.status === "done" && snapshot.rootPath === normalized) {
-      setRootPath(normalized);
-      setShowPicker(false);
-      return;
+    const key = rootKey(normalized);
+    // If we already have a snapshot for this root in memory, we're done —
+    // the derived `snapshot` will pick it up from snapshotsByRoot.
+    if (snapshotsByRoot.has(key)) return;
+
+    // Otherwise, try to restore the latest saved snapshot from history.
+    const latest = await nativeApi.getLatestSnapshotForRoot(normalized);
+    if (latest) {
+      storeSnapshot(latest);
     }
-
-    setRootPath(normalized);
-    void doScan(normalized);
+    // If neither fresh nor historical data exists, the derived snapshot
+    // is the idle-with-rootPath stub set up in the snapshot useMemo,
+    // which gives downstream views a proper empty state targeting this
+    // drive rather than the old generic "no scan yet" UI.
   };
 
   const handleScanFolder = (folderPath: string) => {
@@ -279,8 +395,10 @@ export function App() {
   const openPicker = () => setShowPicker(true);
 
   const cancelScan = async () => {
-    const s = await nativeApi.cancelScan();
-    syncSnapshot(s);
+    // Cancel the scan for the currently-viewed root. Other drives'
+    // scans keep running — that's what the per-root refactor unlocks.
+    const s = await nativeApi.cancelScan(currentRoot || undefined);
+    if (s) storeSnapshot(s);
     toast("info", "Scan stopped", "Current results are still usable.");
   };
 
@@ -357,16 +475,28 @@ export function App() {
               onKeyDown={(e) => { if (e.key === "Enter") void doScan(); }}
             />
             {snapshot.status === "running" ? (
-              <button className="scan-btn scan-btn-stop" onClick={() => void cancelScan()}>
+              <button
+                className="scan-btn scan-btn-stop"
+                onClick={() => void cancelScan()}
+                title={`Stop the scan on ${rootPath || "this root"} (other drives keep running)`}
+              >
                 Stop
               </button>
             ) : (
               <>
-                <button className="scan-btn scan-btn-primary" onClick={openPicker}>
+                <button
+                  className="scan-btn scan-btn-primary"
+                  onClick={openPicker}
+                  title="Pick a new drive or folder to scan"
+                >
                   New Scan
                 </button>
                 {rootPath && (
-                  <button className="scan-btn" onClick={() => void doScan()}>
+                  <button
+                    className="scan-btn"
+                    onClick={() => void doScan()}
+                    title={`Rescan ${rootPath}`}
+                  >
                     Rescan
                   </button>
                 )}
@@ -375,14 +505,24 @@ export function App() {
           </div>
 
           <div className="drive-pills">
-            {drives.map((d) => (
-              <DrivePill
-                key={d.drive}
-                drive={d}
-                active={rootPath.toLowerCase().startsWith(d.drive.toLowerCase())}
-                onScan={() => handleScanDrive(d.drive)}
-              />
-            ))}
+            {drives.map((d) => {
+              // A drive is "scanning" if ANY active-scan root starts with
+              // its letter — catches both `C:\` root scans and scans of
+              // sub-paths like `C:\Users\foo`.
+              const driveLetterPrefix = d.drive.toLowerCase().replace(/:?\\?$/, "");
+              const isScanning = Array.from(activeScanKeys).some((key) =>
+                key.startsWith(driveLetterPrefix),
+              );
+              return (
+                <DrivePill
+                  key={d.drive}
+                  drive={d}
+                  active={rootPath.toLowerCase().startsWith(d.drive.toLowerCase())}
+                  scanning={isScanning}
+                  onScan={() => void handleScanDrive(d.drive)}
+                />
+              );
+            })}
           </div>
 
           {/* Search toggle */}
@@ -573,19 +713,28 @@ export function App() {
   );
 }
 
-function DrivePill({ drive, active, onScan }: { drive: DiskSpaceInfo; active: boolean; onScan: () => void }) {
+function DrivePill({ drive, active, scanning, onScan }: {
+  drive: DiskSpaceInfo;
+  active: boolean;
+  scanning: boolean;
+  onScan: () => void;
+}) {
   const pct = drive.usedPercent;
   const level = pct > 90 ? "high" : pct > 70 ? "mid" : "low";
+  const title = scanning
+    ? `${drive.drive} — scanning in progress. Click to view.`
+    : `View ${drive.drive} (${formatBytes(drive.freeBytes)} free)`;
 
   return (
     <button
-      className={`drive-pill ${active ? "drive-pill-active" : ""}`}
+      className={`drive-pill ${active ? "drive-pill-active" : ""} ${scanning ? "drive-pill-scanning" : ""}`}
       onClick={onScan}
-      title={`Scan ${drive.drive} (${formatBytes(drive.freeBytes)} free)`}
+      title={title}
     >
       <span>{drive.drive}</span>
       <div className="drive-pill-bar">
         <div className={`drive-pill-fill ${level}`} style={{ width: `${pct}%` }} />
+        {scanning && <div className="drive-pill-scan-pulse" aria-hidden="true" />}
       </div>
       <span>{formatBytes(drive.freeBytes)} free</span>
     </button>

@@ -61,6 +61,7 @@ import {
 } from "./shared/scanIndex";
 import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
+import { normPath } from "./shared/pathUtils";
 import { analyzeForCleanup } from "./shared/suggestions";
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
 import { initUsnCursorStore } from "./shared/usnCursorStore";
@@ -90,17 +91,27 @@ type WorkerScanSession = {
   trigger: "manual" | "scheduled";
   stop: () => Promise<void>;
   tempIndexPath?: string;
+  rootPath: string;
 };
 
 type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
   active: boolean;
   trigger: "manual" | "scheduled";
   tempIndexPath?: string;
+  /** The scan root this session is working on. Used as the activeScans
+   *  Map key so concurrent scans on different drives stay isolated. */
+  rootPath: string;
 };
 
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
-let activeScan: ActiveScanSession | null = null;
+/**
+ * Per-root scan sessions. Keyed by normPath(rootPath) so a "C:\" key and a
+ * "C:\\" key collide. Allows concurrent scans on different drives; a new
+ * scan on the same root cancels the previous one for that root only.
+ */
+const activeScans: Map<string, ActiveScanSession> = new Map();
+const scanKey = (rootPath: string): string => normPath(rootPath);
 let activeDuplicateScan: DuplicateScanHandle | null = null;
 let monitoringInterval: ReturnType<typeof setInterval> | null = null;
 let settingsStore: SettingsStore | null = null;
@@ -261,7 +272,12 @@ void app.whenReady().then(async () => {
       await broadcastSnapshot(message.snapshot);
       if (message.type === "done") {
         session.active = false;
-        if (activeScan === session) activeScan = null;
+        // Only clear our slot if we're still the active session for this
+        // root — a fast restart may have replaced us already.
+        const key = scanKey(session.rootPath);
+        if (activeScans.get(key) === session) {
+          activeScans.delete(key);
+        }
         markFullScan();
 
         // Phase-2b: capture the volume's current USN cursor so the next
@@ -358,7 +374,10 @@ void app.whenReady().then(async () => {
   ) => {
     if (!session.active) return;
     session.active = false;
-    if (activeScan === session) activeScan = null;
+    const key = scanKey(session.rootPath);
+    if (activeScans.get(key) === session) {
+      activeScans.delete(key);
+    }
     // Clean up orphaned temp index file
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
@@ -378,7 +397,7 @@ void app.whenReady().then(async () => {
         startingSnapshot.scanOptions,
         session.trigger,
       );
-      activeScan = fallbackSession;
+      activeScans.set(scanKey(startingSnapshot.rootPath), fallbackSession);
       await broadcastSnapshot(fallbackStart);
       return;
     }
@@ -422,6 +441,7 @@ void app.whenReady().then(async () => {
       active: true,
       trigger,
       tempIndexPath,
+      rootPath,
       stop: async () => {
         // Ask the worker to stop gracefully first
         worker.postMessage({ type: "cancel" });
@@ -496,7 +516,7 @@ void app.whenReady().then(async () => {
 
     if (nativeResult) {
       // Wire up the session with active=true BEFORE flushing buffered messages
-      sessionRef = Object.assign(nativeResult, { active: true, trigger, tempIndexPath }) as ActiveScanSession;
+      sessionRef = Object.assign(nativeResult, { active: true, trigger, tempIndexPath, rootPath }) as ActiveScanSession;
 
       // Flush any messages that arrived during construction
       for (const msg of earlyMessages) {
@@ -512,16 +532,47 @@ void app.whenReady().then(async () => {
     return createWorkerSession(rootPath, scanOptions, trigger);
   };
 
-  const cancelActiveScan = async () => {
-    const session = activeScan;
-    activeScan = null;
+  /**
+   * Cancel the active scan for a specific root, or (when rootPath is
+   * omitted) cancel ALL active scans. Used both by the IPC cancel
+   * handler and by startScan() to retire a prior session on the same
+   * root before starting fresh.
+   */
+  const cancelActiveScan = async (rootPathInput?: string) => {
+    if (rootPathInput) {
+      const rootPath = Path.resolve(rootPathInput);
+      const key = scanKey(rootPath);
+      const session = activeScans.get(key);
+      if (!session) return null;
+      activeScans.delete(key);
+      await stopSession(session);
+      return sendCancelledSnapshot(rootPath);
+    }
 
-    if (!session) return scanStore.get();
+    // Cancel all
+    const sessions = Array.from(activeScans.values());
+    activeScans.clear();
+    for (const session of sessions) {
+      await stopSession(session);
+      await sendCancelledSnapshot(session.rootPath);
+    }
+    return null;
+  };
 
+  const stopSession = async (session: ActiveScanSession) => {
     session.active = false;
-    await session.stop();
+    try { await session.stop(); } catch { /* already dead */ }
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
+    }
+  };
+
+  const sendCancelledSnapshot = async (rootPath: string) => {
+    const prior = await scanStore.get();
+    if (normPath(prior.rootPath ?? "") !== normPath(rootPath)) {
+      // The renderer's current-view snapshot is for a different root —
+      // skip touching scanStore so we don't wipe that drive's state.
+      return prior;
     }
     const cancelledSnapshot = await scanStore.update((current) => ({
       ...current,
@@ -542,14 +593,17 @@ void app.whenReady().then(async () => {
   ) => {
     const resolvedScanOptions = { ...defaultScanOptions(), ...scanOptions };
     const rootPath = Path.resolve(rootPathInput);
-    await cancelActiveScan();
+    // Cancel ONLY the session for this root (if any) — leave other
+    // drives' scans running. This is what enables parallel multi-drive
+    // scans: starting C: while D: is scanning no longer kills D:.
+    await cancelActiveScan(rootPath);
 
     const { session, startingSnapshot } = createPreferredScanSession(
       rootPath,
       resolvedScanOptions,
       trigger,
     );
-    activeScan = session;
+    activeScans.set(scanKey(rootPath), session);
     await broadcastSnapshot(startingSnapshot);
     return startingSnapshot;
   };
@@ -579,7 +633,20 @@ void app.whenReady().then(async () => {
   ipcMain.handle("diskhound:start-scan", (_event, rootPath: string, scanOptions: ScanOptions) =>
     startScan(rootPath, scanOptions),
   );
-  ipcMain.handle("diskhound:cancel-scan", () => cancelActiveScan());
+  ipcMain.handle("diskhound:cancel-scan", (_event, rootPath?: string) => cancelActiveScan(rootPath));
+  // New: tell the renderer which scans are currently running. Lets the
+  // UI show per-drive progress indicators + avoid re-triggering a scan
+  // that's already in flight.
+  ipcMain.handle("diskhound:get-active-scan-roots", (): string[] => {
+    return Array.from(activeScans.values()).map((s) => s.rootPath);
+  });
+
+  ipcMain.handle("diskhound:get-latest-snapshot-for-root", async (_event, rootPath: string) => {
+    const history = getScanHistory(rootPath);
+    const latest = history[0];
+    if (!latest) return null;
+    return await loadHistoricalSnapshot(latest.id);
+  });
 
   // File icon cache keyed by extension (case-insensitive). Most files share
   // an extension, so we only hit the OS once per type.
@@ -680,8 +747,11 @@ void app.whenReady().then(async () => {
     if (!path) {
       return { ok: false, message: "Set a default scan path first, or run a manual scan to auto-populate it." };
     }
-    if (activeScan) {
-      return { ok: false, message: "A scan is already running." };
+    // Scan for the scheduled root — per-drive locking means we only
+    // block if THIS root is already being scanned.
+    const existingKey = scanKey(Path.resolve(path));
+    if (activeScans.has(existingKey)) {
+      return { ok: false, message: `A scan is already running for ${path}.` };
     }
     await startScan(path, defaultScanOptions(), "scheduled");
     return { ok: true, message: `Scheduled rescan started for ${path}` };
@@ -1095,7 +1165,10 @@ void app.whenReady().then(async () => {
 
         if (lastScan === null || now - lastScan >= intervalMs) {
           const defaultPath = settings.scanning.defaultRootPath;
-          if (defaultPath && !activeScan) {
+          const alreadyScanning = defaultPath
+            ? activeScans.has(scanKey(Path.resolve(defaultPath)))
+            : false;
+          if (defaultPath && !alreadyScanning) {
             const incrementalWorked = await tryIncrementalScan(defaultPath);
             if (!incrementalWorked) {
               void startScan(defaultPath, defaultScanOptions(), "scheduled");
@@ -1116,18 +1189,34 @@ void app.whenReady().then(async () => {
    * binary, parse error, wrap, etc), in which case caller does full.
    */
   const tryIncrementalScan = async (rootPath: string): Promise<boolean> => {
+    // Explicit diagnostics at every fall-off path so users can run
+    // `electron . --inspect` (or just tail the console) and see WHY
+    // deltas aren't firing instead of silent-fallback to full scan.
     const binaryPath = resolveNativeScannerBinary(projectRoot);
-    if (!binaryPath) return false;
+    if (!binaryPath) {
+      console.error(`[monitoring] delta skipped — native scanner binary not found for ${rootPath}`);
+      return false;
+    }
 
     const cursor = getCursorForRoot(rootPath);
-    if (!cursor) return false;
+    if (!cursor) {
+      console.error(`[monitoring] delta skipped — no USN cursor captured yet for ${rootPath}. ` +
+        `A cursor is recorded after the first full scan completes.`);
+      return false;
+    }
 
     // Find the most recent index for this root to serve as the delta base.
     const history = getScanHistory(rootPath);
     const mostRecent = history[0];
-    if (!mostRecent) return false;
+    if (!mostRecent) {
+      console.error(`[monitoring] delta skipped — no scan history for ${rootPath}`);
+      return false;
+    }
     const previousIndexPath = indexFilePath(mostRecent.id);
-    if (!FS_SYNC.existsSync(previousIndexPath)) return false;
+    if (!FS_SYNC.existsSync(previousIndexPath)) {
+      console.error(`[monitoring] delta skipped — previous index missing at ${previousIndexPath}`);
+      return false;
+    }
 
     const newIndexPath = indexFilePath(`pending-${randomUUID()}`);
 
@@ -1140,12 +1229,17 @@ void app.whenReady().then(async () => {
         newIndexPath,
         cursor,
       });
-    } catch {
+    } catch (error) {
+      console.error(`[monitoring] delta spawn/parse failed for ${rootPath}:`, error);
       try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
       return false;
     }
 
     if (!result) {
+      // Common causes: journal wrap past our cursor, journal ID mismatch
+      // (volume reformatted), volume not NTFS. runIncrementalScan logs
+      // specifics via its Rust-side error line.
+      console.error(`[monitoring] delta returned null for ${rootPath} — likely journal wrap or ID mismatch. Full scan will run.`);
       try { await FS.unlink(newIndexPath); } catch { /* ignore */ }
       return false;
     }
@@ -1171,14 +1265,29 @@ void app.whenReady().then(async () => {
     // Persist the new cursor so the NEXT tick picks up from here.
     await import("./shared/usnCursorStore").then((m) => m.setCursor(result!.newCursor));
 
+    // Always surface the delta scan result — "no changes" is itself a
+    // signal users want to see ("my monitoring is working"). Without
+    // this toast a silent zero-change delta is indistinguishable from
+    // monitoring being broken.
     if (settings.notifications.scanComplete) {
       const { additions, modifications, deletions, elapsedMs } = result.stats;
       const totalChanges = additions + modifications + deletions;
       if (totalChanges > 0) {
-        sendToast("info", "Changes detected",
+        sendToast("info", "Delta scan · changes detected",
           `${totalChanges} change(s) in ${elapsedMs}ms: +${additions} / ~${modifications} / -${deletions}`);
+      } else {
+        sendToast("info", "Delta scan · no changes",
+          `Checked ${rootPath} in ${elapsedMs}ms via the NTFS journal.`);
       }
     }
+    // Stderr log as a fallback observability hook — the user can tail
+    // the Electron console to confirm deltas are firing, even when
+    // toasts are disabled or off-screen.
+    console.error(
+      `[monitoring] delta scan for ${rootPath}: ` +
+      `+${result.stats.additions}/~${result.stats.modifications}/-${result.stats.deletions} ` +
+      `(${result.stats.elapsedMs}ms, ${result.stats.recordsRead} journal records)`,
+    );
 
     return true;
   };
@@ -1386,10 +1495,10 @@ void app.whenReady().then(async () => {
 
   app.on("before-quit", () => {
     isQuitting = true;
-    if (activeScan) {
-      void activeScan.stop();
-      activeScan = null;
+    for (const session of activeScans.values()) {
+      void session.stop();
     }
+    activeScans.clear();
     if (monitoringInterval) {
       clearInterval(monitoringInterval);
       monitoringInterval = null;

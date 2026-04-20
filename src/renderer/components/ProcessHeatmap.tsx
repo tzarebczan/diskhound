@@ -113,7 +113,11 @@ export function updateProcessHistory(
       };
       history.set(proc.pid, entry);
     }
-    entry.samples.push(proc.cpuPercent ?? 0);
+    // Store the RAW per-core value in history — the renderer scales to
+    // "system %" at display time when the user has the system scale
+    // selected. Storing the raw value lets users flip the scale toggle
+    // without any history regeneration.
+    entry.samples.push(proc.cpuPercentPerCore ?? 0);
     entry.sampleTimes.push(t);
     entry.name = proc.name;
     entry.exePath = proc.exePath ?? entry.exePath;
@@ -200,17 +204,37 @@ interface Props {
   /** How many samples we've collected so far — drives loading copy. */
   sampleCount: number;
   filter: string;
+  /** "system" = divide samples by cpuCount so 0-100 ≈ whole machine
+   *  busy (matches Task Manager). "per-core" = raw samples (one core
+   *  pinned = 100%, multi-threaded workloads can exceed 100%). */
+  cpuScale: "system" | "per-core";
+  cpuCount: number;
   onKill: (p: ProcessInfo, hard: boolean) => void;
   /** Right-click on a row should open the same compact menu the treemap uses. */
   onOpenContextMenu: (p: ProcessInfo, x: number, y: number) => void;
 }
 
-export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenContextMenu }: Props) {
+export function ProcessHeatmap({
+  history,
+  sampleCount,
+  filter,
+  cpuScale,
+  cpuCount,
+  onKill,
+  onOpenContextMenu,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<HoverCell | null>(null);
   const rowsRef = useRef<HeatmapRow[]>([]);
+
+  // Scale a raw-per-core sample to the currently-chosen display mode.
+  // History stores per-core values; in "system" mode we divide by
+  // cpuCount so 0-100 ≈ whole machine busy (Task-Manager-style).
+  const scale = cpuScale === "system" && cpuCount > 0
+    ? (v: number) => v / cpuCount
+    : (v: number) => v;
 
   // Observe the canvas container to keep dims in sync with the stage
   useEffect(() => {
@@ -270,13 +294,15 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
       const samples = row.entry.samples;
       const offset = samples.length - visibleSampleCount;
 
-      // ── Cells ──
+      // ── Cells ── colours + sparkline all use the SCALED value so
+      // switching between System / Per-core recoloring doesn't need
+      // any state refresh.
       for (let col = 0; col < visibleSampleCount; col++) {
         const idx = offset + col;
         if (idx < 0) continue;
-        const cpu = samples[idx];
-        if (cpu === null || cpu === undefined) continue;
-        ctx.fillStyle = colorForCpu(cpu);
+        const rawCpu = samples[idx];
+        if (rawCpu === null || rawCpu === undefined) continue;
+        ctx.fillStyle = colorForCpu(scale(rawCpu));
         ctx.fillRect(col * cellW, y, Math.ceil(cellW) + 0.5, innerRowH);
       }
 
@@ -290,10 +316,10 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
       for (let col = 0; col < visibleSampleCount; col++) {
         const idx = offset + col;
         if (idx < 0) continue;
-        const cpu = samples[idx];
-        if (cpu === null || cpu === undefined) continue;
+        const rawCpu = samples[idx];
+        if (rawCpu === null || rawCpu === undefined) continue;
         const cx = col * cellW + cellW / 2;
-        const norm = Math.min(100, Math.max(0, cpu)) / 100;
+        const norm = Math.min(100, Math.max(0, scale(rawCpu))) / 100;
         // Clamp line 2px inside the row top/bottom so strokes don't visually
         // straddle the neighboring rows.
         const cy = y + 2 + (1 - norm) * (innerRowH - 4);
@@ -319,7 +345,7 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
     ctx.moveTo(dims.w - 0.5, 0);
     ctx.lineTo(dims.w - 0.5, rows.length * (ROW_HEIGHT + ROW_GAP));
     ctx.stroke();
-  }, [rows, dims, visibleSampleCount]);
+  }, [rows, dims, visibleSampleCount, scale]);
 
   // ── Interactions: hover → tooltip ──
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -402,6 +428,8 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
             <HeatmapRowLabel
               key={row.entry.pid}
               row={row}
+              scale={scale}
+              scaleLabel={cpuScale}
               onKill={onKill}
               onContextMenu={(p, x, y) => onOpenContextMenu(p, x, y)}
             />
@@ -419,7 +447,7 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
           {/* CSS-animated pulse overlaying the rightmost "now" column */}
           <div className="process-heatmap-pulse" aria-hidden="true" />
           {hover && (
-            <HeatmapTooltip hover={hover} />
+            <HeatmapTooltip hover={hover} scale={scale} scaleLabel={cpuScale} />
           )}
         </div>
       </div>
@@ -439,16 +467,22 @@ export function ProcessHeatmap({ history, sampleCount, filter, onKill, onOpenCon
 
 function HeatmapRowLabel(props: {
   row: HeatmapRow;
+  scale: (v: number) => number;
+  scaleLabel: "system" | "per-core";
   onKill: (p: ProcessInfo, hard: boolean) => void;
   onContextMenu: (p: ProcessInfo, x: number, y: number) => void;
 }) {
-  const { row, onContextMenu } = props;
+  const { row, scale, scaleLabel, onContextMenu } = props;
   const entry = row.entry;
   const isGhost = entry.missingStreak > 0;
+  const avg = scale(row.avg);
+  const max = scale(row.max);
+  const last = scale(row.last);
+  const scaleHint = scaleLabel === "system" ? "system-wide" : "per core";
   return (
     <div
       className={`process-heatmap-label ${isGhost ? "ghost" : ""}`}
-      title={`${entry.name} · PID ${entry.pid}\navg ${row.avg.toFixed(1)}% · max ${row.max.toFixed(1)}% · last ${row.last.toFixed(1)}%`}
+      title={`${entry.name} · PID ${entry.pid} (${scaleHint})\navg ${avg.toFixed(1)}% · max ${max.toFixed(1)}% · last ${last.toFixed(1)}%`}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -457,34 +491,43 @@ function HeatmapRowLabel(props: {
     >
       <div
         className="process-heatmap-avg-bar"
-        style={{ background: colorForCpu(row.avg) }}
-        title={`Avg ${row.avg.toFixed(1)}% over window`}
+        style={{ background: colorForCpu(avg) }}
+        title={`Avg ${avg.toFixed(1)}% (${scaleHint})`}
       />
       <ProcessIcon exePath={entry.exePath} className="process-heatmap-icon" />
       <span className="process-heatmap-name">{entry.name}</span>
       {row.hasRecentSpike && (
         <span className="process-heatmap-spike" title="Recent CPU spike">▲</span>
       )}
-      <span className="process-heatmap-last">{row.last.toFixed(0)}%</span>
+      <span className="process-heatmap-last">{last.toFixed(0)}%</span>
     </div>
   );
 }
 
-function HeatmapTooltip({ hover }: { hover: HoverCell }) {
+function HeatmapTooltip({ hover, scale, scaleLabel }: {
+  hover: HoverCell;
+  scale: (v: number) => number;
+  scaleLabel: "system" | "per-core";
+}) {
   const tx = Math.min(hover.clientX + 12, window.innerWidth - 260);
   const ty = Math.min(hover.clientY + 12, window.innerHeight - 80);
-  const cpuLabel = hover.cpu === null ? "no sample" : `${hover.cpu.toFixed(1)}%`;
+  const scaled = hover.cpu === null ? null : scale(hover.cpu);
+  const cpuLabel = scaled === null ? "no sample" : `${scaled.toFixed(1)}%`;
   const timeLabel = new Date(hover.time).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
+  const scaleHint = scaleLabel === "system" ? "system-wide" : "per core";
   return (
     <div className="process-heatmap-tooltip" style={{ left: tx, top: ty }}>
       <div className="process-heatmap-tooltip-name">{hover.row.name}</div>
       <div className="process-heatmap-tooltip-line">
         <span className="process-heatmap-tooltip-label">CPU</span>
-        <span className="process-heatmap-tooltip-value">{cpuLabel}</span>
+        <span className="process-heatmap-tooltip-value">
+          {cpuLabel}
+          <span className="process-heatmap-tooltip-scale-hint"> {scaleHint}</span>
+        </span>
       </div>
       <div className="process-heatmap-tooltip-line">
         <span className="process-heatmap-tooltip-label">at</span>

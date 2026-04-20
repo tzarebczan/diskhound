@@ -232,10 +232,20 @@ export async function captureCursorAfterScan(
   rootPath: string,
 ): Promise<void> {
   const volume = volumeForPath(rootPath);
-  if (!volume) return;
+  if (!volume) {
+    console.error(`[monitoring] cursor-capture skipped — couldn't derive volume from ${rootPath}`);
+    return;
+  }
 
   const current = await queryCurrentCursor(scannerPath, volume);
-  if (!current) return;
+  if (!current) {
+    // Non-NTFS volumes, journal disabled, or scanner binary failed.
+    // Without a cursor, subsequent monitoring ticks will fall back
+    // to full scans — so it's worth logging.
+    console.error(`[monitoring] cursor-capture failed for ${volume} (root ${rootPath}). ` +
+      `Volume may be non-NTFS or USN journal may be disabled. Future scans will be full scans.`);
+    return;
+  }
 
   await setCursor({
     volume,
@@ -244,6 +254,7 @@ export async function captureCursorAfterScan(
     capturedAt: Date.now(),
     rootPath,
   });
+  console.error(`[monitoring] captured USN cursor ${current.cursor} on ${volume} (journalId=${current.journalId})`);
 }
 
 // ── Internals ──────────────────────────────────────────────────────────────
