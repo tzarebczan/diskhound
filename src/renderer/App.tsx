@@ -25,6 +25,7 @@ import { EasyMoveView } from "./components/EasyMoveView";
 import { FileList } from "./components/FileList";
 import { FolderList } from "./components/FolderList";
 import { Overview } from "./components/Overview";
+import { StartupSplash } from "./components/StartupSplash";
 import { SettingsView } from "./components/SettingsView";
 import { ToastProvider, toast } from "./components/Toasts";
 
@@ -484,7 +485,7 @@ export function App() {
 
         {/* ── Main View ── */}
         <div className="view-container">
-          {showPicker === null ? null : showPicker && view !== "memory" && view !== "settings" ? (
+          {showPicker === null ? <StartupSplash /> : showPicker && view !== "memory" && view !== "settings" ? (
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}

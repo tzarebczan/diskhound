@@ -580,6 +580,158 @@ button, input, select, textarea { font: inherit; }
 .view-container {
   overflow: hidden;
   background: var(--bg);
+  position: relative;
+}
+
+/* ── Startup splash ─────────────────────────────────────────────
+ * Shown only when the initial snapshot probe takes >500ms. Covers the
+ * empty Overview gap with an on-brand radar animation + cycling
+ * micro-tagline, then unmounts the moment we know what to render. */
+.startup-splash {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  background: var(--bg);
+  color: var(--amber);
+  z-index: 20;
+  animation: startup-splash-fade 0.25s ease-out;
+}
+@keyframes startup-splash-fade {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.startup-splash-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+  padding: 40px;
+}
+.startup-splash-radar {
+  position: relative;
+  width: 72px;
+  height: 72px;
+}
+.startup-splash-disc {
+  position: absolute;
+  inset: 0;
+  color: var(--amber);
+}
+.startup-splash-sweep {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(245, 158, 11, 0.55) 0deg,
+    rgba(245, 158, 11, 0.18) 18deg,
+    transparent 50deg,
+    transparent 360deg
+  );
+  /* Mask to a ring so the sweep reads as a "scanning beam" rather than
+   * a filled wedge eating the center. */
+  -webkit-mask: radial-gradient(circle, transparent 5px, #000 6px, #000 34px, transparent 35px);
+          mask: radial-gradient(circle, transparent 5px, #000 6px, #000 34px, transparent 35px);
+  animation: startup-splash-spin 1.8s linear infinite;
+  filter: blur(0.3px);
+}
+@keyframes startup-splash-spin {
+  to { transform: rotate(360deg); }
+}
+.startup-splash-pulses span {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--amber);
+  opacity: 0.3;
+  animation: startup-splash-pulse 2.4s ease-in-out infinite;
+}
+.startup-splash-pulses span:nth-child(1) { animation-delay: 0s; }
+.startup-splash-pulses span:nth-child(2) { animation-delay: 0.6s; }
+.startup-splash-pulses span:nth-child(3) { animation-delay: 1.2s; }
+.startup-splash-pulses span:nth-child(4) { animation-delay: 1.8s; }
+@keyframes startup-splash-pulse {
+  0%, 100% { opacity: 0.15; transform: scale(0.8); }
+  50%      { opacity: 0.85; transform: scale(1.3); }
+}
+.startup-splash-wordmark {
+  font-family: var(--font-mono);
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.startup-splash-message-slot {
+  /* Reserve vertical room so the cycling message doesn't shift layout. */
+  height: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.startup-splash-message {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-muted);
+  letter-spacing: 0.02em;
+  display: inline-flex;
+  align-items: center;
+  /* Re-keying the element on each index flip replays the fade-in. */
+  animation: startup-splash-message-in 0.45s ease-out;
+}
+@keyframes startup-splash-message-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.startup-splash-dots {
+  display: inline-flex;
+  align-items: baseline;
+  margin-left: 2px;
+  gap: 1px;
+}
+.startup-splash-dots span {
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.25;
+  animation: startup-splash-dot 1.2s ease-in-out infinite;
+}
+.startup-splash-dots span:nth-child(1) { animation-delay: 0s; }
+.startup-splash-dots span:nth-child(2) { animation-delay: 0.2s; }
+.startup-splash-dots span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes startup-splash-dot {
+  0%, 100% { opacity: 0.2; transform: translateY(0); }
+  50%      { opacity: 0.9; transform: translateY(-1px); }
+}
+.startup-splash-progress {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: rgba(245, 158, 11, 0.06);
+  overflow: hidden;
+}
+.startup-splash-progress-fill {
+  position: absolute;
+  inset: 0;
+  width: 35%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(245, 158, 11, 0.85),
+    transparent
+  );
+  animation: startup-splash-progress-slide 1.4s ease-in-out infinite;
+}
+@keyframes startup-splash-progress-slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(380%); }
 }
 
 /* ── Overview ──────────────────────────────── */
