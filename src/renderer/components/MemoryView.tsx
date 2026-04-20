@@ -3,12 +3,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type { ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
+import {
+  ProcessHeatmap,
+  updateProcessHistory,
+  type ProcessHistoryEntry,
+} from "./ProcessHeatmap";
 import { ProcessIcon } from "./ProcessIcon";
 import { toast } from "./Toasts";
 
 type SortField = "memory" | "cpu" | "name" | "pid";
 type SortDir = "asc" | "desc";
-type ViewMode = "list" | "treemap";
+type ViewMode = "list" | "treemap" | "heatmap";
 
 const DEFAULT_REFRESH_MS = 5_000;
 const MIN_REFRESH_MS = 2_000;
@@ -18,7 +23,10 @@ const REFRESH_MS_KEY = "diskhound:memory-refresh-ms";
 
 function getInitialViewMode(): ViewMode {
   if (typeof window === "undefined") return "list";
-  return window.localStorage.getItem(VIEW_MODE_KEY) === "treemap" ? "treemap" : "list";
+  const stored = window.localStorage.getItem(VIEW_MODE_KEY);
+  if (stored === "treemap") return "treemap";
+  if (stored === "heatmap") return "heatmap";
+  return "list";
 }
 
 function getInitialRefreshMs(): number {
@@ -41,6 +49,40 @@ export function MemoryView() {
   const [refreshMs, setRefreshMs] = useState<number>(getInitialRefreshMs);
   const [lastSampleMs, setLastSampleMs] = useState<number | null>(null);
   const timerRef = useRef<number | null>(null);
+
+  // Shared context menu used by both ProcessTreemap and ProcessHeatmap —
+  // lifted here so either view can open it, and a single Escape handler
+  // dismisses either one.
+  const [viewContextMenu, setViewContextMenu] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
+  const openViewContextMenu = useCallback((p: ProcessInfo, x: number, y: number) => {
+    setViewContextMenu({ x, y, process: p });
+  }, []);
+  const closeViewContextMenu = useCallback(() => setViewContextMenu(null), []);
+
+  useEffect(() => {
+    if (!viewContextMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setViewContextMenu(null);
+    };
+    const onClickAway = () => setViewContextMenu(null);
+    window.addEventListener("keydown", onKey);
+    window.addEventListener("click", onClickAway);
+    window.addEventListener("contextmenu", onClickAway);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("click", onClickAway);
+      window.removeEventListener("contextmenu", onClickAway);
+    };
+  }, [viewContextMenu]);
+
+  // Rolling per-process CPU history used by the Heatmap view. Kept in a
+  // ref at the MemoryView level so history survives switches between
+  // List / Treemap / Heatmap tabs — if it lived inside ProcessHeatmap
+  // it'd be reset every time the user clicked away and back.
+  const historyRef = useRef<Map<number, ProcessHistoryEntry>>(new Map());
+  const historyLastSampleRef = useRef({ value: 0 });
+  const [historyVersion, setHistoryVersion] = useState(0);
+  const [samplesCollected, setSamplesCollected] = useState(0);
 
   useEffect(() => {
     try { window.localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* ignore */ }
@@ -92,6 +134,18 @@ export function MemoryView() {
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
+
+  // Grow the heatmap's rolling CPU history every time a fresh sample
+  // arrives. The cached snapshot on mount gets skipped (its isStale
+  // flag is true) so we don't double-count anything.
+  useEffect(() => {
+    if (!snapshot || snapshot.isStale) return;
+    const advanced = updateProcessHistory(historyRef.current, snapshot, historyLastSampleRef.current);
+    if (advanced) {
+      setSamplesCollected((n) => Math.min(n + 1, 9999));
+      setHistoryVersion((v) => v + 1);
+    }
+  }, [snapshot]);
 
   const toggleSort = (field: SortField) => {
     if (sortField === field) {
@@ -225,6 +279,22 @@ export function MemoryView() {
             </svg>
             Treemap
           </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === "heatmap"}
+            className={`memory-view-tab ${viewMode === "heatmap" ? "active" : ""}`}
+            onClick={() => setViewMode("heatmap")}
+            title="CPU heatmap — scrolling waterfall of CPU usage over time"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="1.5" y="2" width="2" height="10" opacity="0.35" />
+              <rect x="4" y="2" width="2" height="10" opacity="0.55" />
+              <rect x="6.5" y="2" width="2" height="10" opacity="0.8" />
+              <rect x="9" y="2" width="2" height="10" />
+              <rect x="11.5" y="2" width="1" height="10" opacity="0.4" />
+            </svg>
+            CPU Heatmap
+          </button>
         </div>
         <input
           className="filter-input"
@@ -251,7 +321,7 @@ export function MemoryView() {
       </div>
 
       {/* ── Main body: switch by mode ── */}
-      {viewMode === "list" ? (
+      {viewMode === "list" && (
         <ProcessList
           processes={visibleProcesses}
           total={snapshot.processes.length}
@@ -263,10 +333,34 @@ export function MemoryView() {
           killingPid={killingPid}
           onKill={kill}
         />
-      ) : (
+      )}
+      {viewMode === "treemap" && (
         <ProcessTreemap
           processes={visibleProcesses}
           totalBytes={snapshot.totalBytes}
+          onKill={kill}
+        />
+      )}
+      {viewMode === "heatmap" && (
+        <ProcessHeatmap
+          key={historyVersion}
+          history={historyRef.current}
+          sampleCount={samplesCollected}
+          filter={filter}
+          onKill={kill}
+          onOpenContextMenu={openViewContextMenu}
+        />
+      )}
+
+      {/* Shared context menu — heatmap opens it via callback; rendered at
+       * the MemoryView level so a single Esc/click-away handler dismisses
+       * regardless of which view was hot when it opened. */}
+      {viewContextMenu && (
+        <ProcessContextMenu
+          x={viewContextMenu.x}
+          y={viewContextMenu.y}
+          proc={viewContextMenu.process}
+          onClose={closeViewContextMenu}
           onKill={kill}
         />
       )}
