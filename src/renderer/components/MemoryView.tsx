@@ -133,6 +133,21 @@ export function MemoryView() {
     if (r?.ok) {
       toast("success", `Terminated ${proc.name}`, `PID ${proc.pid}`);
       void refresh();
+      return;
+    }
+
+    // Make the Windows "Access is denied" error actionable. taskkill emits
+    // it whenever the target is system-owned or otherwise protected —
+    // elevation is the only recourse, and most users don't know that
+    // without being told.
+    const msg = (r?.message ?? "").toLowerCase();
+    const denied = msg.includes("access is denied") || msg.includes("access denied");
+    if (denied) {
+      toast(
+        "error",
+        `Needs admin privileges`,
+        `${proc.name} is a protected process. Close DiskHound, right-click its shortcut, choose "Run as administrator", then try again.`,
+      );
     } else {
       toast("error", `Couldn't kill ${proc.name}`, r?.message ?? "Unknown error");
     }
@@ -646,6 +661,36 @@ function ProcessTreemap(props: {
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
   const [selected, setSelected] = useState<ProcessInfo | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
+
+  // Escape closes any open popover/menu. Centralised here so users can hit
+  // Esc whether they opened the detail via left-click or the compact menu
+  // via right-click — both dismiss cleanly without needing to reach for
+  // the close button.
+  useEffect(() => {
+    if (!selected && !contextMenu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        setSelected(null);
+        setContextMenu(null);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selected, contextMenu]);
+
+  // Close context menu on any click outside of it (the menu itself stops
+  // propagation so this doesn't accidentally fire on its own buttons).
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+    };
+  }, [contextMenu]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -772,6 +817,16 @@ function ProcessTreemap(props: {
     if (proc) setSelected(proc);
   }, [hitTest]);
 
+  const handleContextMenu = useCallback((e: MouseEvent) => {
+    const proc = hitTest(e);
+    if (!proc) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setHover(null);
+    setSelected(null);
+    setContextMenu({ x: e.clientX, y: e.clientY, process: proc });
+  }, [hitTest]);
+
   if (processes.length === 0) {
     return (
       <div className="memory-treemap-container" ref={containerRef}>
@@ -790,9 +845,10 @@ function ProcessTreemap(props: {
         onMouseMove={handleMouseMove}
         onMouseLeave={() => setHover(null)}
         onClick={handleClick}
+        onContextMenu={handleContextMenu}
         style={{ cursor: hover ? "pointer" : "default" }}
       />
-      {hover && !selected && (
+      {hover && !selected && !contextMenu && (
         <div className="treemap-tooltip" style={{ left: hover.x, top: hover.y }}>
           <span className="treemap-tooltip-size">{formatBytes(hover.process.memoryBytes)}</span>
           <span className="treemap-tooltip-name">{hover.process.name}</span>
@@ -812,6 +868,120 @@ function ProcessTreemap(props: {
           onKill={onKill}
         />
       )}
+      {contextMenu && (
+        <ProcessContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          proc={contextMenu.process}
+          onClose={() => setContextMenu(null)}
+          onKill={onKill}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Compact right-click menu on the treemap. Intentionally smaller and
+ * faster-to-use than the full ProcessDetailPopover — one rightclick +
+ * enter-key on the item you want lets you kill a process in two gestures.
+ * Positions itself to stay inside the viewport.
+ */
+function ProcessContextMenu(props: {
+  x: number;
+  y: number;
+  proc: ProcessInfo;
+  onClose: () => void;
+  onKill: (p: ProcessInfo, hard: boolean) => void;
+}) {
+  const { x, y, proc, onClose, onKill } = props;
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState({ x, y });
+
+  useEffect(() => {
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const nx = x + rect.width > window.innerWidth ? x - rect.width : x;
+    const ny = y + rect.height > window.innerHeight ? y - rect.height : y;
+    setPos({ x: Math.max(4, nx), y: Math.max(4, ny) });
+  }, [x, y]);
+
+  const act = (fn: () => void) => {
+    onClose();
+    fn();
+  };
+
+  return (
+    <div
+      ref={menuRef}
+      className="process-ctx-menu"
+      style={{ left: pos.x, top: pos.y }}
+      onClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      role="menu"
+    >
+      <div className="process-ctx-header">
+        <div className="process-ctx-name">{proc.name}</div>
+        <div className="process-ctx-meta">
+          PID {proc.pid} · {formatBytes(proc.memoryBytes)}
+          {proc.cpuPercent !== null && ` · ${proc.cpuPercent.toFixed(1)}% CPU`}
+        </div>
+      </div>
+      {proc.exePath && (
+        <>
+          <button
+            className="process-ctx-item"
+            role="menuitem"
+            onClick={() => act(() => void nativeApi.revealPath(proc.exePath!))}
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
+            </svg>
+            Reveal executable
+          </button>
+          <button
+            className="process-ctx-item"
+            role="menuitem"
+            onClick={() =>
+              act(() => {
+                void navigator.clipboard.writeText(proc.exePath!).then(
+                  () => toast("success", "Path copied", proc.exePath!),
+                  () => toast("error", "Couldn't copy path"),
+                );
+              })
+            }
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="4" y="4" width="8" height="9" rx="1" />
+              <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
+            </svg>
+            Copy path
+          </button>
+          <div className="process-ctx-divider" />
+        </>
+      )}
+      <button
+        className="process-ctx-item process-ctx-warn"
+        role="menuitem"
+        onClick={() => act(() => onKill(proc, false))}
+      >
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+          <circle cx="7" cy="7" r="5.5" />
+          <path d="M7 4V7.5" />
+        </svg>
+        End (graceful)
+      </button>
+      <button
+        className="process-ctx-item process-ctx-danger"
+        role="menuitem"
+        onClick={() => act(() => onKill(proc, true))}
+      >
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+          <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
+        </svg>
+        Force kill
+      </button>
     </div>
   );
 }
