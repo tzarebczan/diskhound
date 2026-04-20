@@ -978,11 +978,23 @@ void app.whenReady().then(async () => {
       // Check disk deltas
       const snapshot = await checkDiskDeltas();
 
+      const excludedSet = new Set(
+        (settings.monitoring.excludedDrives ?? []).map((d) => d.toUpperCase()),
+      );
       for (const delta of snapshot.deltas) {
-        mainWindow?.webContents.send(DISK_DELTA_CHANNEL, delta);
+        // Respect per-drive opt-out — users can exclude specific drives
+        // (backup disks, network shares, etc.) from alerts while keeping
+        // monitoring globally enabled. We still emit the raw delta to
+        // the renderer so the free-space gauge at the top stays accurate;
+        // we just suppress the toast/system notification.
+        const isExcluded = excludedSet.has(delta.drive.toUpperCase());
+        if (!isExcluded) {
+          mainWindow?.webContents.send(DISK_DELTA_CHANNEL, delta);
+        }
 
         // Only alert on free-space DECREASES (negative deltaBytes)
         if (delta.deltaBytes >= 0) continue; // Space increased — not actionable
+        if (isExcluded) continue;
 
         const decrease = Math.abs(delta.deltaBytes);
         const decreasePct = Math.abs(delta.deltaPercent);

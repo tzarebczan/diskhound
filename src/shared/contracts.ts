@@ -125,6 +125,13 @@ export interface MonitoringSettings {
   fullScanIntervalMinutes: number; // periodic full re-scan (in minutes)
   requireIdle: boolean; // only scan when system is idle
   idleMinutes: number; // how long idle before scanning
+  /**
+   * Drive identifiers (e.g. "C:", "D:") the user has opted out of
+   * monitoring. When empty (default) every drive discovered by the
+   * monitor is tracked. Takes effect only when `enabled` is true —
+   * disabling monitoring globally still overrides per-drive opt-in.
+   */
+  excludedDrives: string[];
 }
 
 export interface NotificationSettings {
@@ -572,6 +579,7 @@ export function defaultSettings(): AppSettings {
       fullScanIntervalMinutes: 60, // hourly scans so the Changes tab has fresh data
       requireIdle: false, // don't block scheduled scans on idle — scans are background-friendly
       idleMinutes: 10,
+      excludedDrives: [],
     },
     notifications: {
       scanComplete: true,
@@ -686,6 +694,9 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         240,
         defaults.monitoring.idleMinutes,
       ),
+      excludedDrives: Array.isArray(merged.monitoring.excludedDrives)
+        ? merged.monitoring.excludedDrives.filter((d): d is string => typeof d === "string")
+        : [],
     },
     notifications: {
       scanComplete: Boolean(merged.notifications.scanComplete),

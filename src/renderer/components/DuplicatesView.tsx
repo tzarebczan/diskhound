@@ -28,6 +28,11 @@ export function DuplicatesView({ snapshot }: Props) {
   const { busy, runAction, handleEasyMove } = usePathActions();
   const [sortMode, setSortMode] = useState<SortMode>("wasted");
   const safeDeleteOnly = useSafeDeleteOnly();
+  // Optional narrower scope — lets the user scan a subfolder of the
+  // current disk snapshot rather than the whole root. Null = use
+  // snapshot.rootPath as-is (the typical case).
+  const [scopeOverride, setScopeOverride] = useState<string | null>(null);
+  const effectiveScope = scopeOverride ?? rootPath ?? "";
 
   useEffect(() => {
     const unsubProgress = nativeApi.onDuplicateProgress((p) => {
@@ -47,13 +52,20 @@ export function DuplicatesView({ snapshot }: Props) {
   }, []);
 
   const startScan = () => {
-    if (!rootPath) return;
+    if (!effectiveScope) return;
     setAnalysis(null);
     setDismissed(new Set());
     setExpanded(new Set());
     setScanning(true);
-    void nativeApi.startDuplicateScan(rootPath);
+    void nativeApi.startDuplicateScan(effectiveScope);
   };
+
+  const pickNarrowerScope = async () => {
+    const picked = await nativeApi.pickMoveDestination();
+    if (picked) setScopeOverride(picked);
+  };
+
+  const resetScope = () => setScopeOverride(null);
 
   const cancelScan = () => {
     void nativeApi.cancelDuplicateScan();
@@ -117,27 +129,68 @@ export function DuplicatesView({ snapshot }: Props) {
     <div className="duplicates-view">
       {/* ── Header ── */}
       <div className="duplicates-header">
-        <div>
+        <div className="duplicates-header-text">
           {analysis && !scanning ? (
             <>
-              <span className="duplicates-title">
-                {visibleGroups.length} duplicate group{visibleGroups.length !== 1 ? "s" : ""}
-              </span>
-              <span className="duplicates-subtitle">
-                {formatBytes(visibleWasted)} reclaimable
-              </span>
+              <div className="duplicates-title-row">
+                <span className="duplicates-title">
+                  {visibleGroups.length} duplicate group{visibleGroups.length !== 1 ? "s" : ""}
+                </span>
+                <span className="duplicates-subtitle">
+                  {formatBytes(visibleWasted)} reclaimable
+                </span>
+              </div>
+              <div className="duplicates-scope" title={analysis.rootPath}>
+                in <code>{analysis.rootPath}</code>
+              </div>
             </>
           ) : scanning ? (
-            <span className="duplicates-title">Scanning for duplicates...</span>
+            <>
+              <div className="duplicates-title-row">
+                <span className="duplicates-title">Scanning for duplicates</span>
+              </div>
+              <div className="duplicates-scope" title={effectiveScope}>
+                in <code>{effectiveScope || "—"}</code>
+              </div>
+            </>
           ) : (
-            <span className="duplicates-title">Duplicate Detection</span>
+            <>
+              <div className="duplicates-title-row">
+                <span className="duplicates-title">Duplicate detection</span>
+              </div>
+              <div className="duplicates-scope">
+                Will scan <code title={effectiveScope}>{effectiveScope || "nothing yet"}</code>
+                {scopeOverride && (
+                  <button
+                    className="duplicates-scope-reset"
+                    onClick={resetScope}
+                    title={`Reset to current scan root: ${rootPath}`}
+                  >
+                    reset to scan root
+                  </button>
+                )}
+              </div>
+            </>
           )}
         </div>
         <div className="duplicates-header-actions">
+          {!scanning && (
+            <button
+              className="scan-btn"
+              onClick={() => void pickNarrowerScope()}
+              title="Pick a subfolder to scan instead of the full scan root"
+            >
+              Change scope
+            </button>
+          )}
           {scanning ? (
             <button className="scan-btn scan-btn-stop" onClick={cancelScan}>Cancel</button>
           ) : (
-            <button className="scan-btn scan-btn-primary" onClick={startScan}>
+            <button
+              className="scan-btn scan-btn-primary"
+              onClick={startScan}
+              disabled={!effectiveScope}
+            >
               {analysis ? "Rescan" : "Scan for Duplicates"}
             </button>
           )}
@@ -194,8 +247,18 @@ export function DuplicatesView({ snapshot }: Props) {
             </div>
             <div className="duplicates-empty-text">Find duplicate files</div>
             <div className="duplicates-empty-hint">
-              Scan your drive to find identical files taking up extra space.
-              Files are compared by content (SHA-256 hash), not just name.
+              Files are compared by content (SHA-256 hash), not by name —
+              a photo copy with a different filename still counts. A 4KB
+              prefix pre-check fast-rejects most non-matches so scans of
+              large trees stay quick.
+            </div>
+            <div className="duplicates-empty-scope">
+              Scope: <code>{effectiveScope || "—"}</code>
+              <span className="duplicates-empty-scope-hint">
+                {scopeOverride
+                  ? "narrowed from scan root"
+                  : "= current scan root (change via \"Change scope\" above)"}
+              </span>
             </div>
           </div>
         )}

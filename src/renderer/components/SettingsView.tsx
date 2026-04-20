@@ -134,6 +134,19 @@ export function SettingsView() {
           snapshot={monitoringSnapshot}
           enabled={settings.monitoring.enabled}
           defaultRootPath={settings.scanning.defaultRootPath}
+          excludedDrives={settings.monitoring.excludedDrives}
+          onToggleDrive={(drive) => {
+            const upper = drive.toUpperCase();
+            const current = settings.monitoring.excludedDrives;
+            const isCurrentlyExcluded = current.some((d) => d.toUpperCase() === upper);
+            const next = isCurrentlyExcluded
+              ? current.filter((d) => d.toUpperCase() !== upper)
+              : [...current, drive];
+            void save({
+              ...settings,
+              monitoring: { ...settings.monitoring, excludedDrives: next },
+            });
+          }}
         />
         <ToggleRow
           label="Enable drive monitoring"
@@ -357,11 +370,16 @@ function MonitoringStatusPanel({
   snapshot,
   enabled,
   defaultRootPath,
+  excludedDrives,
+  onToggleDrive,
 }: {
   snapshot: MonitoringSnapshot | null;
   enabled: boolean;
   defaultRootPath: string;
+  excludedDrives: string[];
+  onToggleDrive: (drive: string) => void;
 }) {
+  const excludedSet = new Set(excludedDrives.map((d) => d.toUpperCase()));
   return (
     <div className="monitoring-card">
       <div className="monitoring-card-header">
@@ -394,20 +412,44 @@ function MonitoringStatusPanel({
 
       <div className="monitoring-drive-list">
         {snapshot?.drives?.length ? (
-          snapshot.drives.map((drive) => (
-            <div key={drive.drive} className="monitoring-drive-row">
-              <div className="monitoring-drive-head">
-                <span className="monitoring-drive-name">{drive.drive}</span>
-                <span className="monitoring-drive-free">{formatBytes(drive.freeBytes)} free</span>
-              </div>
-              <div className="monitoring-drive-bar">
-                <div
-                  className={`monitoring-drive-fill ${drive.usedPercent > 90 ? "high" : drive.usedPercent > 70 ? "mid" : "low"}`}
-                  style={{ width: `${Math.min(100, Math.max(0, drive.usedPercent))}%` }}
-                />
-              </div>
+          <>
+            <div className="monitoring-drive-list-header">
+              <span>Drives</span>
+              <span className="monitoring-drive-list-hint">
+                uncheck to exclude from alerts
+              </span>
             </div>
-          ))
+            {snapshot.drives.map((drive) => {
+              const isIncluded = !excludedSet.has(drive.drive.toUpperCase());
+              return (
+                <label
+                  key={drive.drive}
+                  className={`monitoring-drive-row ${!enabled ? "dimmed" : ""} ${!isIncluded ? "excluded" : ""}`}
+                >
+                  <input
+                    type="checkbox"
+                    className="monitoring-drive-toggle"
+                    checked={isIncluded}
+                    disabled={!enabled}
+                    onChange={() => onToggleDrive(drive.drive)}
+                    title={isIncluded ? `Exclude ${drive.drive} from alerts` : `Include ${drive.drive} in alerts`}
+                  />
+                  <div className="monitoring-drive-body">
+                    <div className="monitoring-drive-head">
+                      <span className="monitoring-drive-name">{drive.drive}</span>
+                      <span className="monitoring-drive-free">{formatBytes(drive.freeBytes)} free</span>
+                    </div>
+                    <div className="monitoring-drive-bar">
+                      <div
+                        className={`monitoring-drive-fill ${drive.usedPercent > 90 ? "high" : drive.usedPercent > 70 ? "mid" : "low"}`}
+                        style={{ width: `${Math.min(100, Math.max(0, drive.usedPercent))}%` }}
+                      />
+                    </div>
+                  </div>
+                </label>
+              );
+            })}
+          </>
         ) : (
           <div className="monitoring-empty">No drive snapshot yet.</div>
         )}
