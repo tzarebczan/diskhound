@@ -28,12 +28,14 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 ## Features
 
 - 🦀 **Native Rust scanner** — uses Win32 `FindFirstFileExW` on Windows and `jwalk` on macOS/Linux. Scans 100K+ files in seconds.
-- 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Square-root compression keeps `pagefile.sys` from eating the whole canvas. Right-click any rectangle for reveal/open/trash/move actions.
-- 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index.
+- 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Two layouts: "Size" (largest-first, globally ordered) and "Tree" (WinDirStat-style — files cluster inside their parent directory's rectangle, with subtle depth-modulated folder outlines). Right-click any rectangle for reveal/open/trash/move actions.
+- ⚡ **Incremental monitoring** — after the first full scan, DiskHound tracks disk changes via the NTFS USN journal (Windows) and an mtime-based smart rescan (cross-platform). Repeat scans on a mostly-idle drive are 10–50× faster than a full walk — typical hourly checks complete in seconds, populating the Changes tab automatically.
+- 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index. History entries show an icon indicating whether they came from a fast delta scan or a full walk.
 - 🔍 **Duplicate detection** — SHA-256 content hashing with two-pass optimization (4KB prefix rejection, then full hash). Concurrent I/O. "Keep newest" / "Keep oldest" bulk actions.
 - 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click.
 - 📁 **Folder explorer** — drill into directories with breadcrumb navigation and proportional size bars.
-- 🛎️ **Background monitoring** — periodic disk space checks with delta alerts when free space drops meaningfully.
+- 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
+- ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. List and treemap views; multi-instance processes (Chrome, Electron apps, etc.) collapse into a single parent row showing totals. Kill processes with soft/hard signals.
 - 🌓 **Dark & light themes** — with system preference detection. Toggle from the status bar.
 - ⌨️ **Keyboard navigation** — arrow keys in the file list, Enter to open, Delete to trash, Ctrl+F to search.
 - 🔄 **Auto-update** — via `electron-updater` with GitHub Releases. UAC elevation supported for system-wide installs.
@@ -132,11 +134,17 @@ native/diskhound-native-scanner/
 
 **The scanner** writes two outputs for every completed scan:
 1. A JSON snapshot with top-N largest files, hottest directories, and aggregate totals.
-2. A gzipped NDJSON index containing every file's path, size, and mtime.
+2. A gzipped NDJSON index containing every file's path, size, and mtime, plus directory mtime entries so the next scan can skip unchanged subtrees.
 
 **The diff engine** uses the snapshot for the "biggest changes" overview, and the full index for "browse every change." Both are streamed and capped for memory safety. Aggregate totals (net bytes changed, file count delta) are always exact since they come from complete scan counters.
 
+**Incremental monitoring** has two tiers:
+1. **USN journal (Windows)** — after a full scan anchors a cursor, subsequent monitoring ticks read only the NTFS change journal since that cursor. Creates/modifies/deletes are applied to a working copy of the index, a fresh snapshot is built from the updated index, and it's saved to history with an `⚡ fast` engine tag. Near-instant.
+2. **Mtime-based smart rescan (cross-platform)** — during a full walk, directories whose mtime matches the previous scan's baseline inherit their files from the baseline instead of being re-enumerated. Covers the case where USN is unavailable or the volume isn't NTFS.
+
 **Easy Move** uses platform-appropriate links: directory junctions on Windows (no admin), symlinks on macOS/Linux. Every move is journaled so it's fully reversible. Failed rollbacks are recorded as "stranded" with explicit recovery in the UI.
+
+**Process sampling** uses PowerShell `Get-Process` on Windows (fast, returns executable paths for icon resolution) with a fallback to basic `tasklist` if PowerShell is unavailable. macOS/Linux use `ps -axo pid,rss,%cpu,comm`. Results are cached in the main process so tab-switching is instant — a fresh sample fires in the background.
 
 ## Contributing
 

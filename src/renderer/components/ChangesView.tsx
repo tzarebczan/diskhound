@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 import type {
   DirectoryDelta,
-  ExtensionDelta,
   FileDelta,
   FullDiffResult,
   FullFileChange,
@@ -24,7 +23,7 @@ interface Props {
   snapshot: ScanSnapshot;
 }
 
-type DetailTab = "files" | "directories" | "extensions";
+type DetailTab = "files" | "directories";
 
 // ── Time range definitions ─────────────────────────────────
 
@@ -474,12 +473,6 @@ export function ChangesView({ rootPath, snapshot }: Props) {
             >
               Directories ({diff.directoryDeltas.length})
             </button>
-            <button
-              className={`changes-tab ${detailTab === "extensions" ? "active" : ""}`}
-              onClick={() => setDetailTab("extensions")}
-            >
-              Extensions ({diff.extensionDeltas.length})
-            </button>
           </div>
 
           {/* Detail list */}
@@ -528,7 +521,6 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 onEasyMove={(p) => void handleEasyMove(p)}
               />
             )}
-            {detailTab === "extensions" && <ExtDeltaList deltas={diff.extensionDeltas} />}
           </div>
         </div>
       </div>
@@ -839,36 +831,6 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
           </div>
         );
       })}
-    </>
-  );
-}
-
-function ExtDeltaList({ deltas }: { deltas: ExtensionDelta[] }) {
-  if (deltas.length === 0) {
-    return <div className="changes-empty-detail">No extension changes detected</div>;
-  }
-
-  return (
-    <>
-      {deltas.map((d) => (
-        <div key={d.extension} className="changes-row">
-          <div className={`changes-row-badge ${d.deltaBytes > 0 ? "grew" : "shrank"}`}>
-            {d.deltaBytes > 0 ? "grew" : "shrank"}
-          </div>
-          <div className="changes-row-info">
-            <div className="changes-row-name">{d.extension}</div>
-            <div className="changes-row-path">
-              {d.previousCount} &rarr; {d.count} files
-            </div>
-          </div>
-          <DeltaCell delta={d.deltaBytes} />
-          <div className="changes-row-sizes">
-            <span className="changes-row-prev">{formatBytes(d.previousSize)}</span>
-            <span className="changes-row-arrow">&rarr;</span>
-            <span>{formatBytes(d.size)}</span>
-          </div>
-        </div>
-      ))}
     </>
   );
 }

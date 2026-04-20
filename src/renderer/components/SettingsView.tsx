@@ -119,17 +119,10 @@ export function SettingsView() {
         <UpdateRow />
       </div>
 
-      {/* ── Scanning ── */}
-      <div className="settings-section">
-        <div className="settings-section-title">Scanning</div>
-        <TextRow
-          label="Default scan path"
-          value={settings.scanning.defaultRootPath}
-          wide
-          placeholder="C:\Users\..."
-          onChange={(v) => void save({ ...settings, scanning: { ...settings.scanning, defaultRootPath: v } })}
-        />
-      </div>
+      {/* "Default scan path" is no longer user-editable — it auto-populates
+       * from the most recent manual scan (see main.ts defaultRootPath seed
+       * logic). One less knob to tune; the app reopens to the last-
+       * scanned root automatically on launch. */}
 
       {/* ── Monitoring ── */}
       <div className="settings-section">
@@ -477,23 +470,6 @@ function formatMonitoringTime(timestamp: number): string {
     month: "short",
     day: "numeric",
   });
-}
-
-function TextRow({ label, value, onChange, placeholder, wide }: {
-  label: string; value: string; onChange: (v: string) => void; placeholder?: string; wide?: boolean;
-}) {
-  return (
-    <div className="setting-row">
-      <div className="setting-label">{label}</div>
-      <input
-        className={`setting-input ${wide ? "setting-input-wide" : ""}`}
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onChange={(e) => onChange((e.target as HTMLInputElement).value)}
-      />
-    </div>
-  );
 }
 
 function SelectRow({ label, value, options, onChange }: {

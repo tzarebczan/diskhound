@@ -305,8 +305,11 @@ button, input, select, textarea { font: inherit; }
 
 .scan-input {
   flex: 1;
-  min-width: 180px;
-  max-width: 420px;
+  /* Tight min-width so a short path like "C:\" doesn't hog space at the
+   * expense of drive chips on the right — the input still grows via flex
+   * when the user pastes a long path. */
+  min-width: 120px;
+  max-width: 360px;
   height: 28px;
   padding: 0 10px;
   border: 1px solid var(--border);
@@ -858,8 +861,13 @@ button, input, select, textarea { font: inherit; }
 }
 
 .treemap-panel {
-  display: grid;
-  grid-template-rows: auto auto 1fr;
+  /* Flex column rather than grid-rows auto/auto/1fr — the grid version
+   * left a dead row when the optional .treemap-featured strip was
+   * absent (2 children landed in rows 1+2; row 3's 1fr sat empty under
+   * the canvas). Flex always gives the trailing .treemap-stage all the
+   * remaining vertical space regardless of how many siblings exist. */
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -1135,6 +1143,7 @@ button, input, select, textarea { font: inherit; }
 
 .treemap-stage {
   position: relative;
+  flex: 1;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -1143,6 +1152,11 @@ button, input, select, textarea { font: inherit; }
 .treemap-container {
   position: relative;
   overflow: hidden;
+  /* Explicit 100%/100% so the canvas's ResizeObserver always sees the
+   * full stage bounds — without these the container's intrinsic size
+   * was driving the canvas smaller than available. */
+  width: 100%;
+  height: 100%;
 }
 .treemap-container canvas {
   display: block;
