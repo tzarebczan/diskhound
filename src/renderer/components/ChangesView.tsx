@@ -623,19 +623,47 @@ function ScheduleStatusStrip({
 }
 
 /**
- * Compact "fast" / "full" badge surfacing how a snapshot in history was
- * produced. USN-journal scans are near-instant incremental reads of the
- * NTFS change log; everything else is a full directory walk. Knowing
- * which is which helps users understand why some history entries are
- * minutes apart and others aren't.
+ * Compact icon surfacing how a snapshot in history was produced.
+ *
+ * - Delta (USN journal): lightning bolt — near-instant incremental read of
+ *   the NTFS change log. Very fast but only sees events since the previous
+ *   anchor, so it's slightly estimate-y: files that changed via paths we
+ *   couldn't resolve are missed until the next full scan.
+ * - Full: stacked-layers glyph — walked the whole tree, definitive
+ *   numbers. Slower but authoritative.
+ * - Unknown engine (pre-v0.2.8 history): render nothing.
+ *
+ * Icon-only by design — "fast"/"full" text gets noisy when every row
+ * has one. The tooltip surfaces the detail on hover.
  */
 function EngineBadge({ engine }: { engine?: ScanEngine }) {
   if (engine === "usn-journal") {
     return (
-      <span className="changes-engine-badge usn" title="Incremental scan via NTFS USN journal">fast</span>
+      <span
+        className="changes-engine-icon delta"
+        title="Delta scan — changes since the previous snapshot, read from the NTFS journal. Near-instant but estimate-y: files we couldn't resolve are missed until the next full scan."
+        aria-label="Delta scan"
+      >
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" aria-hidden="true">
+          <path d="M7 0L2 7H5L4 12L10 5H7L7 0Z" />
+        </svg>
+      </span>
     );
   }
-  // Don't badge "full" — it's the default and we don't want to clutter every entry.
+  if (engine === "native-sidecar" || engine === "js-worker") {
+    return (
+      <span
+        className="changes-engine-icon full"
+        title="Full scan — walked the entire tree. Authoritative numbers, but slower than a delta."
+        aria-label="Full scan"
+      >
+        <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.4" aria-hidden="true">
+          <rect x="1.5" y="1.5" width="9" height="5" rx="0.5" />
+          <rect x="1.5" y="5.5" width="9" height="5" rx="0.5" />
+        </svg>
+      </span>
+    );
+  }
   return null;
 }
 

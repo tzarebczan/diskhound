@@ -6,8 +6,9 @@ import { useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import {
-  buildTreemapRects,
+  buildTreemapLayout,
   type TreemapAreaMode,
+  type TreemapFolderRect,
   type TreemapLayout,
   type TreemapRect,
 } from "../lib/treemap";
@@ -17,6 +18,8 @@ interface Props {
   areaMode?: TreemapAreaMode;
   /** Flat squarified by size (default) vs. hierarchical by folder. */
   layout?: TreemapLayout;
+  /** Draw subtle folder boundary strokes (Tree layout only). */
+  showFolderOutlines?: boolean;
   onFileClick?: (file: ScanFileRecord) => void;
 }
 
@@ -30,11 +33,23 @@ interface ContextMenuState {
 // separation without needing a gap between rects.
 const GAP = 0;
 
-export function Treemap({ files, areaMode = "compressed", layout = "size", onFileClick }: Props) {
+export function Treemap({
+  files,
+  areaMode = "compressed",
+  layout = "size",
+  showFolderOutlines = true,
+  onFileClick,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
-  const [tooltip, setTooltip] = useState<{ x: number; y: number; file: ScanFileRecord } | null>(null);
+  const foldersRef = useRef<TreemapFolderRect[]>([]);
+  const [tooltip, setTooltip] = useState<{
+    x: number;
+    y: number;
+    file: ScanFileRecord;
+    folder?: TreemapFolderRect;
+  } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
 
@@ -83,8 +98,9 @@ export function Treemap({ files, areaMode = "compressed", layout = "size", onFil
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dims.w, dims.h);
 
-    const rects = buildTreemapRects(files, dims.w, dims.h, areaMode, layout);
+    const { leaves: rects, folders } = buildTreemapLayout(files, dims.w, dims.h, areaMode, layout);
     rectsRef.current = rects;
+    foldersRef.current = folders;
 
     for (const r of rects) {
       const x = r.x + GAP;
@@ -159,7 +175,42 @@ export function Treemap({ files, areaMode = "compressed", layout = "size", onFil
         }
       }
     }
-  }, [files, dims, areaMode, layout]);
+
+    // Folder delineation pass (Tree layout only). Drawn AFTER leaves so
+    // the strokes appear on top of every file. We filter to "meaningful"
+    // folders — those covering ≥0.5% of the canvas and containing 2+
+    // children — to avoid outlining every tiny leaf-dir, which becomes
+    // noise. Depth modulates width + alpha so the top-level structure
+    // pops without drowning out the inner detail.
+    if (layout === "tree" && showFolderOutlines && foldersRef.current.length > 0) {
+      const minArea = dims.w * dims.h * 0.005;
+      // Draw shallower folders last (over deeper) so their thicker strokes
+      // sit on top of the thinner inner lines.
+      const sortedFolders = foldersRef.current
+        .filter((f) => f.w * f.h >= minArea && f.depth <= 4)
+        .sort((a, b) => b.depth - a.depth);
+
+      for (const f of sortedFolders) {
+        // Depth 1: 1.6px @ 0.55, depth 2: 1.1px @ 0.4, depth 3: 0.75px @ 0.25,
+        // depth 4+: skipped. Values tuned empirically — enough to see
+        // structure, not enough to look busy.
+        const depthFactor = Math.max(0, 5 - f.depth);
+        const lineWidth = 0.4 + depthFactor * 0.3;
+        const alpha = 0.1 + depthFactor * 0.11;
+        ctx.strokeStyle = `rgba(0, 0, 0, ${alpha})`;
+        ctx.lineWidth = lineWidth;
+        // Inset by half the stroke so the line stays inside the folder,
+        // not straddling its boundary and bleeding into the neighbor.
+        const inset = lineWidth / 2;
+        ctx.strokeRect(
+          f.x + inset,
+          f.y + inset,
+          Math.max(0, f.w - lineWidth),
+          Math.max(0, f.h - lineWidth),
+        );
+      }
+    }
+  }, [files, dims, areaMode, layout, showFolderOutlines]);
 
   const hitTest = useCallback((e: MouseEvent): ScanFileRecord | null => {
     const canvas = canvasRef.current;
@@ -179,11 +230,36 @@ export function Treemap({ files, areaMode = "compressed", layout = "size", onFil
       // Keep tooltip at a fixed offset from cursor, clamped to viewport
       const tx = Math.min(e.clientX + 14, window.innerWidth - 380);
       const ty = Math.min(e.clientY + 14, window.innerHeight - 80);
-      setTooltip({ x: tx, y: ty, file });
+
+      // Tree-layout bonus: show the deepest folder containing this file
+      // so the tooltip says "in folder <name> — X GB · N files". Only
+      // meaningful in Tree mode; in Size mode adjacent files are
+      // unrelated so the context is misleading.
+      let folder: TreemapFolderRect | undefined;
+      if (layout === "tree" && foldersRef.current.length > 0) {
+        const canvas = canvasRef.current;
+        if (canvas) {
+          const rect = canvas.getBoundingClientRect();
+          const mx = e.clientX - rect.left;
+          const my = e.clientY - rect.top;
+          let bestArea = Infinity;
+          for (const f of foldersRef.current) {
+            if (mx >= f.x && mx <= f.x + f.w && my >= f.y && my <= f.y + f.h) {
+              const area = f.w * f.h;
+              if (area < bestArea) {
+                bestArea = area;
+                folder = f;
+              }
+            }
+          }
+        }
+      }
+
+      setTooltip({ x: tx, y: ty, file, folder });
     } else {
       setTooltip(null);
     }
-  }, [hitTest]);
+  }, [hitTest, layout]);
 
   const handleMouseLeave = useCallback(() => setTooltip(null), []);
 
@@ -235,6 +311,15 @@ export function Treemap({ files, areaMode = "compressed", layout = "size", onFil
           <span className="treemap-tooltip-name">{tooltip.file.name}</span>
           <div className="treemap-tooltip-path">{tooltip.file.path}</div>
           <div className="treemap-tooltip-meta">Modified {humanAge(tooltip.file.modifiedAt)}</div>
+          {tooltip.folder && (
+            <div className="treemap-tooltip-folder">
+              <span className="treemap-tooltip-folder-label">in folder</span>
+              <span className="treemap-tooltip-folder-name">{tooltip.folder.name}</span>
+              <span className="treemap-tooltip-folder-stats">
+                {formatBytes(tooltip.folder.totalSize)} · {tooltip.folder.fileCount.toLocaleString()} files
+              </span>
+            </div>
+          )}
         </div>
       )}
 

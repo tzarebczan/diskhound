@@ -27,6 +27,37 @@ export type TreemapAreaMode = "compressed" | "exact";
  */
 export type TreemapLayout = "size" | "tree";
 
+/**
+ * A single directory's placement on the treemap canvas, captured during
+ * `tree` layout. Used to (a) draw subtle boundary strokes that make the
+ * folder hierarchy visible and (b) surface folder context on hover.
+ */
+export interface TreemapFolderRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Slash-separated logical path (not including the synthetic root). */
+  path: string;
+  /** Display name — last component of `path`. */
+  name: string;
+  /** Sum of all leaf file sizes under this folder. */
+  totalSize: number;
+  /** Total leaf count under this folder. */
+  fileCount: number;
+  /** 1 for direct children of the (collapsed) root, incrementing inward. */
+  depth: number;
+}
+
+/**
+ * Result of the unified `buildTreemapLayout`. Folder rects are only
+ * populated when `layout === "tree"`; Size mode returns an empty array.
+ */
+export interface TreemapLayoutResult {
+  leaves: TreemapRect[];
+  folders: TreemapFolderRect[];
+}
+
 export interface TreemapComposition {
   featuredFiles: TreemapFeaturedItem[];
   mapFiles: ScanFileRecord[];
@@ -159,7 +190,24 @@ export function buildTreemapRects(
   areaMode: TreemapAreaMode = "compressed",
   layout: TreemapLayout = "size",
 ): TreemapRect[] {
-  if (files.length === 0 || width <= 0 || height <= 0) return [];
+  return buildTreemapLayout(files, width, height, areaMode, layout).leaves;
+}
+
+/**
+ * Preferred entry point — returns leaf rects (always) and folder rects
+ * (only in Tree layout). The renderer uses folder rects to draw boundary
+ * strokes and to surface folder context on hover.
+ */
+export function buildTreemapLayout(
+  files: ScanFileRecord[],
+  width: number,
+  height: number,
+  areaMode: TreemapAreaMode = "compressed",
+  layout: TreemapLayout = "size",
+): TreemapLayoutResult {
+  if (files.length === 0 || width <= 0 || height <= 0) {
+    return { leaves: [], folders: [] };
+  }
 
   if (layout === "tree") {
     return buildTreeLayout(files, width, height, areaMode);
@@ -174,11 +222,11 @@ export function buildTreemapRects(
     weight: areaMode === "exact" ? file.size : Math.sqrt(file.size),
   }));
   const totalWeight = weighted.reduce((sum, item) => sum + item.weight, 0);
-  if (totalWeight === 0) return [];
+  if (totalWeight === 0) return { leaves: [], folders: [] };
 
   const rects: TreemapRect[] = [];
   squarify(weighted, { x: 0, y: 0, w: width, h: height }, totalWeight, rects);
-  return rects;
+  return { leaves: rects, folders: [] };
 }
 
 // ── Tree layout (WinDirStat-style folder grouping) ─────────────────────────
@@ -188,8 +236,12 @@ const PATH_SEP = /[\\/]+/;
 interface TreeNode {
   /** Display name for this node — last component of its path. */
   name: string;
+  /** Logical path from the pruned tree root (slash-separated). Empty for the root. */
+  path: string;
   /** Sum of all leaf file sizes under this node. */
   totalSize: number;
+  /** Total leaf count under this node. */
+  fileCount: number;
   /** True when this node represents a single file. */
   isFile: boolean;
   /** Set when isFile=true — the original file record. */
@@ -212,19 +264,22 @@ function buildTreeLayout(
   width: number,
   height: number,
   _areaMode: TreemapAreaMode,
-): TreemapRect[] {
-  if (files.length === 0) return [];
+): TreemapLayoutResult {
+  if (files.length === 0) return { leaves: [], folders: [] };
 
   const root = buildTree(files);
-  const out: TreemapRect[] = [];
-  squarifyTree(root, { x: 0, y: 0, w: width, h: height }, out);
-  return out;
+  const leaves: TreemapRect[] = [];
+  const folders: TreemapFolderRect[] = [];
+  squarifyTree(root, { x: 0, y: 0, w: width, h: height }, 0, leaves, folders);
+  return { leaves, folders };
 }
 
 function buildTree(files: ScanFileRecord[]): TreeNode {
   const root: TreeNode = {
     name: "<root>",
+    path: "",
     totalSize: 0,
+    fileCount: 0,
     isFile: false,
     children: new Map(),
   };
@@ -232,15 +287,20 @@ function buildTree(files: ScanFileRecord[]): TreeNode {
   for (const file of files) {
     const components = file.parentPath.split(PATH_SEP).filter(Boolean);
     let current = root;
+    let cumulativePath = "";
 
     // Walk down (or create) directory nodes corresponding to the file's
-    // parent path. We bubble totalSize up at the end in a single pass.
+    // parent path. We bubble totalSize/fileCount up at the end in a
+    // single pass.
     for (const comp of components) {
+      cumulativePath = cumulativePath ? `${cumulativePath}/${comp}` : comp;
       let child = current.children.get(comp);
       if (!child) {
         child = {
           name: comp,
+          path: cumulativePath,
           totalSize: 0,
+          fileCount: 0,
           isFile: false,
           children: new Map(),
         };
@@ -257,20 +317,25 @@ function buildTree(files: ScanFileRecord[]): TreeNode {
       : file.name;
     current.children.set(leafKey, {
       name: file.name,
+      path: file.path,
       totalSize: file.size,
+      fileCount: 1,
       isFile: true,
       file,
       children: new Map(),
     });
   }
 
-  // Bubble totalSize bottom-up.
-  computeTotalSize(root);
+  // Bubble totalSize + fileCount bottom-up.
+  computeAggregates(root);
 
   // Collapse single-child chains at the top — if every file is in
   // C:\Users\foo\... we don't want three nested rectangles for C:, Users,
   // foo before the meaningful content. Walk down through any node that
   // has exactly one non-file child until we hit a branch point.
+  //
+  // The pruned node becomes the logical root: its path is used as the
+  // base for relative folder paths shown to the user.
   let pruned: TreeNode = root;
   while (pruned.children.size === 1) {
     const onlyChild = pruned.children.values().next().value!;
@@ -280,26 +345,52 @@ function buildTree(files: ScanFileRecord[]): TreeNode {
   return pruned;
 }
 
-function computeTotalSize(node: TreeNode): number {
-  if (node.isFile) return node.totalSize;
-  let total = 0;
+function computeAggregates(node: TreeNode): { size: number; count: number } {
+  if (node.isFile) return { size: node.totalSize, count: 1 };
+  let size = 0;
+  let count = 0;
   for (const child of node.children.values()) {
-    total += computeTotalSize(child);
+    const sub = computeAggregates(child);
+    size += sub.size;
+    count += sub.count;
   }
-  node.totalSize = total;
-  return total;
+  node.totalSize = size;
+  node.fileCount = count;
+  return { size, count };
 }
 
-function squarifyTree(node: TreeNode, bounds: Rect, out: TreemapRect[]): void {
+function squarifyTree(
+  node: TreeNode,
+  bounds: Rect,
+  depth: number,
+  leaves: TreemapRect[],
+  folders: TreemapFolderRect[],
+): void {
   if (bounds.w < 1 || bounds.h < 1 || node.totalSize <= 0) return;
 
   if (node.isFile && node.file) {
-    out.push({
+    leaves.push({
       ...bounds,
       file: node.file,
       color: colorForExtension(node.file.extension),
     });
     return;
+  }
+
+  // Record this folder's bounds — except for the synthetic pruned root
+  // at depth 0, which covers the whole canvas and isn't useful to outline.
+  if (depth > 0 && node.name !== "<root>") {
+    folders.push({
+      x: bounds.x,
+      y: bounds.y,
+      w: bounds.w,
+      h: bounds.h,
+      path: node.path,
+      name: node.name,
+      totalSize: node.totalSize,
+      fileCount: node.fileCount,
+      depth,
+    });
   }
 
   const children = Array.from(node.children.values()).filter(
@@ -321,7 +412,7 @@ function squarifyTree(node: TreeNode, bounds: Rect, out: TreemapRect[]): void {
   squarifyGeneric(weighted, bounds, totalWeight, childPlacements);
 
   for (const { item, bounds: childBounds } of childPlacements) {
-    squarifyTree(item, childBounds, out);
+    squarifyTree(item, childBounds, depth + 1, leaves, folders);
   }
 }
 

@@ -15,6 +15,7 @@ import type { TreemapLayout } from "../lib/treemap";
 import { Treemap } from "./Treemap";
 
 const MONITORING_NUDGE_DISMISSED_KEY = "diskhound:monitoring-nudge-dismissed";
+const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 
 interface Props {
   snapshot: ScanSnapshot;
@@ -46,6 +47,13 @@ function getInitialExtSidebarCollapsed(): boolean {
   return window.localStorage.getItem(EXT_SIDEBAR_COLLAPSED_KEY) === "1";
 }
 
+function getInitialShowFolders(): boolean {
+  if (typeof window === "undefined") return true;
+  // Default ON — folder boundaries make Tree layout much easier to
+  // parse. Stored as "0" explicitly when the user turns it off.
+  return window.localStorage.getItem(TREEMAP_FOLDERS_STORAGE_KEY) !== "0";
+}
+
 // Dense treemap default — render up to this many files from the full file
 // index on disk. 10k is plenty dense for a WinDirStat feel without hurting
 // canvas render performance.
@@ -56,6 +64,7 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
   const [treemapLayout, setTreemapLayout] = useState<TreemapLayout>(getInitialTreemapLayout);
   const [extSidebarCollapsed, setExtSidebarCollapsed] = useState<boolean>(getInitialExtSidebarCollapsed);
+  const [showFolders, setShowFolders] = useState<boolean>(getInitialShowFolders);
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
@@ -115,6 +124,11 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
     window.localStorage.setItem(EXT_SIDEBAR_COLLAPSED_KEY, extSidebarCollapsed ? "1" : "0");
   }, [extSidebarCollapsed]);
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(TREEMAP_FOLDERS_STORAGE_KEY, showFolders ? "1" : "0");
+  }, [showFolders]);
+
 
   return (
     <div className="overview">
@@ -162,6 +176,21 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
                     Tree
                   </button>
                 </div>
+                {/* Folder delineation toggle — only meaningful in Tree mode */}
+                {treemapLayout === "tree" && (
+                  <button
+                    type="button"
+                    className={`treemap-folders-toggle ${showFolders ? "active" : ""}`}
+                    aria-pressed={showFolders}
+                    title={showFolders ? "Hide folder boundaries" : "Show folder boundaries"}
+                    onClick={() => setShowFolders((v) => !v)}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                      <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
+                    </svg>
+                    Folders
+                  </button>
+                )}
                 {/* Mode: whether to extract dominant files into cards (only
                     meaningful for Size layout) */}
                 {hasDominantFiles && treemapLayout === "size" && (
@@ -235,7 +264,12 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
             )}
 
             <div className="treemap-stage">
-              <Treemap files={treemapFiles} areaMode={treemapAreaMode} layout={treemapLayout} />
+              <Treemap
+                files={treemapFiles}
+                areaMode={treemapAreaMode}
+                layout={treemapLayout}
+                showFolderOutlines={showFolders}
+              />
             </div>
           </div>
         </div>
