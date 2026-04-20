@@ -14,7 +14,18 @@ import { toast } from "./Toasts";
 type SortField = "memory" | "cpu" | "name" | "pid";
 type SortDir = "asc" | "desc";
 type ViewMode = "list" | "treemap" | "heatmap";
-export type CpuScale = "system" | "per-core";
+/**
+ * CPU percent display mode:
+ * - "overall": each process shown as its share of 100% total system CPU.
+ *   Matches Task Manager / Activity Monitor. An idle process on an
+ *   otherwise-idle machine reads 0%.
+ * - "active": each process shown as its share of the CURRENT CPU load.
+ *   The active processes sum to ~100%. Great for "when my CPU is busy,
+ *   WHO'S driving it?" regardless of whether that's 5% or 95% of the
+ *   machine. Same 0% for idle processes, but non-idle ones get
+ *   meaningful numbers even during light load.
+ */
+export type CpuScale = "overall" | "active";
 
 const DEFAULT_REFRESH_MS = 5_000;
 const MIN_REFRESH_MS = 2_000;
@@ -24,8 +35,12 @@ const REFRESH_MS_KEY = "diskhound:memory-refresh-ms";
 const CPU_SCALE_KEY = "diskhound:cpu-scale";
 
 function getInitialCpuScale(): CpuScale {
-  if (typeof window === "undefined") return "system";
-  return window.localStorage.getItem(CPU_SCALE_KEY) === "per-core" ? "per-core" : "system";
+  if (typeof window === "undefined") return "overall";
+  const raw = window.localStorage.getItem(CPU_SCALE_KEY);
+  // Accept legacy keys ("system" → "overall", "per-core" → "active") so
+  // users who flipped the switch on a prior build keep their preference.
+  if (raw === "active" || raw === "per-core") return "active";
+  return "overall";
 }
 
 function getInitialViewMode(): ViewMode {
@@ -89,6 +104,12 @@ export function MemoryView() {
   // it'd be reset every time the user clicked away and back.
   const historyRef = useRef<Map<number, ProcessHistoryEntry>>(new Map());
   const historyLastSampleRef = useRef({ value: 0 });
+  // Parallel rolling record of "total per-core CPU activity at each
+  // tick" — used by the Heatmap's Active mode to divide each process's
+  // per-core sample by the total at that same tick. Capped to the same
+  // HEATMAP_MAX_SAMPLES so indices stay aligned with per-process
+  // entry.samples (same tick positions, same shift policy).
+  const historyTotalsRef = useRef<number[]>([]);
   const [historyVersion, setHistoryVersion] = useState(0);
   const [samplesCollected, setSamplesCollected] = useState(0);
 
@@ -103,17 +124,37 @@ export function MemoryView() {
   }, [cpuScale]);
 
   // Project the chosen CPU scale onto every process's cpuPercent so
-  // downstream consumers (list, treemap, heatmap, detail popover) don't
+  // downstream consumers (list, treemap, heatmap detail popover) don't
   // each need a scale-aware code path. The raw per-core value stays
   // available via cpuPercentPerCore for anyone who needs it.
+  //
+  // "overall" = pass-through (cpuPercent is already the 0-100 system-
+  //   wide value set by the sampler).
+  // "active"  = share of current CPU load. Each process's per-core
+  //   value divided by the sum of all processes' per-core values,
+  //   times 100. Non-zero processes sum to ~100% — so if your CPU is
+  //   at 2% overall and Chrome is doing almost all of that, Chrome
+  //   reads ~95% Active while showing only ~1.5% Overall.
   const scaledSnapshot = useMemo<SystemMemorySnapshot | null>(() => {
     if (!snapshot) return null;
-    if (cpuScale === "system") return snapshot;
+    if (cpuScale === "overall") return snapshot;
+    const totalPerCore = snapshot.processes.reduce(
+      (sum, p) => sum + (p.cpuPercentPerCore ?? 0),
+      0,
+    );
+    if (totalPerCore <= 0) {
+      // Everything idle. Short-circuit so we don't blast zero-ratio
+      // math over hundreds of processes.
+      return snapshot;
+    }
     return {
       ...snapshot,
       processes: snapshot.processes.map((p) => ({
         ...p,
-        cpuPercent: p.cpuPercentPerCore,
+        cpuPercent:
+          p.cpuPercentPerCore !== null
+            ? Math.min(100, (p.cpuPercentPerCore / totalPerCore) * 100)
+            : p.cpuPercent,
       })),
     };
   }, [snapshot, cpuScale]);
@@ -169,6 +210,20 @@ export function MemoryView() {
     if (!snapshot || snapshot.isStale) return;
     const advanced = updateProcessHistory(historyRef.current, snapshot, historyLastSampleRef.current);
     if (advanced) {
+      // Track the total per-core activity at THIS tick so Active mode
+      // in the heatmap has a divisor for each historical column. Kept
+      // in the same rolling-window shape as per-process samples.
+      const totalPerCore = snapshot.processes.reduce(
+        (sum, p) => sum + (p.cpuPercentPerCore ?? 0),
+        0,
+      );
+      historyTotalsRef.current.push(totalPerCore);
+      // The trim threshold matches ProcessHeatmap's HEATMAP_MAX_SAMPLES
+      // (60). Intentionally hardcoded here to avoid an import cycle;
+      // if the constant ever moves, update both places.
+      if (historyTotalsRef.current.length > 60) {
+        historyTotalsRef.current.shift();
+      }
       setSamplesCollected((n) => Math.min(n + 1, 9999));
       setHistoryVersion((v) => v + 1);
     }
@@ -331,26 +386,29 @@ export function MemoryView() {
         />
         <div className="memory-toolbar-spacer" />
         {/* CPU scale toggle — shown everywhere so List/Treemap/Heatmap all
-         * stay in sync. "System" matches Task Manager (divide by core
-         * count); "Per-core" is the raw metric where 100% = one core pinned. */}
+         * stay in sync. "Overall" matches Task Manager (each process
+         * as share of 100% total system). "Active" shows each process's
+         * share of the CURRENT load — non-idle processes sum to ~100%
+         * so you can spot "when my CPU is busy, who's driving it?" even
+         * during light overall load. */}
         <div className="memory-cpu-scale-switch" role="tablist" aria-label="CPU scale">
           <button
             type="button"
-            className={`memory-cpu-scale-btn ${cpuScale === "system" ? "active" : ""}`}
-            aria-pressed={cpuScale === "system"}
-            title="System-wide % (0-100, matches Task Manager)"
-            onClick={() => setCpuScale("system")}
+            className={`memory-cpu-scale-btn ${cpuScale === "overall" ? "active" : ""}`}
+            aria-pressed={cpuScale === "overall"}
+            title="Overall — % of total system CPU. Idle machine ≈ 0% across the board. Matches Task Manager."
+            onClick={() => setCpuScale("overall")}
           >
-            System
+            Overall
           </button>
           <button
             type="button"
-            className={`memory-cpu-scale-btn ${cpuScale === "per-core" ? "active" : ""}`}
-            aria-pressed={cpuScale === "per-core"}
-            title="Per-core % (100% = one full core pinned; can exceed 100% on multi-threaded workloads)"
-            onClick={() => setCpuScale("per-core")}
+            className={`memory-cpu-scale-btn ${cpuScale === "active" ? "active" : ""}`}
+            aria-pressed={cpuScale === "active"}
+            title="Active — share of current CPU load. Busy processes sum to ~100% regardless of how much of the machine is in use."
+            onClick={() => setCpuScale("active")}
           >
-            Per-core
+            Active
           </button>
         </div>
         {loadingPhase === "refreshing" && (
@@ -395,6 +453,7 @@ export function MemoryView() {
         <ProcessHeatmap
           key={historyVersion}
           history={historyRef.current}
+          historyTotals={historyTotalsRef.current}
           sampleCount={samplesCollected}
           filter={filter}
           cpuScale={cpuScale}

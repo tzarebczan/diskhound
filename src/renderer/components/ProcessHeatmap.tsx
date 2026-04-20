@@ -65,6 +65,10 @@ interface HoverCell {
   row: ProcessHistoryEntry;
   sampleIdx: number;
   cpu: number | null;
+  /** How many ticks back from "now" this hover cell sits. Needed so the
+   *  tooltip can scale through Active mode's per-tick divisor at the
+   *  correct column. 0 = newest tick. */
+  ticksBack: number;
   time: number;
   clientX: number;
   clientY: number;
@@ -163,29 +167,46 @@ function colorForCpu(cpu: number): string {
   return "#fbbf24";
 }
 
-function computeRow(entry: ProcessHistoryEntry): HeatmapRow {
-  const numericSamples = entry.samples.filter((s): s is number => typeof s === "number");
+/**
+ * Compute row aggregates AFTER scaling each sample through the active-
+ * mode-aware `scaleFn`. We can't "scale the aggregate" because Active
+ * mode uses a different divisor per tick, so we scale each sample
+ * first, then aggregate the scaled values. Overall mode is a constant
+ * divisor (cpuCount) so it could short-circuit, but the extra loop is
+ * cheap and keeps the code path unified.
+ */
+function computeRow(
+  entry: ProcessHistoryEntry,
+  scaleFn: (v: number, ticksBack: number) => number,
+): HeatmapRow {
+  const len = entry.samples.length;
+  const scaled: number[] = [];
+  for (let i = 0; i < len; i++) {
+    const s = entry.samples[i];
+    if (typeof s !== "number") continue;
+    scaled.push(scaleFn(s, len - 1 - i));
+  }
   let avg = 0;
   let max = 0;
-  if (numericSamples.length > 0) {
+  if (scaled.length > 0) {
     let sum = 0;
-    for (const s of numericSamples) {
+    for (const s of scaled) {
       sum += s;
       if (s > max) max = s;
     }
-    avg = sum / numericSamples.length;
+    avg = sum / scaled.length;
   }
-  const last = numericSamples[numericSamples.length - 1] ?? 0;
+  const last = scaled[scaled.length - 1] ?? 0;
 
-  // Spike detection: is the most-recent sample ≥ SPIKE_DELTA_PCT above
-  // the baseline (avg of the prior SPIKE_BASELINE_SAMPLES samples)?
+  // Spike detection operates on SCALED values so the threshold means
+  // the same thing the user sees. In Overall mode, "+50" = CPU
+  // utilization jumped 50 points; in Active mode, "+50" = process's
+  // share of current load jumped 50 points. Both are interesting.
   let hasRecentSpike = false;
-  const len = entry.samples.length;
-  for (let i = Math.max(0, len - SPIKE_VISIBLE_FOR_SAMPLES); i < len; i++) {
-    const cur = entry.samples[i];
-    if (typeof cur !== "number") continue;
+  for (let i = Math.max(0, scaled.length - SPIKE_VISIBLE_FOR_SAMPLES); i < scaled.length; i++) {
+    const cur = scaled[i]!;
     const from = Math.max(0, i - SPIKE_BASELINE_SAMPLES);
-    const baselineWindow = entry.samples.slice(from, i).filter((s): s is number => typeof s === "number");
+    const baselineWindow = scaled.slice(from, i);
     if (baselineWindow.length < 2) continue;
     const baseline = baselineWindow.reduce((acc, v) => acc + v, 0) / baselineWindow.length;
     if (cur - baseline >= SPIKE_DELTA_PCT) {
@@ -201,13 +222,26 @@ function computeRow(entry: ProcessHistoryEntry): HeatmapRow {
 
 interface Props {
   history: Map<number, ProcessHistoryEntry>;
+  /**
+   * Per-tick total of per-core CPU activity, kept in the same rolling-
+   * window shape as each entry's `samples` array. Used by "active"
+   * scale to divide a sample by the total at that same tick so the
+   * colored bands represent a process's SHARE of current load rather
+   * than its absolute utilization.
+   */
+  historyTotals: number[];
   /** How many samples we've collected so far — drives loading copy. */
   sampleCount: number;
   filter: string;
-  /** "system" = divide samples by cpuCount so 0-100 ≈ whole machine
-   *  busy (matches Task Manager). "per-core" = raw samples (one core
-   *  pinned = 100%, multi-threaded workloads can exceed 100%). */
-  cpuScale: "system" | "per-core";
+  /**
+   * CPU scale:
+   * - "overall": divide by cpuCount so 0-100 matches Task Manager.
+   *   Idle machine = near-zero everywhere.
+   * - "active": divide by the per-tick total so busy processes sum
+   *   to ~100%. Highlights WHO is driving the current load,
+   *   regardless of how much machine is in use.
+   */
+  cpuScale: "overall" | "active";
   cpuCount: number;
   onKill: (p: ProcessInfo, hard: boolean) => void;
   /** Right-click on a row should open the same compact menu the treemap uses. */
@@ -216,6 +250,7 @@ interface Props {
 
 export function ProcessHeatmap({
   history,
+  historyTotals,
   sampleCount,
   filter,
   cpuScale,
@@ -230,11 +265,21 @@ export function ProcessHeatmap({
   const rowsRef = useRef<HeatmapRow[]>([]);
 
   // Scale a raw-per-core sample to the currently-chosen display mode.
-  // History stores per-core values; in "system" mode we divide by
-  // cpuCount so 0-100 ≈ whole machine busy (Task-Manager-style).
-  const scale = cpuScale === "system" && cpuCount > 0
-    ? (v: number) => v / cpuCount
-    : (v: number) => v;
+  //
+  // Because "active" needs the PER-TICK total (different divisor per
+  // time column), we take a sample and its index-from-most-recent
+  // rather than just a value. "overall" ignores the index — divisor is
+  // constant (cpuCount). Index is measured as "ticks back from the
+  // newest tick," where 0 = newest.
+  const scale = cpuScale === "overall"
+    ? (v: number, _ticksBack: number) =>
+        cpuCount > 0 ? Math.min(100, v / cpuCount) : Math.min(100, v)
+    : (v: number, ticksBack: number) => {
+        const totalIdx = historyTotals.length - 1 - ticksBack;
+        const total = totalIdx >= 0 ? historyTotals[totalIdx] : 0;
+        if (!total || total <= 0) return 0;
+        return Math.min(100, (v / total) * 100);
+      };
 
   // Observe the canvas container to keep dims in sync with the stage
   useEffect(() => {
@@ -260,7 +305,7 @@ export function ProcessHeatmap({
     for (const entry of history.values()) {
       if (q && !entry.name.toLowerCase().includes(q) && String(entry.pid) !== q) continue;
       if (entry.samples.every((s) => s === null || s === 0)) continue;
-      computed.push(computeRow(entry));
+      computed.push(computeRow(entry, scale));
     }
     computed.sort((a, b) => b.max - a.max);
     return computed.slice(0, rowCount);
@@ -294,15 +339,16 @@ export function ProcessHeatmap({
       const samples = row.entry.samples;
       const offset = samples.length - visibleSampleCount;
 
-      // ── Cells ── colours + sparkline all use the SCALED value so
-      // switching between System / Per-core recoloring doesn't need
-      // any state refresh.
+      // ── Cells ── colours + sparkline use scale() with an explicit
+      // ticksBack so Active mode's per-tick divisor lines up correctly
+      // with each column.
       for (let col = 0; col < visibleSampleCount; col++) {
         const idx = offset + col;
         if (idx < 0) continue;
         const rawCpu = samples[idx];
         if (rawCpu === null || rawCpu === undefined) continue;
-        ctx.fillStyle = colorForCpu(scale(rawCpu));
+        const ticksBack = samples.length - 1 - idx;
+        ctx.fillStyle = colorForCpu(scale(rawCpu, ticksBack));
         ctx.fillRect(col * cellW, y, Math.ceil(cellW) + 0.5, innerRowH);
       }
 
@@ -318,8 +364,9 @@ export function ProcessHeatmap({
         if (idx < 0) continue;
         const rawCpu = samples[idx];
         if (rawCpu === null || rawCpu === undefined) continue;
+        const ticksBack = samples.length - 1 - idx;
         const cx = col * cellW + cellW / 2;
-        const norm = Math.min(100, Math.max(0, scale(rawCpu))) / 100;
+        const norm = Math.min(100, Math.max(0, scale(rawCpu, ticksBack))) / 100;
         // Clamp line 2px inside the row top/bottom so strokes don't visually
         // straddle the neighboring rows.
         const cy = y + 2 + (1 - norm) * (innerRowH - 4);
@@ -375,6 +422,7 @@ export function ProcessHeatmap({
       row: row.entry,
       sampleIdx: idx,
       cpu: row.entry.samples[idx] ?? null,
+      ticksBack: row.entry.samples.length - 1 - idx,
       time: row.entry.sampleTimes[idx] ?? 0,
       clientX: e.clientX,
       clientY: e.clientY,
@@ -428,7 +476,6 @@ export function ProcessHeatmap({
             <HeatmapRowLabel
               key={row.entry.pid}
               row={row}
-              scale={scale}
               scaleLabel={cpuScale}
               onKill={onKill}
               onContextMenu={(p, x, y) => onOpenContextMenu(p, x, y)}
@@ -467,18 +514,16 @@ export function ProcessHeatmap({
 
 function HeatmapRowLabel(props: {
   row: HeatmapRow;
-  scale: (v: number) => number;
-  scaleLabel: "system" | "per-core";
+  scaleLabel: "overall" | "active";
   onKill: (p: ProcessInfo, hard: boolean) => void;
   onContextMenu: (p: ProcessInfo, x: number, y: number) => void;
 }) {
-  const { row, scale, scaleLabel, onContextMenu } = props;
+  const { row, scaleLabel, onContextMenu } = props;
   const entry = row.entry;
   const isGhost = entry.missingStreak > 0;
-  const avg = scale(row.avg);
-  const max = scale(row.max);
-  const last = scale(row.last);
-  const scaleHint = scaleLabel === "system" ? "system-wide" : "per core";
+  // row.avg/max/last are pre-scaled by computeRow() — no double-scaling here.
+  const { avg, max, last } = row;
+  const scaleHint = scaleLabel === "overall" ? "overall" : "share of active";
   return (
     <div
       className={`process-heatmap-label ${isGhost ? "ghost" : ""}`}
@@ -506,19 +551,21 @@ function HeatmapRowLabel(props: {
 
 function HeatmapTooltip({ hover, scale, scaleLabel }: {
   hover: HoverCell;
-  scale: (v: number) => number;
-  scaleLabel: "system" | "per-core";
+  /** Scale fn that takes a raw sample + its ticks-back-from-now index,
+   *  so Active mode can pick the right per-tick divisor. */
+  scale: (v: number, ticksBack: number) => number;
+  scaleLabel: "overall" | "active";
 }) {
   const tx = Math.min(hover.clientX + 12, window.innerWidth - 260);
   const ty = Math.min(hover.clientY + 12, window.innerHeight - 80);
-  const scaled = hover.cpu === null ? null : scale(hover.cpu);
+  const scaled = hover.cpu === null ? null : scale(hover.cpu, hover.ticksBack);
   const cpuLabel = scaled === null ? "no sample" : `${scaled.toFixed(1)}%`;
   const timeLabel = new Date(hover.time).toLocaleTimeString([], {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",
   });
-  const scaleHint = scaleLabel === "system" ? "system-wide" : "per core";
+  const scaleHint = scaleLabel === "overall" ? "overall" : "share of active";
   return (
     <div className="process-heatmap-tooltip" style={{ left: tx, top: ty }}>
       <div className="process-heatmap-tooltip-name">{hover.row.name}</div>
