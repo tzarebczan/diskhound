@@ -886,36 +886,96 @@ void app.whenReady().then(async () => {
 
   // ── IPC: Duplicate Detection ────────────────────────────
 
-  ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string) => {
+  ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string, options?: { minSizeBytes?: number }) => {
     if (activeDuplicateScan) {
       activeDuplicateScan.cancel();
       activeDuplicateScan = null;
     }
 
-    activeDuplicateScan = runDuplicateScan(Path.resolve(rootPath), {
-      onProgress: (progress) => {
-        mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, progress);
+    // Try to find an existing scan index whose root is an ancestor of the
+    // duplicates scope — streaming that index is much faster and lower
+    // memory than re-walking the filesystem. Fall back to walk if no
+    // suitable index exists or if the path isn't under any known scan.
+    const resolvedRoot = Path.resolve(rootPath);
+    const indexPath = findIndexCoveringPath(resolvedRoot);
+
+    activeDuplicateScan = runDuplicateScan(
+      resolvedRoot,
+      {
+        onProgress: (progress) => {
+          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, progress);
+        },
+        onResult: (result) => {
+          mainWindow?.webContents.send(DUPLICATE_RESULT_CHANNEL, result);
+          activeDuplicateScan = null;
+          sendToast("success", "Duplicate scan complete",
+            `Found ${result.totalGroups} group${result.totalGroups === 1 ? "" : "s"}, ${formatBytesShort(result.totalWastedBytes)} reclaimable.`);
+        },
+        onError: (error) => {
+          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
+            status: "error",
+            filesWalked: 0,
+            candidateGroups: 0,
+            filesHashed: 0,
+            groupsConfirmed: 0,
+            elapsedMs: 0,
+            errorMessage: error.message,
+          });
+          activeDuplicateScan = null;
+        },
       },
-      onResult: (result) => {
-        mainWindow?.webContents.send(DUPLICATE_RESULT_CHANNEL, result);
-        activeDuplicateScan = null;
-        sendToast("success", "Duplicate scan complete",
-          `Found ${result.totalGroups} group${result.totalGroups === 1 ? "" : "s"}, ${formatBytesShort(result.totalWastedBytes)} reclaimable.`);
+      {
+        indexPath,
+        minSizeBytes: options?.minSizeBytes,
       },
-      onError: (error) => {
-        mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
-          status: "error",
-          filesWalked: 0,
-          candidateGroups: 0,
-          filesHashed: 0,
-          groupsConfirmed: 0,
-          elapsedMs: 0,
-          errorMessage: error.message,
-        });
-        activeDuplicateScan = null;
-      },
-    });
+    );
   });
+
+  /**
+   * Search the scan-history index for the most recent scan whose root
+   * is either equal to or an ancestor of `path`. Returns the absolute
+   * path to that scan's gzipped NDJSON, or null if no match.
+   *
+   * We prefer shorter (more ancestral) roots when multiple cover the
+   * target, because those indexes contain the fullest dataset. For the
+   * common case where a user scans `C:\` then runs duplicates on
+   * `C:\Users\foo`, this finds the `C:\` index correctly.
+   */
+  function findIndexCoveringPath(path: string): string | null {
+    const normalizedTarget = Path.resolve(path).toLowerCase();
+    // Walk all known history entries, pick the best (shortest root path
+    // that still covers our target, most recently scanned among those).
+    let best: { id: string; rootLen: number; scannedAt: number } | null = null;
+    const now = Date.now();
+    // Iterate through all roots we've ever scanned. The history store
+    // doesn't expose "all roots", so we scan the settings' recent list
+    // (which is bounded) and fall back to no-match.
+    const currentSettings = settingsStore?.get();
+    const recent = currentSettings?.recentScans ?? [];
+    for (const r of recent) {
+      const normalizedRoot = Path.resolve(r.path).toLowerCase();
+      const isUnder = normalizedTarget === normalizedRoot ||
+        normalizedTarget.startsWith(normalizedRoot + Path.sep) ||
+        normalizedTarget.startsWith(normalizedRoot + "/");
+      if (!isUnder) continue;
+      const history = getScanHistory(r.path);
+      const latest = history[0];
+      if (!latest) continue;
+      const candidate = indexFilePath(latest.id);
+      if (!FS_SYNC.existsSync(candidate)) continue;
+      // Prefer shorter root. Among equal lengths, most recent wins.
+      if (
+        !best ||
+        normalizedRoot.length < best.rootLen ||
+        (normalizedRoot.length === best.rootLen && latest.scannedAt > best.scannedAt)
+      ) {
+        best = { id: latest.id, rootLen: normalizedRoot.length, scannedAt: latest.scannedAt };
+      }
+    }
+    // Unused — keeps "now" available if we later add age cutoffs.
+    void now;
+    return best ? indexFilePath(best.id) : null;
+  }
 
   ipcMain.handle("diskhound:cancel-duplicate-scan", () => {
     if (activeDuplicateScan) {

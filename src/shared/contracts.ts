@@ -460,6 +460,20 @@ export interface DuplicateScanProgress {
   groupsConfirmed: number;
   elapsedMs: number;
   errorMessage: string | null;
+  /** "index" when we streamed the persisted scan index (fast path);
+   *  "walk" when we fell back to a fresh filesystem walk. */
+  source?: "index" | "walk";
+  /** Minimum file size in bytes that was considered. Defaults to 1 MB. */
+  minSizeBytes?: number;
+}
+
+export interface DuplicateScanOptions {
+  /**
+   * Skip files smaller than this. Most "wasted space" lives in big files
+   * anyway, and a 4 KB icon-cache duplicate isn't worth the memory cost
+   * of hashing.
+   */
+  minSizeBytes?: number;
 }
 
 // ── View Types ──────────────────────────────────────────────
@@ -518,7 +532,7 @@ export interface DiskhoundNativeApi {
   pickMoveDestination: () => Promise<string | null>;
 
   // Duplicate Detection
-  startDuplicateScan: (rootPath: string) => Promise<void>;
+  startDuplicateScan: (rootPath: string, options?: DuplicateScanOptions) => Promise<void>;
   cancelDuplicateScan: () => Promise<void>;
   onDuplicateProgress: (listener: (progress: DuplicateScanProgress) => void) => () => void;
   onDuplicateResult: (listener: (result: DuplicateAnalysis) => void) => () => void;

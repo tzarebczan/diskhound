@@ -202,34 +202,54 @@ struct ScanState {
     /// Baseline used by the Phase-1 mtime-skip optimization. None when the
     /// caller didn't pass --baseline-index or when parsing it failed.
     baseline: Option<Baseline>,
+    /// Directory paths (normalized) whose subtrees were inherited from the
+    /// baseline during the walk. After the walk completes we do one more
+    /// streaming pass over the baseline to copy file records under these
+    /// prefixes into the new index + update top-N file and extension stats.
+    inherited_prefixes: Vec<String>,
     /// Diagnostic counters — emitted on stderr so we can confirm the fast
     /// path actually fires in production builds.
     inherited_dirs: u64,
     inherited_files: u64,
 }
 
-/// Preloaded baseline from a previous scan's NDJSON index. Stores per-
-/// directory mtimes plus all file records grouped by their parent path so
-/// we can inherit unchanged subtrees without re-walking them.
+/// Preloaded baseline from a previous scan's NDJSON index — streaming
+/// variant that keeps per-directory metadata in memory but NOT individual
+/// file records. For a drive with 7M files this holds ~150 MB of state
+/// instead of ~2 GB, because cumulative file counts + sizes are O(dirs)
+/// rather than O(files).
+///
+/// During the walk we use this to cheaply decide "is this dir's mtime
+/// unchanged" and "how many files/bytes live under this dir" so running
+/// progress counters stay accurate. After the walk we stream the full
+/// baseline index a second time to copy actual file records into the new
+/// index file for the subtrees we inherited.
 struct Baseline {
+    baseline_path: PathBuf,
     dir_mtimes: HashMap<String, u64>,
-    files_by_parent: HashMap<String, Vec<ScanFileRecord>>,
-    /// All directory paths present in the baseline — needed to re-emit
-    /// dir entries in the new index for subtrees we skipped.
+    /// Recursive total file count under each directory (bubbled up from
+    /// leaves during load). Indexed by normalized dir path.
+    dir_file_counts: HashMap<String, u64>,
+    /// Recursive total bytes under each directory.
+    dir_total_sizes: HashMap<String, u64>,
+    /// Set of all dir paths present in the baseline — used for re-emitting
+    /// dir entries under inherited subtrees in the new index.
     dirs: HashSet<String>,
 }
 
 impl Baseline {
-    /// Read a gzipped NDJSON index file and build a Baseline. Returns None
-    /// on any I/O or parse failure; callers treat that as "no baseline
-    /// available" and fall back to a full walk.
-    fn load(path: &Path) -> Option<Baseline> {
+    /// First pass over the baseline NDJSON: collect per-directory metadata
+    /// (mtimes + cumulative file counts + cumulative bytes) without
+    /// materializing individual file records. File data is re-streamed in
+    /// `stream_inherited_files_into` after the walk completes.
+    fn load_metadata(path: &Path) -> Option<Baseline> {
         let file = File::open(path).ok()?;
         let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
 
         let mut dir_mtimes: HashMap<String, u64> = HashMap::new();
-        let mut files_by_parent: HashMap<String, Vec<ScanFileRecord>> = HashMap::new();
         let mut dirs: HashSet<String> = HashSet::new();
+        let mut dir_file_counts: HashMap<String, u64> = HashMap::new();
+        let mut dir_total_sizes: HashMap<String, u64> = HashMap::new();
 
         for line in reader.lines() {
             let Ok(line) = line else { continue };
@@ -242,12 +262,11 @@ impl Baseline {
             let Some(path_str) = value.get("p").and_then(|v| v.as_str()) else {
                 continue;
             };
-            let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
             let is_dir = value.get("t").and_then(|v| v.as_str()) == Some("d");
-
             let normalized = normalize_path(Path::new(path_str));
 
             if is_dir {
+                let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
                 dir_mtimes.insert(normalized.clone(), mtime);
                 dirs.insert(normalized);
                 continue;
@@ -257,60 +276,33 @@ impl Baseline {
                 continue;
             };
 
-            let name = Path::new(path_str)
-                .file_name()
-                .and_then(OsStr::to_str)
-                .unwrap_or("")
-                .to_string();
-            let parent = Path::new(path_str)
-                .parent()
-                .map(normalize_path)
-                .unwrap_or_default();
-
-            let record = ScanFileRecord {
-                path: normalized,
-                name: name.clone(),
-                parent_path: parent.clone(),
-                extension: file_extension(&name),
-                size,
-                modified_at: mtime,
-            };
-
-            files_by_parent.entry(parent).or_default().push(record);
+            // Bubble the file's size/count up to every ancestor directory.
+            // This gives us O(1) "how much is under dir D" lookups during
+            // the walk without having to store individual file records.
+            let mut current = Path::new(path_str).parent().map(normalize_path);
+            while let Some(dir) = current {
+                if dir.is_empty() {
+                    break;
+                }
+                *dir_file_counts.entry(dir.clone()).or_insert(0) += 1;
+                *dir_total_sizes.entry(dir.clone()).or_insert(0) += size;
+                let parent = Path::new(&dir).parent().map(normalize_path);
+                if parent.as_deref().map(str::is_empty).unwrap_or(true)
+                    || parent.as_deref() == Some(dir.as_str())
+                {
+                    break;
+                }
+                current = parent;
+            }
         }
 
         Some(Baseline {
+            baseline_path: path.to_path_buf(),
             dir_mtimes,
-            files_by_parent,
+            dir_file_counts,
+            dir_total_sizes,
             dirs,
         })
-    }
-
-    /// Return all file records at or under the given directory path.
-    fn inherit_subtree(&self, dir_path: &str) -> Vec<ScanFileRecord> {
-        let mut out: Vec<ScanFileRecord> = Vec::new();
-
-        // Direct children
-        if let Some(list) = self.files_by_parent.get(dir_path) {
-            out.extend(list.iter().cloned());
-        }
-
-        // Descendants — anyone whose parent path starts with our prefix.
-        let prefix = if dir_path.ends_with(std::path::MAIN_SEPARATOR) {
-            dir_path.to_string()
-        } else {
-            format!("{}{}", dir_path, std::path::MAIN_SEPARATOR)
-        };
-        for (parent, list) in &self.files_by_parent {
-            if parent == dir_path {
-                continue;
-            }
-            if parent.starts_with(&prefix) {
-                out.extend(list.iter().cloned());
-            }
-        }
-
-        out
     }
 
     /// Return all directory paths at or under the given root. Used when we
@@ -327,6 +319,107 @@ impl Baseline {
             .cloned()
             .collect()
     }
+}
+
+/// Second pass: stream the baseline NDJSON and copy file records (not
+/// dir records — those were emitted during the walk) into the new index
+/// for any inherited subtree. Also updates the scan's `largest_files`
+/// and `extension_totals` so post-inherit snapshots are complete.
+///
+/// Extracted as a free function instead of an impl method so it can
+/// borrow state mutably without fighting the borrow checker against a
+/// live &self.baseline borrow.
+fn stream_inherited_files_into(
+    baseline_path: &Path,
+    inherited_prefixes: &[String],
+    state: &mut ScanState,
+) -> io::Result<()> {
+    if inherited_prefixes.is_empty() {
+        return Ok(());
+    }
+
+    // Pre-compute path-separator-suffixed prefixes so we don't mismatch
+    // `/foo/bar` against `/foo/barbaz/thing.txt`.
+    let normalized_prefixes: Vec<(String, String)> = inherited_prefixes
+        .iter()
+        .map(|p| {
+            let with_sep = if p.ends_with(std::path::MAIN_SEPARATOR) {
+                p.clone()
+            } else {
+                format!("{}{}", p, std::path::MAIN_SEPARATOR)
+            };
+            (p.clone(), with_sep)
+        })
+        .collect();
+
+    let file = File::open(baseline_path)?;
+    let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
+
+    for line in reader.lines() {
+        let Ok(line) = line else { continue };
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(path_str) = value.get("p").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let is_dir = value.get("t").and_then(|v| v.as_str()) == Some("d");
+        if is_dir {
+            // Dir entries were already emitted during the walk's inherit
+            // path, so we don't re-emit them here.
+            continue;
+        }
+
+        let normalized = normalize_path(Path::new(path_str));
+        let under_inherit = normalized_prefixes
+            .iter()
+            .any(|(eq, prefix)| normalized == *eq || normalized.starts_with(prefix.as_str()));
+        if !under_inherit {
+            continue;
+        }
+
+        let Some(size) = value.get("s").and_then(|v| v.as_u64()) else {
+            continue;
+        };
+        let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
+
+        let name = Path::new(path_str)
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_string();
+        let extension = file_extension(&name);
+
+        // Write to new index so the index remains a complete baseline for
+        // the NEXT scan.
+        if let Some(writer) = state.index_writer.as_mut() {
+            let _ = writer.write_entry(&normalized, size, mtime);
+        }
+
+        // Update top-N + extension aggregates. Note: directory_totals +
+        // bytes_seen were updated at inherit time in the walk using the
+        // precomputed dir aggregates, so we skip those here to avoid
+        // double-counting.
+        let parent = Path::new(path_str)
+            .parent()
+            .map(normalize_path)
+            .unwrap_or_default();
+        let file_record = ScanFileRecord {
+            path: normalized,
+            name,
+            parent_path: parent,
+            extension: extension.clone(),
+            size,
+            modified_at: mtime,
+        };
+        upsert_ranked_file(&mut state.largest_files, file_record, state.input.top_file_limit);
+        rollup_extension(&mut state.extension_totals, &extension, size);
+    }
+
+    Ok(())
 }
 
 fn main() {
@@ -532,7 +625,7 @@ fn run() -> Result<(), String> {
     let baseline = input
         .baseline_index
         .as_deref()
-        .and_then(|path| if path.exists() { Baseline::load(path) } else { None });
+        .and_then(|path| if path.exists() { Baseline::load_metadata(path) } else { None });
 
     let mut state = ScanState {
         input: ScanInput {
@@ -556,6 +649,7 @@ fn run() -> Result<(), String> {
         last_emit_elapsed_ms: 0,
         index_writer,
         baseline,
+        inherited_prefixes: Vec::new(),
         inherited_dirs: 0,
         inherited_files: 0,
     };
@@ -698,37 +792,63 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         let directory_path_str = normalize_path(&directory_path);
         let current_mtime = directory_mtime(&directory_path).unwrap_or(0);
 
-        // Gather everything we need from the baseline *before* taking any
-        // mutable borrow of `state` — the record_file() / index_writer calls
-        // below all require &mut state, which conflicts with a live
-        // immutable borrow on state.baseline.
-        let inheritance = state
-            .baseline
-            .as_ref()
-            .and_then(|baseline| {
-                let baseline_mtime = *baseline.dir_mtimes.get(&directory_path_str)?;
-                // 2ms tolerance: some FS round-trips introduce sub-ms drift
-                if current_mtime.abs_diff(baseline_mtime) >= 2 {
-                    return None;
-                }
-                let inherited = baseline.inherit_subtree(&directory_path_str);
-                let subtree_dir_entries: Vec<(String, u64)> = baseline
-                    .subtree_dirs(&directory_path_str)
-                    .into_iter()
-                    .filter_map(|sub| {
-                        baseline.dir_mtimes.get(&sub).map(|m| (sub, *m))
-                    })
-                    .collect();
-                Some((inherited, subtree_dir_entries))
-            });
-
-        if let Some((inherited, subtree_dir_entries)) = inheritance {
-            state.inherited_dirs += 1;
-            state.inherited_files += inherited.len() as u64;
-
-            for file_record in inherited {
-                record_file(state, file_record)?;
+        // Streaming-baseline inheritance path: if this dir's mtime matches
+        // the baseline, we defer the actual file-record copying to a
+        // post-walk streaming pass. During the walk we only:
+        //   1. Record the prefix as "inherited" for later streaming.
+        //   2. Emit dir entries for this dir + all its subtree dirs so
+        //      the new index's directory structure is complete.
+        //   3. Update counters that are cheap to get from per-dir
+        //      aggregates (files_visited, bytes_seen, directory_totals).
+        //
+        // `largest_files` and `extension_totals` get filled in post-walk
+        // during the actual file-record stream. Accept that snapshots
+        // emitted during the walk are slightly incomplete for those —
+        // they'll be corrected before the final `done` snapshot.
+        let inheritance_plan = state.baseline.as_ref().and_then(|baseline| {
+            let baseline_mtime = *baseline.dir_mtimes.get(&directory_path_str)?;
+            if current_mtime.abs_diff(baseline_mtime) >= 2 {
+                return None;
             }
+            let inherited_file_count = baseline
+                .dir_file_counts
+                .get(&directory_path_str)
+                .copied()
+                .unwrap_or(0);
+            let inherited_bytes = baseline
+                .dir_total_sizes
+                .get(&directory_path_str)
+                .copied()
+                .unwrap_or(0);
+            let subtree_dir_entries: Vec<(String, u64)> = baseline
+                .subtree_dirs(&directory_path_str)
+                .into_iter()
+                .filter_map(|sub| baseline.dir_mtimes.get(&sub).map(|m| (sub, *m)))
+                .collect();
+            Some((inherited_file_count, inherited_bytes, subtree_dir_entries))
+        });
+
+        if let Some((inherited_count, inherited_bytes, subtree_dir_entries)) = inheritance_plan {
+            state.inherited_dirs += 1;
+            state.inherited_files += inherited_count;
+            state.files_visited += inherited_count;
+            state.bytes_seen += inherited_bytes;
+            state.inherited_prefixes.push(directory_path_str.clone());
+
+            // Roll up directory totals using the precomputed cumulative
+            // size so the hottest-directories panel is accurate during
+            // the walk, even though individual file records haven't
+            // streamed in yet.
+            rollup_directory_bytes(
+                &state.root_path_string,
+                &directory_path_str,
+                inherited_bytes,
+                inherited_count,
+                &mut state.directory_totals,
+                &mut state.hottest_directories,
+                state.input.top_directory_limit,
+            );
+
             // Re-emit dir entries from the subtree so the new index remains
             // a valid baseline for the next scan.
             if let Some(writer) = state.index_writer.as_mut() {
@@ -737,6 +857,7 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
                     let _ = writer.write_dir_entry(sub, *m);
                 }
             }
+            maybe_emit_progress(state)?;
             continue;
         }
 
@@ -748,15 +869,79 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         enumerate_windows_directory(&directory_path, state, &mut stack)?;
     }
 
+    // Post-walk streaming pass: if any subtrees were inherited, stream the
+    // baseline NDJSON one more time to copy file records + update top-N
+    // and extension stats for those subtrees. This is where the memory
+    // savings pay off — instead of holding every baseline file record in
+    // memory throughout the walk, we touch each one exactly once right
+    // here and release it.
+    if !state.inherited_prefixes.is_empty() {
+        let baseline_path = state.baseline.as_ref().map(|b| b.baseline_path.clone());
+        let inherited_prefixes = state.inherited_prefixes.clone();
+        if let Some(path) = baseline_path {
+            let _ = stream_inherited_files_into(&path, &inherited_prefixes, state);
+            maybe_emit_progress(state)?;
+        }
+    }
+
     // Emit a diagnostic so we can verify the fast path in production.
     if state.baseline.is_some() {
         eprintln!(
-            "[diskhound-native-scanner] Phase-1 inheritance: {} dirs skipped, {} files inherited",
+            "[diskhound-native-scanner] Phase-1 inheritance (streaming): {} dirs skipped, {} files inherited",
             state.inherited_dirs, state.inherited_files,
         );
     }
 
     Ok(())
+}
+
+/// Roll up already-summed file-count + byte-count onto a directory and
+/// all its ancestors. Used by the Phase-1 inherit path where we're
+/// crediting a whole subtree at once rather than one file at a time.
+fn rollup_directory_bytes(
+    root_path: &str,
+    directory_path: &str,
+    bytes: u64,
+    file_count: u64,
+    directory_totals: &mut HashMap<String, DirectoryHotspot>,
+    hottest_directories: &mut Vec<DirectoryHotspot>,
+    dir_limit: usize,
+) {
+    let mut current_path = directory_path.to_string();
+
+    loop {
+        let next_record = {
+            let entry = directory_totals
+                .entry(current_path.clone())
+                .or_insert_with(|| DirectoryHotspot {
+                    path: current_path.clone(),
+                    size: 0,
+                    file_count: 0,
+                    depth: directory_depth(root_path, &current_path),
+                });
+
+            entry.size += bytes;
+            entry.file_count += file_count;
+            entry.clone()
+        };
+
+        upsert_ranked_directory(hottest_directories, next_record, dir_limit);
+
+        if current_path == root_path {
+            return;
+        }
+
+        let parent = Path::new(&current_path)
+            .parent()
+            .map(normalize_path)
+            .unwrap_or_else(|| root_path.to_string());
+
+        if parent == current_path {
+            return;
+        }
+
+        current_path = parent;
+    }
 }
 
 /// Return a directory's last-write time in Unix ms, or None on failure.
