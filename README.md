@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/screenshots/overview.png" alt="DiskHound Overview" width="85%" />
+  <img src="https://github.com/user-attachments/assets/022ad2fe-120a-47fa-bb3c-72a98d47a93c" alt="DiskHound Overview" width="85%" />
 </p>
 
 ---
@@ -57,17 +57,17 @@ Download the latest release for your platform from [**Releases**](https://github
       <sub><b>Duplicates</b> — find identical files by content hash</sub>
     </td>
     <td align="center">
-      <img src="docs/screenshots/changes.png" alt="Changes" width="100%" /><br>
+      <img src="https://github.com/user-attachments/assets/5f090f34-0d77-4853-bcee-4ea5e00aefbf" alt="Changes" width="100%" /><br>
       <sub><b>Changes</b> — diff any two scans with time-range presets</sub>
     </td>
   </tr>
   <tr>
     <td align="center">
-      <img src="docs/screenshots/folders.png" alt="Folders" width="100%" /><br>
+      <img src="https://github.com/user-attachments/assets/44146204-18c3-427a-aaa7-c59b9d01d840" alt="Folders" width="100%" /><br>
       <sub><b>Folders</b> — drill into directories with size breakdowns</sub>
     </td>
     <td align="center">
-      <img src="docs/screenshots/settings.png" alt="Settings" width="100%" /><br>
+      <img src="https://github.com/user-attachments/assets/a5eabf32-3308-4e73-a925-4aea5a436c03" alt="Settings" width="100%" /><br>
       <sub><b>Settings</b> — theme, scanning, monitoring, cleanup</sub>
     </td>
   </tr>
