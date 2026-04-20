@@ -112,7 +112,13 @@ let tray: Tray | null = null;
  */
 const activeScans: Map<string, ActiveScanSession> = new Map();
 const scanKey = (rootPath: string): string => normPath(rootPath);
-let activeDuplicateScan: DuplicateScanHandle | null = null;
+/**
+ * Per-root duplicate scans. Lets users kick off duplicate detection on
+ * multiple drives in parallel without one cancelling the other, and
+ * preserves a running scan when the user navigates away and back.
+ * Key: normPath(rootPath). Value: the handle returned by runDuplicateScan.
+ */
+const activeDuplicateScans: Map<string, DuplicateScanHandle> = new Map();
 let monitoringInterval: ReturnType<typeof setInterval> | null = null;
 let settingsStore: SettingsStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
@@ -957,32 +963,44 @@ void app.whenReady().then(async () => {
   // ── IPC: Duplicate Detection ────────────────────────────
 
   ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string, options?: { minSizeBytes?: number }) => {
-    if (activeDuplicateScan) {
-      activeDuplicateScan.cancel();
-      activeDuplicateScan = null;
+    const resolvedRoot = Path.resolve(rootPath);
+    const key = scanKey(resolvedRoot);
+
+    // Only cancel an existing scan for THIS root. Scans on other drives
+    // keep running — parallel duplicate detection was one of the major
+    // asks in v0.3.1.
+    const existing = activeDuplicateScans.get(key);
+    if (existing) {
+      existing.cancel();
+      activeDuplicateScans.delete(key);
     }
 
     // Try to find an existing scan index whose root is an ancestor of the
     // duplicates scope — streaming that index is much faster and lower
     // memory than re-walking the filesystem. Fall back to walk if no
     // suitable index exists or if the path isn't under any known scan.
-    const resolvedRoot = Path.resolve(rootPath);
     const indexPath = findIndexCoveringPath(resolvedRoot);
 
-    activeDuplicateScan = runDuplicateScan(
+    const handle = runDuplicateScan(
       resolvedRoot,
       {
         onProgress: (progress) => {
-          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, progress);
+          // Tag every progress emission with the rootPath so the
+          // renderer can route it to the right per-drive state slot.
+          mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
+            ...progress,
+            rootPath: resolvedRoot,
+          });
         },
         onResult: (result) => {
           mainWindow?.webContents.send(DUPLICATE_RESULT_CHANNEL, result);
-          activeDuplicateScan = null;
+          activeDuplicateScans.delete(key);
           sendToast("success", "Duplicate scan complete",
-            `Found ${result.totalGroups} group${result.totalGroups === 1 ? "" : "s"}, ${formatBytesShort(result.totalWastedBytes)} reclaimable.`);
+            `Found ${result.totalGroups} group${result.totalGroups === 1 ? "" : "s"} in ${resolvedRoot}, ${formatBytesShort(result.totalWastedBytes)} reclaimable.`);
         },
         onError: (error) => {
           mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
+            rootPath: resolvedRoot,
             status: "error",
             filesWalked: 0,
             candidateGroups: 0,
@@ -991,7 +1009,7 @@ void app.whenReady().then(async () => {
             elapsedMs: 0,
             errorMessage: error.message,
           });
-          activeDuplicateScan = null;
+          activeDuplicateScans.delete(key);
         },
       },
       {
@@ -999,6 +1017,7 @@ void app.whenReady().then(async () => {
         minSizeBytes: options?.minSizeBytes,
       },
     );
+    activeDuplicateScans.set(key, handle);
   });
 
   /**
@@ -1047,11 +1066,27 @@ void app.whenReady().then(async () => {
     return best ? indexFilePath(best.id) : null;
   }
 
-  ipcMain.handle("diskhound:cancel-duplicate-scan", () => {
-    if (activeDuplicateScan) {
-      activeDuplicateScan.cancel();
-      activeDuplicateScan = null;
+  ipcMain.handle("diskhound:cancel-duplicate-scan", (_event, rootPath?: string) => {
+    if (rootPath) {
+      const key = scanKey(Path.resolve(rootPath));
+      const handle = activeDuplicateScans.get(key);
+      if (handle) {
+        handle.cancel();
+        activeDuplicateScans.delete(key);
+      }
+      return;
     }
+    // No rootPath → cancel all (e.g. app quit, or renderer asking for a full stop).
+    for (const handle of activeDuplicateScans.values()) handle.cancel();
+    activeDuplicateScans.clear();
+  });
+
+  ipcMain.handle("diskhound:get-active-duplicate-scan-roots", () => {
+    // Return the rootPaths (original casing) the renderer originally
+    // passed in. Since we key by normPath(), we can't recover original
+    // casing reliably — return the normalized keys, which matches how
+    // the renderer normalizes them internally.
+    return Array.from(activeDuplicateScans.keys());
   });
 
   // ── IPC: Tray ─────────────────────────────────────────────
@@ -1499,6 +1534,10 @@ void app.whenReady().then(async () => {
       void session.stop();
     }
     activeScans.clear();
+    for (const handle of activeDuplicateScans.values()) {
+      handle.cancel();
+    }
+    activeDuplicateScans.clear();
     if (monitoringInterval) {
       clearInterval(monitoringInterval);
       monitoringInterval = null;

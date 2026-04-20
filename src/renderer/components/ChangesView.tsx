@@ -280,13 +280,26 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     setSwitching(false);
   };
 
-  const loadFullDiff = async () => {
+  const loadFullDiff = useCallback(async () => {
     if (!diff) return;
     setFullDiffLoading(true);
     const result = await nativeApi.computeFullScanDiff(diff.baselineId, diff.currentId, 1000);
     if (result) setFullDiff(result);
     setFullDiffLoading(false);
-  };
+  }, [diff]);
+
+  // Auto-load the full per-file diff whenever a new baseline/current pair is
+  // selected. The persisted index is fast to read (it's the same NDJSON the
+  // top-N summary came from) so there's no reason to hide the detail behind
+  // a button press — users were landing on the tab, seeing only the
+  // summary + a CTA, and not realizing that clicking through was the whole
+  // point of the tab.
+  useEffect(() => {
+    if (!diff) return;
+    // Don't refetch if we already have the matching full diff loaded.
+    if (fullDiff && fullDiff.baselineId === diff.baselineId && fullDiff.currentId === diff.currentId) return;
+    void loadFullDiff();
+  }, [diff, fullDiff, loadFullDiff]);
 
   if (!rootPath) {
     return (
@@ -477,31 +490,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
           {/* Detail list */}
           <div className="changes-detail-scroll">
-            {detailTab === "files" && !fullDiff && (
-              <>
-                <FileDeltaList
-                  deltas={diff.fileDeltas}
-                  busy={busy}
-                  onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
-                  onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-                  onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
-                  onEasyMove={(p) => void handleEasyMove(p)}
-                />
-                <div className="changes-full-diff-cta">
-                  <button
-                    className="scan-btn"
-                    disabled={fullDiffLoading}
-                    onClick={() => void loadFullDiff()}
-                  >
-                    {fullDiffLoading ? "Loading..." : "Browse all changes"}
-                  </button>
-                  <span className="changes-full-diff-hint">
-                    Load the full per-file diff from the persisted index.
-                  </span>
-                </div>
-              </>
-            )}
-            {detailTab === "files" && fullDiff && (
+            {detailTab === "files" && fullDiff && fullDiff.totalChanges > 0 && (
               <FullDiffList
                 diff={fullDiff}
                 busy={busy}
@@ -509,7 +498,35 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
                 onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
                 onEasyMove={(p) => void handleEasyMove(p)}
-                onShowTopN={() => setFullDiff(null)}
+              />
+            )}
+            {detailTab === "files" && fullDiff && fullDiff.totalChanges === 0 && (
+              <div className="changes-empty-detail">
+                <div className="changes-empty-detail-title">No file-level changes</div>
+                <div className="changes-empty-detail-hint">
+                  Both scans saw the same files at the same sizes. Aggregate
+                  totals above confirm — {formatBytes(Math.abs(diff.totalBytesDelta))} net change.
+                </div>
+              </div>
+            )}
+            {detailTab === "files" && !fullDiff && fullDiffLoading && (
+              <div className="changes-empty-detail">
+                <div className="changes-empty-detail-title">Loading changes…</div>
+                <div className="changes-empty-detail-hint">
+                  Reading the persisted index for this diff.
+                </div>
+              </div>
+            )}
+            {detailTab === "files" && !fullDiff && !fullDiffLoading && (
+              // Fallback: show the top-N summary if the full diff is
+              // unavailable (old scans without a persisted index).
+              <FileDeltaList
+                deltas={diff.fileDeltas}
+                busy={busy}
+                onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
+                onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
+                onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
+                onEasyMove={(p) => void handleEasyMove(p)}
               />
             )}
             {detailTab === "directories" && (
@@ -881,14 +898,13 @@ function formatTimeBetween(ms: number): string {
 
 // ── Full diff list (sourced from the persisted file index) ──
 
-function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onShowTopN }: {
+function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
   diff: FullDiffResult;
   busy: Set<string>;
   onReveal: (path: string) => void;
   onOpen: (path: string) => void;
   onTrash: (path: string) => void;
   onEasyMove: (path: string) => void;
-  onShowTopN: () => void;
 }) {
   const [filter, setFilter] = useState("");
 
@@ -917,7 +933,6 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove, onSho
             onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
             placeholder="Filter by path..."
           />
-          <button className="action-btn" onClick={onShowTopN}>Back to top-N</button>
         </div>
       </div>
       {diff.truncated && !filter && (

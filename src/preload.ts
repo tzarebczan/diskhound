@@ -57,7 +57,8 @@ const api: DiskhoundNativeApi = {
 
   // Duplicate Detection
   startDuplicateScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-duplicate-scan", rootPath, options),
-  cancelDuplicateScan: () => ipcRenderer.invoke("diskhound:cancel-duplicate-scan"),
+  cancelDuplicateScan: (rootPath) => ipcRenderer.invoke("diskhound:cancel-duplicate-scan", rootPath),
+  getActiveDuplicateScanRoots: () => ipcRenderer.invoke("diskhound:get-active-duplicate-scan-roots"),
   onDuplicateProgress: (listener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, progress: DuplicateScanProgress) => {
       listener(progress);

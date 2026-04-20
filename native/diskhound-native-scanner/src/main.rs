@@ -833,6 +833,12 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             state.inherited_files += inherited_count;
             state.files_visited += inherited_count;
             state.bytes_seen += inherited_bytes;
+            // Credit the inherited subtree to directories_visited so the
+            // "N dirs" status-bar stat reflects the full tree we scanned
+            // (not just the handful of dirs we re-walked on a warm cache).
+            // Without this, a fully-inherited scan of C:\ reported "1 dir"
+            // despite covering millions of files under thousands of dirs.
+            state.directories_visited += subtree_dir_entries.len() as u64;
             state.inherited_prefixes.push(directory_path_str.clone());
 
             // Roll up directory totals using the precomputed cumulative

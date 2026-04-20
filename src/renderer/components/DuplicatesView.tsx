@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useMemo, useState } from "preact/hooks";
 
 import type {
   DuplicateAnalysis,
@@ -14,15 +14,21 @@ import { toast } from "./Toasts";
 
 interface Props {
   snapshot: ScanSnapshot;
+  /** The most recent completed analysis for the current root, or null. */
+  analysis: DuplicateAnalysis | null;
+  /** Live progress for the current root's in-flight scan, or null. */
+  progress: DuplicateScanProgress | null;
+  /** True when a duplicate scan is currently running for the current root. */
+  isScanning: boolean;
+  /** Clear the persisted analysis for a given root — fires when the user
+   *  starts a new scan and we want to blank the previous results. */
+  onClearAnalysis: (rootPath: string) => void;
 }
 
 type SortMode = "wasted" | "copies" | "size";
 
-export function DuplicatesView({ snapshot }: Props) {
+export function DuplicatesView({ snapshot, analysis, progress, isScanning, onClearAnalysis }: Props) {
   const rootPath = snapshot.rootPath;
-  const [progress, setProgress] = useState<DuplicateScanProgress | null>(null);
-  const [analysis, setAnalysis] = useState<DuplicateAnalysis | null>(null);
-  const [scanning, setScanning] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const { busy, runAction, handleEasyMove } = usePathActions();
@@ -34,29 +40,14 @@ export function DuplicatesView({ snapshot }: Props) {
   const [scopeOverride, setScopeOverride] = useState<string | null>(null);
   const effectiveScope = scopeOverride ?? rootPath ?? "";
 
-  useEffect(() => {
-    const unsubProgress = nativeApi.onDuplicateProgress((p) => {
-      setProgress(p);
-      if (p.status === "walking" || p.status === "hashing") {
-        setScanning(true);
-      } else {
-        setScanning(false);
-      }
-    });
-    const unsubResult = nativeApi.onDuplicateResult((r) => {
-      setAnalysis(r);
-      setScanning(false);
-      setProgress(null);
-    });
-    return () => { unsubProgress(); unsubResult(); };
-  }, []);
-
   const startScan = () => {
     if (!effectiveScope) return;
-    setAnalysis(null);
+    // Clear any prior analysis for this root so the UI switches cleanly
+    // into scanning mode. Expanded/dismissed sets are local so they reset
+    // whenever we start fresh too.
+    if (rootPath) onClearAnalysis(rootPath);
     setDismissed(new Set());
     setExpanded(new Set());
-    setScanning(true);
     void nativeApi.startDuplicateScan(effectiveScope);
   };
 
@@ -68,8 +59,12 @@ export function DuplicatesView({ snapshot }: Props) {
   const resetScope = () => setScopeOverride(null);
 
   const cancelScan = () => {
-    void nativeApi.cancelDuplicateScan();
-    setScanning(false);
+    // Cancel this root's scan only — other drives' duplicate scans
+    // keep running. Matches the parallel-scans model we use for
+    // regular disk scans.
+    if (rootPath) {
+      void nativeApi.cancelDuplicateScan(rootPath);
+    }
   };
 
   const toggleExpand = (hash: string) => {
@@ -130,7 +125,7 @@ export function DuplicatesView({ snapshot }: Props) {
       {/* ── Header ── */}
       <div className="duplicates-header">
         <div className="duplicates-header-text">
-          {analysis && !scanning ? (
+          {analysis && !isScanning ? (
             <>
               <div className="duplicates-title-row">
                 <span className="duplicates-title">
@@ -144,7 +139,7 @@ export function DuplicatesView({ snapshot }: Props) {
                 in <code>{analysis.rootPath}</code>
               </div>
             </>
-          ) : scanning ? (
+          ) : isScanning ? (
             <>
               <div className="duplicates-title-row">
                 <span className="duplicates-title">Scanning for duplicates</span>
@@ -174,7 +169,7 @@ export function DuplicatesView({ snapshot }: Props) {
           )}
         </div>
         <div className="duplicates-header-actions">
-          {!scanning && (
+          {!isScanning && (
             <button
               className="scan-btn"
               onClick={() => void pickNarrowerScope()}
@@ -183,7 +178,7 @@ export function DuplicatesView({ snapshot }: Props) {
               Change scope
             </button>
           )}
-          {scanning ? (
+          {isScanning ? (
             <button className="scan-btn scan-btn-stop" onClick={cancelScan}>Cancel</button>
           ) : (
             <button
@@ -198,7 +193,7 @@ export function DuplicatesView({ snapshot }: Props) {
       </div>
 
       {/* ── Progress ── */}
-      {scanning && progress && (
+      {isScanning && progress && (
         <div className="duplicates-progress">
           <div className="duplicates-progress-bar">
             <div className="duplicates-progress-fill" />
@@ -218,7 +213,7 @@ export function DuplicatesView({ snapshot }: Props) {
       )}
 
       {/* ── Sort bar ── */}
-      {analysis && !scanning && visibleGroups.length > 0 && (
+      {analysis && !isScanning && visibleGroups.length > 0 && (
         <div className="duplicates-sort-bar">
           <div className="chip-group">
             <button className={`chip ${sortMode === "wasted" ? "active" : ""}`} onClick={() => setSortMode("wasted")}>
@@ -236,7 +231,7 @@ export function DuplicatesView({ snapshot }: Props) {
 
       {/* ── Results ── */}
       <div className="duplicates-list-scroll">
-        {!analysis && !scanning && (
+        {!analysis && !isScanning && (
           <div className="duplicates-empty">
             <div className="duplicates-empty-icon">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
@@ -263,7 +258,7 @@ export function DuplicatesView({ snapshot }: Props) {
           </div>
         )}
 
-        {analysis && !scanning && visibleGroups.length === 0 && (
+        {analysis && !isScanning && visibleGroups.length === 0 && (
           <div className="duplicates-empty">
             <div className="duplicates-empty-text">
               {dismissed.size > 0 ? "All groups handled" : "No duplicates found"}

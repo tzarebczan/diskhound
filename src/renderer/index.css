@@ -362,6 +362,22 @@ button, input, select, textarea { font: inherit; }
   color: var(--red);
 }
 
+/* Compact square icon variant — used for the "+" satellite next to
+ * Rescan so it's visually secondary without losing its affordance. */
+.scan-btn.scan-btn-icon {
+  width: 28px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+}
+.scan-btn.scan-btn-icon:hover {
+  color: var(--amber);
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.08);
+}
+
 .drive-pills {
   display: flex;
   gap: 6px;
@@ -766,10 +782,20 @@ button, input, select, textarea { font: inherit; }
 
 /* ── Overview ──────────────────────────────── */
 .overview {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
+  /* Flex column so the middle child (overview-body) always gets the
+   * remaining space regardless of whether the optional monitoring-nudge
+   * is rendered or returns null. The prior `grid-template-rows: auto 1fr auto`
+   * miscounted rows when the nudge was visible — it pushed the 1fr to
+   * the metrics-strip row and left overview-body at intrinsic height. */
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
+}
+.overview > .overview-body {
+  flex: 1;
+  min-height: 0;
 }
 
 .metrics-strip {
@@ -876,6 +902,12 @@ button, input, select, textarea { font: inherit; }
   display: grid;
   grid-template-columns: 1fr 260px;
   overflow: hidden;
+  /* Ensure the grid cell's intrinsic height matches the row (1fr) rather
+   * than the children's content — without this, deep flex descendants
+   * can force the body taller than the viewport slice, which in turn
+   * leaves the status-bar row pushed below where a child (the treemap
+   * canvas) thinks the bottom is. */
+  min-height: 0;
   transition: grid-template-columns 0.2s ease;
 }
 .overview-body.ext-collapsed {
@@ -884,7 +916,17 @@ button, input, select, textarea { font: inherit; }
 
 .overview-main {
   min-width: 0;
+  min-height: 0;
+  /* Use flex so the treemap-panel child inherits a definite height even
+   * when the panel is the only child — pure block layout can leave the
+   * panel shorter than the main column on some renderers. */
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
+}
+.overview-main > .treemap-panel {
+  flex: 1;
+  min-height: 0;
 }
 
 .treemap-panel {
@@ -4603,6 +4645,20 @@ button, input, select, textarea { font: inherit; }
 .changes-empty-detail {
   padding: 40px 16px;
   text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.changes-empty-detail-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+  letter-spacing: -0.005em;
+}
+.changes-empty-detail-hint {
+  max-width: 440px;
+  margin: 0 auto;
+  line-height: 1.55;
   color: var(--text-muted);
   font-size: 12px;
 }

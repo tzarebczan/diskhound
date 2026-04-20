@@ -73,6 +73,7 @@ export function runDuplicateScan(
     if (!force && now - lastEmitAt < PROGRESS_INTERVAL_MS) return;
     lastEmitAt = now;
     callbacks.onProgress({
+      rootPath,
       status,
       filesWalked,
       candidateGroups,

@@ -464,6 +464,9 @@ export interface DuplicateAnalysis {
 }
 
 export interface DuplicateScanProgress {
+  /** The root this progress event belongs to. Routes cleanly in the
+   *  renderer when multiple drives have concurrent duplicate scans. */
+  rootPath: string;
   status: DuplicateScanStatus;
   filesWalked: number;
   candidateGroups: number;
@@ -549,7 +552,10 @@ export interface DiskhoundNativeApi {
 
   // Duplicate Detection
   startDuplicateScan: (rootPath: string, options?: DuplicateScanOptions) => Promise<void>;
-  cancelDuplicateScan: () => Promise<void>;
+  /** Cancel a specific root's duplicate scan, or (omit rootPath) cancel all. */
+  cancelDuplicateScan: (rootPath?: string) => Promise<void>;
+  /** Returns the rootPaths of duplicate scans currently running. */
+  getActiveDuplicateScanRoots: () => Promise<string[]>;
   onDuplicateProgress: (listener: (progress: DuplicateScanProgress) => void) => () => void;
   onDuplicateResult: (listener: (result: DuplicateAnalysis) => void) => () => void;
 

@@ -6,6 +6,8 @@ import {
   defaultScanOptions,
   type AppView,
   type DiskSpaceInfo,
+  type DuplicateAnalysis,
+  type DuplicateScanProgress,
   type GeneralSettings,
   type ScanOptions,
   type ScanSnapshot,
@@ -91,6 +93,18 @@ export function App() {
   const [currentRoot, setCurrentRoot] = useState<string>("");
   /** Roots with an in-flight scan on the main process (normalized keys). */
   const [activeScanKeys, setActiveScanKeys] = useState<Set<string>>(() => new Set());
+
+  // Per-root duplicate scan state. Lives at the App level so:
+  //   1. Switching drives shows each drive's own stats (not a shared global)
+  //   2. Running scans survive tab-switches (DuplicatesView unmounts when
+  //      you move to another tab; lifting state up avoids losing progress)
+  //   3. Multiple drives can have concurrent duplicate scans
+  const [duplicateAnalysesByRoot, setDuplicateAnalysesByRoot] =
+    useState<Map<string, DuplicateAnalysis>>(() => new Map());
+  const [duplicateProgressByRoot, setDuplicateProgressByRoot] =
+    useState<Map<string, DuplicateScanProgress>>(() => new Map());
+  /** Normalized keys of roots with an in-flight duplicate scan. */
+  const [activeDuplicateKeys, setActiveDuplicateKeys] = useState<Set<string>>(() => new Set());
 
   // Derived snapshot for the currently-viewed root. Defaults to an idle
   // snapshot that carries the current root so downstream views show the
@@ -264,7 +278,58 @@ export function App() {
       setUpdateStatus(status);
     });
 
-    return () => { unsub(); unsubUpdate(); };
+    // ── Duplicate scan IPC wiring ──
+    // Seed: an in-progress scan kicked off before the renderer mounted (or
+    // before a tab-switch remounted App) should still show as active.
+    void nativeApi.getActiveDuplicateScanRoots().then((roots) => {
+      if (!roots) return;
+      setActiveDuplicateKeys(new Set(roots.map(rootKey)));
+    });
+
+    const unsubDupProgress = nativeApi.onDuplicateProgress((p) => {
+      if (!p.rootPath) return;
+      const key = rootKey(p.rootPath);
+      setDuplicateProgressByRoot((prev) => {
+        const next = new Map(prev);
+        next.set(key, p);
+        return next;
+      });
+      // Walking/hashing = active; done/cancelled/error = inactive.
+      const isActive = p.status === "walking" || p.status === "hashing";
+      setActiveDuplicateKeys((prev) => {
+        const next = new Set(prev);
+        if (isActive) next.add(key);
+        else next.delete(key);
+        return next;
+      });
+    });
+
+    const unsubDupResult = nativeApi.onDuplicateResult((result) => {
+      if (!result.rootPath) return;
+      const key = rootKey(result.rootPath);
+      setDuplicateAnalysesByRoot((prev) => {
+        const next = new Map(prev);
+        next.set(key, result);
+        return next;
+      });
+      setDuplicateProgressByRoot((prev) => {
+        const next = new Map(prev);
+        next.delete(key);
+        return next;
+      });
+      setActiveDuplicateKeys((prev) => {
+        const next = new Set(prev);
+        next.delete(key);
+        return next;
+      });
+    });
+
+    return () => {
+      unsub();
+      unsubUpdate();
+      unsubDupProgress();
+      unsubDupResult();
+    };
   }, []);
 
   // Keyboard shortcuts (separate effect so search state changes don't tear down IPC listeners)
@@ -376,6 +441,14 @@ export function App() {
     // the derived `snapshot` will pick it up from snapshotsByRoot.
     if (snapshotsByRoot.has(key)) return;
 
+    // If there's a live scan already running for this root, DON'T load the
+    // stale historical snapshot — the running scan will stream its own
+    // snapshots in via the onScanSnapshot listener within a beat. Loading
+    // history here caused a visible "shift" 10–20s later when the live
+    // snapshot arrived with different top-N data and the treemap
+    // relaid-out underneath the user.
+    if (activeScanKeys.has(key)) return;
+
     // Otherwise, try to restore the latest saved snapshot from history.
     const latest = await nativeApi.getLatestSnapshotForRoot(normalized);
     if (latest) {
@@ -482,25 +555,44 @@ export function App() {
               >
                 Stop
               </button>
-            ) : (
+            ) : rootPath ? (
               <>
+                {/* When a root is selected, Rescan is the primary action —
+                 * re-scans this drive/folder. The "+" satellite button
+                 * starts a brand-new scan on a different path without
+                 * disturbing the current one (they run in parallel).
+                 *
+                 * Rationale: the prior UI had both "New Scan" and "Rescan"
+                 * as full-width buttons which took up header room and
+                 * were easily confused — users reported clicking "New Scan"
+                 * expecting Rescan behavior. */}
                 <button
                   className="scan-btn scan-btn-primary"
-                  onClick={openPicker}
-                  title="Pick a new drive or folder to scan"
+                  onClick={() => void doScan()}
+                  title={`Rescan ${rootPath}`}
                 >
-                  New Scan
+                  Rescan
                 </button>
-                {rootPath && (
-                  <button
-                    className="scan-btn"
-                    onClick={() => void doScan()}
-                    title={`Rescan ${rootPath}`}
-                  >
-                    Rescan
-                  </button>
-                )}
+                <button
+                  className="scan-btn scan-btn-icon"
+                  onClick={openPicker}
+                  title="Scan a different drive or folder (runs in parallel)"
+                  aria-label="Scan another drive or folder"
+                >
+                  <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round">
+                    <path d="M6 2V10M2 6H10" />
+                  </svg>
+                </button>
               </>
+            ) : (
+              // No root selected yet → only the picker is meaningful.
+              <button
+                className="scan-btn scan-btn-primary"
+                onClick={openPicker}
+                title="Pick a drive or folder to scan"
+              >
+                New Scan
+              </button>
             )}
           </div>
 
@@ -635,7 +727,25 @@ export function App() {
               {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
-              {view === "duplicates" && <ErrorBoundary name="Duplicates"><DuplicatesView snapshot={snapshot} /></ErrorBoundary>}
+              {view === "duplicates" && (
+                <ErrorBoundary name="Duplicates">
+                  <DuplicatesView
+                    snapshot={snapshot}
+                    analysis={duplicateAnalysesByRoot.get(rootKey(snapshot.rootPath)) ?? null}
+                    progress={duplicateProgressByRoot.get(rootKey(snapshot.rootPath)) ?? null}
+                    isScanning={activeDuplicateKeys.has(rootKey(snapshot.rootPath))}
+                    onClearAnalysis={(root) => {
+                      const key = rootKey(root);
+                      setDuplicateAnalysesByRoot((prev) => {
+                        if (!prev.has(key)) return prev;
+                        const next = new Map(prev);
+                        next.delete(key);
+                        return next;
+                      });
+                    }}
+                  />
+                </ErrorBoundary>
+              )}
               {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
               {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
