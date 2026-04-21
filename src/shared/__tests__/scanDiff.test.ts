@@ -188,11 +188,21 @@ describe("computeDiff", () => {
   });
 
   it("matches file paths using platform normalization rules", () => {
+    // Bump aggregates to match the itemized change. Without this, my
+    // `aggregateUnchanged` filter in scanDiff strips add/remove pairs
+    // (treating them as top-N ranking churn). In the case-sensitive
+    // branch these are real adds/removes so the aggregates must
+    // differ — set bytesSeen to the respective totals and filesVisited
+    // to reflect one file on each side.
     const baseline = makeSnapshot({
       largestFiles: [makeFile("C:\\Test\\FILE.TXT", 1000)],
+      bytesSeen: 1000,
+      filesVisited: 1,
     });
     const current = makeSnapshot({
       largestFiles: [makeFile("C:\\test\\file.txt", 2000)],
+      bytesSeen: 2000,
+      filesVisited: 1,
     });
     const diff = computeDiff(baseline, current, "b", "c");
 

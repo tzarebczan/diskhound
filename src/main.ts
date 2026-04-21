@@ -4,7 +4,7 @@ import { createReadStream } from "node:fs";
 import * as Path from "node:path";
 import { createInterface } from "node:readline";
 import { Worker } from "node:worker_threads";
-import { createGunzip } from "node:zlib";
+import { createGunzip, createGzip } from "node:zlib";
 
 import {
   app,
@@ -398,6 +398,7 @@ void app.whenReady().then(async () => {
         for (const prunedId of consumeLastPrunedIds()) {
           treemapCache.invalidateScan(prunedId);
           invalidateFolderTree(prunedId);
+          void deleteFolderTreeSidecar(prunedId);
           void deleteIndex(prunedId);
           void deleteFullDiffCachesForScan(prunedId);
         }
@@ -1351,6 +1352,112 @@ void app.whenReady().then(async () => {
     folderTreeCache.set(id, tree);
   };
 
+  // ── Folder tree persistence (sidecar on disk) ──────────────────────
+  //
+  // We write the built tree to `<scanId>.folder-tree.ndjson.gz` next
+  // to the scan index. On subsequent app launches (or Folders-tab
+  // clicks after eviction), ensureFolderTree reads the sidecar
+  // directly — skipping the multi-second stream-and-parse of the full
+  // gzipped file index. Format is one NDJSON line per parent entry:
+  //
+  //   {"k":"c:\\users","d":[["c:\\users\\foo",12345,6]],"f":[["file.txt",1024,1700000000000]]}
+  //
+  // k: parent path (Map key)
+  // d: direct child dirs as [fullChildPath, recursiveSize, recursiveFileCount]
+  // f: direct files as [filename, size, modifiedAt]  (compact form)
+  //
+  // Invalidation: the sidecar is deleted whenever the scan it
+  // references is pruned from history (see consumeLastPrunedIds path).
+  // Because the sidecar filename is keyed by the scan's UUID, a fresh
+  // scan writes its own sidecar and the old one gets garbage-collected
+  // when the corresponding history entry rolls off.
+  const FOLDER_TREE_SIDECAR_SUFFIX = ".folder-tree.ndjson.gz";
+  const folderTreeSidecarPath = (scanId: string): string => {
+    const idx = indexFilePath(scanId);
+    return idx.replace(/\.ndjson\.gz$/i, FOLDER_TREE_SIDECAR_SUFFIX);
+  };
+
+  async function writeFolderTreeSidecar(scanId: string, tree: FolderTree): Promise<void> {
+    if (tree.size === 0) return; // nothing to persist
+    const filePath = folderTreeSidecarPath(scanId);
+    const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
+    try {
+      const { createWriteStream } = await import("node:fs");
+      const { pipeline } = await import("node:stream/promises");
+      const { Readable } = await import("node:stream");
+
+      // Build an async iterable that yields one NDJSON line per entry.
+      // Using a generator keeps us from concat'ing the whole payload
+      // into one giant string — the caller can have 1M+ entries.
+      async function* emitLines(): AsyncGenerator<string> {
+        for (const [parent, node] of tree) {
+          const line = JSON.stringify({
+            k: parent,
+            d: node.dirs.map((d) => [d.path, d.size, d.fileCount]),
+            f: node.files.map((f) => [f.name, f.size, f.modifiedAt]),
+          });
+          yield line + "\n";
+        }
+      }
+
+      const gz = createGzip({ level: 4 });
+      const out = createWriteStream(tempPath);
+      await pipeline(Readable.from(emitLines()), gz, out);
+      await FS.rename(tempPath, filePath);
+    } catch (err) {
+      try { await FS.unlink(tempPath); } catch { /* best effort */ }
+      writeCrashLog(
+        "folder-tree-sidecar-write",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+    }
+  }
+
+  async function readFolderTreeSidecar(scanId: string): Promise<FolderTree | null> {
+    const filePath = folderTreeSidecarPath(scanId);
+    if (!FS_SYNC.existsSync(filePath)) return null;
+
+    const tree: FolderTree = new Map();
+    try {
+      const gunzip = createGunzip();
+      const src = createReadStream(filePath);
+      src.pipe(gunzip);
+      const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+      for await (const line of rl) {
+        if (!line) continue;
+        let rec: {
+          k?: string;
+          d?: [string, number, number][];
+          f?: [string, number, number][];
+        };
+        try { rec = JSON.parse(line); } catch { continue; }
+        if (typeof rec.k !== "string") continue;
+        const dirs = Array.isArray(rec.d)
+          ? rec.d
+              .filter((row) => Array.isArray(row) && row.length >= 3)
+              .map(([path, size, fileCount]) => ({ path, size, fileCount }))
+          : [];
+        const files = Array.isArray(rec.f)
+          ? rec.f
+              .filter((row) => Array.isArray(row) && row.length >= 3)
+              .map(([name, size, modifiedAt]) => ({ name, size, modifiedAt }))
+          : [];
+        tree.set(rec.k, { dirs, files });
+      }
+      return tree;
+    } catch (err) {
+      writeCrashLog(
+        "folder-tree-sidecar-read",
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return null;
+    }
+  }
+
+  async function deleteFolderTreeSidecar(scanId: string): Promise<void> {
+    try { await FS.unlink(folderTreeSidecarPath(scanId)); } catch { /* already gone */ }
+  }
+
   /**
    * Build-or-get: returns the cached tree when we have one, otherwise
    * builds it exactly once even if called multiple times concurrently.
@@ -1366,6 +1473,13 @@ void app.whenReady().then(async () => {
    * in that case instead of crashing the process with OOM — the user
    * will pay the cold-build cost on their next Folders click, but
    * the app survives to do it.
+   *
+   * Build path:
+   *   1. Check in-memory cache → instant
+   *   2. Check in-flight promise → coalesce concurrent requests
+   *   3. Check on-disk sidecar → ~2-4 s on a drive-scale tree
+   *   4. Stream scan index from scratch → ~5-15 s on a drive-scale
+   *      tree (original cost); writes sidecar on success
    */
   const PREWARM_RSS_CEILING_MB = 5500;
   const ensureFolderTree = async (
@@ -1392,14 +1506,29 @@ void app.whenReady().then(async () => {
       }
     }
 
-    const pending = buildFolderTree(indexFilePath(id))
-      .then((tree) => {
-        insertFolderTree(id, tree);
-        return tree;
-      })
-      .finally(() => {
-        folderTreeInflight.delete(id);
-      });
+    const pending = (async () => {
+      // Try the persisted sidecar first. Writing the sidecar is
+      // best-effort (see writeFolderTreeSidecar), so a missing or
+      // corrupt file just falls through to the full rebuild path.
+      const started = Date.now();
+      const fromDisk = await readFolderTreeSidecar(id);
+      if (fromDisk && fromDisk.size > 0) {
+        writeCrashLog(
+          "folder-tree-sidecar-hit",
+          `scanId=${id} entries=${fromDisk.size} load=${Date.now() - started}ms`,
+        );
+        insertFolderTree(id, fromDisk);
+        return fromDisk;
+      }
+      const tree = await buildFolderTree(indexFilePath(id));
+      insertFolderTree(id, tree);
+      // Fire-and-forget sidecar write so the NEXT ensure call for this
+      // scanId hits the fast disk path. Errors logged, don't block.
+      void writeFolderTreeSidecar(id, tree);
+      return tree;
+    })().finally(() => {
+      folderTreeInflight.delete(id);
+    });
     folderTreeInflight.set(id, pending);
     return pending;
   };
@@ -2061,6 +2190,7 @@ void app.whenReady().then(async () => {
     for (const prunedId of consumeLastPrunedIds()) {
       treemapCache.invalidateScan(prunedId);
       invalidateFolderTree(prunedId);
+      void deleteFolderTreeSidecar(prunedId);
       void deleteIndex(prunedId);
       void deleteFullDiffCachesForScan(prunedId);
     }
