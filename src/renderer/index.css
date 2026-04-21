@@ -3312,6 +3312,49 @@ button, input, select, textarea { font: inherit; }
   height: 100%;
 }
 
+/* Overflow strip — sits over the bottom of the treemap canvas whenever
+ * there are more processes than the TOP_N cap. Keeps the main grid
+ * visually clean (no unlabeled hairline tiles) while still acknowledging
+ * that the omitted processes exist. Pointer-events off so it never
+ * fights the canvas for clicks. */
+.memory-treemap-overflow {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 8px;
+  padding: 6px 12px;
+  border-radius: var(--radius-sm);
+  background: linear-gradient(90deg, rgba(10, 10, 16, 0.72), rgba(10, 10, 16, 0.55));
+  backdrop-filter: blur(6px);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+  pointer-events: none;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+}
+:root.light .memory-treemap-overflow {
+  background: linear-gradient(90deg, rgba(248, 250, 252, 0.82), rgba(248, 250, 252, 0.65));
+  border-color: rgba(0, 0, 0, 0.06);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.06);
+}
+.memory-treemap-overflow-label {
+  color: var(--amber);
+  font-weight: 600;
+  letter-spacing: -0.005em;
+}
+.memory-treemap-overflow-bytes {
+  color: var(--text-secondary);
+}
+.memory-treemap-overflow-hint {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
 /* ── Process detail popover (shown on treemap click) ── */
 .process-detail-overlay {
   position: absolute;
@@ -4134,8 +4177,16 @@ button, input, select, textarea { font: inherit; }
 
 /* Sort bar */
 .duplicates-sort-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 6px 12px;
   border-bottom: 1px solid var(--border);
+}
+.duplicates-select-helpers {
+  display: flex;
+  gap: 6px;
 }
 
 /* List */
@@ -4159,11 +4210,72 @@ button, input, select, textarea { font: inherit; }
 
 .duplicate-group-header {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto auto auto;
+  grid-template-columns: auto auto 1fr auto auto auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 12px;
   cursor: pointer;
+}
+.duplicate-group-checkbox,
+.duplicate-file-checkbox {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  padding: 2px 0;
+}
+.duplicate-group-checkbox input,
+.duplicate-file-checkbox input {
+  cursor: pointer;
+  accent-color: var(--amber);
+  width: 14px;
+  height: 14px;
+}
+.duplicate-file-row.selected {
+  background: rgba(245, 158, 11, 0.05);
+  outline: 1px solid rgba(245, 158, 11, 0.18);
+  outline-offset: -1px;
+}
+
+/* Bulk-action bar — floats at the bottom of the duplicates view
+ * whenever anything is selected. Out of the way when empty; when
+ * visible it's the clearest call-to-action on the page. */
+.duplicates-bulk-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(180deg, var(--bg-panel), var(--bg));
+  backdrop-filter: blur(8px);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.32);
+  z-index: 2;
+}
+:root.light .duplicates-bulk-bar {
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.08);
+}
+.duplicates-bulk-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-mono);
+}
+.duplicates-bulk-count {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--amber);
+  letter-spacing: -0.005em;
+}
+.duplicates-bulk-bytes {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.duplicates-bulk-actions {
+  display: flex;
+  gap: 8px;
 }
 .duplicate-group-icon {
   display: flex;

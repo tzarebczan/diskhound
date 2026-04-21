@@ -211,14 +211,23 @@ export function App() {
     };
   }, [syncThemePreference, applyColorBlindMode]);
 
-  // Boot: load current snapshot + drives + IPC listeners (run once)
+  // Boot: load current snapshot + drives + IPC listeners (run once).
+  //
+  // Gate `showPicker = false` on the snapshot having a real rootPath —
+  // a rehydrated "done" snapshot with a null rootPath would otherwise
+  // hide the DiskPicker and leave the user staring at an empty Overview
+  // with "No scan root selected" in the status bar, which has happened
+  // in the wild when the stored last-scan.json drifted from the current
+  // schema.
   useEffect(() => {
     void nativeApi.getCurrentSnapshot().then((s) => {
-      if (s && (s.status === "running" || s.status === "done")) {
+      const hasUsefulRoot = Boolean(s?.rootPath);
+      const hasActivity = s && (s.status === "running" || s.status === "done");
+      if (s && hasActivity && hasUsefulRoot) {
         syncSnapshot(s);
         setShowPicker(false);
       } else {
-        if (s) syncSnapshot(s);
+        if (s && hasUsefulRoot) syncSnapshot(s);
         setShowPicker(true);
       }
     });

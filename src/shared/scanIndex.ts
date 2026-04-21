@@ -439,7 +439,12 @@ export async function buildSnapshotFromIndex(
   // with a running "smallest size in the top" cursor for O(1) reject.
   let smallestInTop = 0;
 
-  // Directory set (from {t:"d"} entries). Presence means "seen as dir."
+  // Directory set: populated both from explicit {t:"d"} entries AND from
+  // every unique parent directory encountered during the file walk. The
+  // explicit-only approach used to drop to "1 dir" on incremental-update
+  // indexes that lacked t:"d" entries; counting discovered parents as a
+  // fallback keeps the Overview stat honest regardless of which scan
+  // engine wrote the index.
   const directorySet = new Set<string>();
 
   const Path = await import("node:path");
@@ -493,11 +498,14 @@ export async function buildSnapshotFromIndex(
     bytesSeen += rec.s;
 
     // Per-ancestor rollup: walk from parent dir up to root, adding this
-    // file's bytes/count to each.
+    // file's bytes/count to each. Every unique ancestor also lands in
+    // directorySet so the final directoriesVisited count reflects real
+    // tree fan-out even when the persisted index skipped {t:"d"} rows.
     const name = Path.basename(rec.p);
     let parentPath = Path.dirname(rec.p);
     while (true) {
       const key = normPath(parentPath);
+      directorySet.add(key);
       const entry = directoryTotals.get(key) ?? { size: 0, count: 0 };
       entry.size += rec.s;
       entry.count += 1;

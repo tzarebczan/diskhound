@@ -33,11 +33,15 @@ const MESSAGES = [
   "Tracking down the bytes",
 ];
 
-export function StartupSplash({ delayMs = 500 }: Props) {
+export function StartupSplash({ delayMs = 80 }: Props) {
   const [visible, setVisible] = useState(false);
   const [messageIndex, setMessageIndex] = useState(0);
 
-  // Delayed-visibility timer
+  // Delayed-visibility timer. Short default (80ms) so a fresh launch
+  // shows the radar almost immediately — earlier the 500ms delay meant
+  // fast boots (snapshot already in memory, warm IPC) transitioned
+  // straight to the main view without any splash ever rendering, which
+  // felt like the animation had been removed.
   useEffect(() => {
     const id = window.setTimeout(() => setVisible(true), delayMs);
     return () => window.clearTimeout(id);

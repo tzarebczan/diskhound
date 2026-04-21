@@ -203,6 +203,21 @@ export function MemoryView() {
     return () => document.removeEventListener("visibilitychange", onVis);
   }, []);
 
+  // Pre-warm the process appearance cache as soon as a snapshot arrives,
+  // regardless of which view is active. This fixes the "treemap shows
+  // plain tiles, icons only appear after I switch tabs and come back"
+  // complaint — by the time the user lands on the treemap view the
+  // icons are likely already decoded and ready to paint. Bounded by
+  // unique exePath count; the cache dedupes, so a Chrome-with-24-tabs
+  // machine still only pays one IPC round trip for chrome.exe.
+  useEffect(() => {
+    if (!snapshot) return;
+    for (const p of snapshot.processes) {
+      if (!p.exePath) continue;
+      loadProcessAppearance(p.exePath, colorForProcessName(p.name));
+    }
+  }, [snapshot]);
+
   // Grow the heatmap's rolling CPU history every time a fresh sample
   // arrives. The cached snapshot on mount gets skipped (its isStale
   // flag is true) so we don't double-count anything.
@@ -1005,14 +1020,26 @@ function ProcessTreemap(props: {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
+  // Counters for the "+N smaller processes" overflow strip — refs so
+  // the canvas paint effect can update them without triggering a loop,
+  // mirrored into state via an overflowSeq so the strip re-renders
+  // when the numbers change.
+  const overflowCountRef = useRef(0);
+  const overflowBytesRef = useRef(0);
+  const [overflowSeq, setOverflowSeq] = useState(0);
   const [dims, setDims] = useState({ w: 0, h: 0 });
   const [hover, setHover] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
   const [selected, setSelected] = useState<ProcessInfo | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; process: ProcessInfo } | null>(null);
   // Bumped whenever a new process icon / dominant color finishes loading
-  // in the module cache. Treated as a render dependency so the canvas
-  // repaints once icons arrive.
-  const [, setAppearanceTick] = useState(0);
+  // in the module cache. Kept as a real useState VALUE (not just a
+  // discarded setter) so the paint effect can include it in its
+  // dependency array — otherwise the subscription fires, the component
+  // re-renders, but the paint effect sits with stale deps and the
+  // canvas never repaints with the newly-resolved icons. That was the
+  // bug behind "icons randomly appear after I leave and come back to
+  // the tab."
+  const [appearanceTick, setAppearanceTick] = useState(0);
   useEffect(() => {
     const fn = () => setAppearanceTick((t) => t + 1);
     appearanceSubscribers.add(fn);
@@ -1084,16 +1111,39 @@ function ProcessTreemap(props: {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dims.w, dims.h);
 
-    // Weight using sqrt for visual balance (same trick as the disk treemap
-    // — very large processes don't swallow the whole canvas).
-    const sorted = [...processes].sort((a, b) => b.memoryBytes - a.memoryBytes);
-    const weighted = sorted
+    // Weight using sqrt for visual balance (same trick as the disk
+    // treemap) so very large processes don't swallow the whole canvas.
+    // Cap the treemap to TOP_N_PROCESSES tiles — on a typical Windows
+    // machine there are 200-400 processes and anything past ~60 ends
+    // up sub-icon-sized and label-less. The remainder is surfaced via
+    // the "+N smaller processes" strip rendered below the canvas.
+    const TOP_N_PROCESSES = 60;
+    const sortedAll = [...processes]
       .filter((p) => p.memoryBytes > 0)
-      .map((p) => ({ process: p, weight: Math.sqrt(p.memoryBytes) }));
+      .sort((a, b) => b.memoryBytes - a.memoryBytes);
+    const sorted = sortedAll.slice(0, TOP_N_PROCESSES);
+    const weighted = sorted.map((p) => ({ process: p, weight: Math.sqrt(p.memoryBytes) }));
     const totalWeight = weighted.reduce((s, i) => s + i.weight, 0);
     if (totalWeight === 0) {
       rectsRef.current = [];
+      overflowCountRef.current = 0;
+      overflowBytesRef.current = 0;
       return;
+    }
+    const newOverflowCount = sortedAll.length - sorted.length;
+    const newOverflowBytes = sortedAll.slice(TOP_N_PROCESSES).reduce(
+      (sum, p) => sum + p.memoryBytes, 0,
+    );
+    if (
+      newOverflowCount !== overflowCountRef.current
+      || newOverflowBytes !== overflowBytesRef.current
+    ) {
+      overflowCountRef.current = newOverflowCount;
+      overflowBytesRef.current = newOverflowBytes;
+      // Schedule a state bump in a microtask so we don't setState during
+      // the paint effect body (which would be an update-while-rendering
+      // warning in strict mode).
+      queueMicrotask(() => setOverflowSeq((s) => s + 1));
     }
 
     const rects: TreemapRect[] = [];
@@ -1177,9 +1227,11 @@ function ProcessTreemap(props: {
         }
       }
     }
-    // Keep the appearance subscriber as a live render dependency.
+    // Read the module counter for observability; the state-backed
+    // `appearanceTick` in the deps below is what actually drives
+    // repaints when icons resolve.
     void appearanceVersion;
-  }, [processes, dims]);
+  }, [processes, dims, appearanceTick]);
 
   const hitTest = useCallback((e: MouseEvent): ProcessInfo | null => {
     const canvas = canvasRef.current;
@@ -1269,6 +1321,27 @@ function ProcessTreemap(props: {
           onKill={onKill}
         />
       )}
+      {/* Overflow strip — renders only when the machine has more than
+          our TOP_N_PROCESSES cap. Keeps the treemap proper focused on
+          tiles big enough to show icons + names, and lets users know
+          the smaller processes aren't missing — just in the List. */}
+      {overflowCountRef.current > 0 && (
+        <div className="memory-treemap-overflow" aria-live="polite">
+          <span className="memory-treemap-overflow-label">
+            +{overflowCountRef.current} smaller process{overflowCountRef.current === 1 ? "" : "es"}
+          </span>
+          <span className="memory-treemap-overflow-bytes">
+            {formatBytes(overflowBytesRef.current)} combined
+          </span>
+          <span className="memory-treemap-overflow-hint">
+            Use the List view to see them all
+          </span>
+        </div>
+      )}
+      {/* Reference overflowSeq so React sees it as a render dep and
+          re-renders this tree when the counters change. The refs
+          themselves aren't reactive, but the state bump forces a paint. */}
+      {void overflowSeq}
     </div>
   );
 }

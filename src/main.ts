@@ -356,13 +356,21 @@ void app.whenReady().then(async () => {
         }
 
         if (settings?.notifications.scanComplete) {
-          sendToast("success", "Scan complete",
-            `Found ${message.snapshot.filesVisited.toLocaleString()} files, ${formatBytesShort(message.snapshot.bytesSeen)} total.`);
+          // Include the actual root so users running parallel scans on
+          // multiple drives can tell which one just finished — the old
+          // copy said "Found N files" with no drive attribution, which
+          // was ambiguous when three toast arrived in quick succession.
+          const rootLabel = message.snapshot.rootPath ?? "scan root";
+          sendToast(
+            "success",
+            `Scan complete — ${rootLabel}`,
+            `${message.snapshot.filesVisited.toLocaleString()} files · ${formatBytesShort(message.snapshot.bytesSeen)} total.`,
+          );
 
           if (Notification.isSupported()) {
             new Notification({
-              title: "DiskHound - Scan Complete",
-              body: `${message.snapshot.filesVisited.toLocaleString()} files scanned.`,
+              title: `DiskHound — Scan complete: ${rootLabel}`,
+              body: `${message.snapshot.filesVisited.toLocaleString()} files · ${formatBytesShort(message.snapshot.bytesSeen)}.`,
             }).show();
           }
         }
@@ -1096,6 +1104,15 @@ void app.whenReady().then(async () => {
     // parent path → top-N files at that level (unsorted during stream; sorted at return)
     const filesByParent = new Map<string, ScanFileRecord[]>();
 
+    // Consistent key shape: normalized (platform-aware case) + no trailing
+    // separator. Node's Path.dirname is inconsistent about trailing slashes
+    // at drive roots ("D:\\foo" → "D:\\", vs "D:\\foo\\bar" → "D:\\foo"),
+    // so we strip trailing separators everywhere we touch the tree Map.
+    // Without this, the drive-root folder came up blank because the build
+    // stored "d:\\" and the IPC looked up "d:" — the user saw "empty
+    // folder" even though the drive had 119 files + 21 dirs.
+    const toKey = (p: string): string => normPath(p).replace(/[\\/]+$/, "");
+
     const gunzip = createGunzip();
     const source = createReadStream(indexPathStr);
     source.pipe(gunzip);
@@ -1110,7 +1127,7 @@ void app.whenReady().then(async () => {
       const size = rec.s;
       if (typeof size !== "number") continue;
 
-      const filePathNorm = normPath(rec.p);
+      const filePathNorm = toKey(rec.p);
       const name = Path.basename(filePathNorm);
       const dotIdx = name.lastIndexOf(".");
       const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
@@ -1126,12 +1143,13 @@ void app.whenReady().then(async () => {
       // the main-process heap to 1 GB+ and crash the app. The prior
       // implementation only truncated at the END, after the full
       // stream had been held in memory.
-      let current = Path.dirname(filePathNorm);
+      let current = toKey(Path.dirname(filePathNorm));
       let prevChild = filePathNorm;
+      const directParent = toKey(Path.dirname(filePathNorm));
       while (true) {
         const parent = current;
         // File's direct parent: record it in filesByParent
-        if (prevChild === filePathNorm && parent === Path.dirname(filePathNorm)) {
+        if (prevChild === filePathNorm && parent === directParent) {
           let list = filesByParent.get(parent);
           if (!list) {
             list = [];
@@ -1169,9 +1187,9 @@ void app.whenReady().then(async () => {
           }
         }
 
-        const grandparent = Path.dirname(parent);
+        const grandparent = toKey(Path.dirname(parent));
         // Stop at drive root (parent === itself at the top of Windows paths)
-        if (grandparent === parent) break;
+        if (grandparent === parent || grandparent === "") break;
         prevChild = parent;
         current = grandparent;
       }
