@@ -291,16 +291,33 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
                       <path d="M12 2L12 6M12 18L12 22M2 12L6 12M18 12L22 12" />
                     </svg>
                   </div>
-                  <div style={{ fontSize: 13, color: "var(--text)" }}>
-                    {snapshot.filesVisited > 0
+                  {(() => {
+                    // Three distinct pre-results states:
+                    //   1. First second: "Starting…" (no real signal yet)
+                    //   2. filesVisited === 0 after a bit: we're likely in
+                    //      the rescan baseline-load phase on a big index
+                    //   3. filesVisited > 0: actively walking
+                    const hasFiles = snapshot.filesVisited > 0;
+                    const longLoad = !hasFiles && displayElapsedMs > 3000;
+                    const title = hasFiles
                       ? `Scanning ${snapshot.rootPath}…`
-                      : `Indexing ${snapshot.rootPath}…`}
-                  </div>
-                  <div style={{ fontSize: 11, color: "var(--text-muted)" }}>
-                    {snapshot.filesVisited > 0
+                      : longLoad
+                        ? `Preparing from previous scan of ${snapshot.rootPath}…`
+                        : `Starting scan of ${snapshot.rootPath}…`;
+                    const sub = hasFiles
                       ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
-                      : `Enumerating the root directory — largest files appear as soon as the first few are seen (${formatElapsed(displayElapsedMs)} elapsed)`}
-                  </div>
+                      : longLoad
+                        ? `Reading the prior scan's index so unchanged folders can be inherited instead of re-walked (${formatElapsed(displayElapsedMs)} elapsed).`
+                        : `Enumerating the root — largest files appear as soon as the first few are seen (${formatElapsed(displayElapsedMs)} elapsed)`;
+                    return (
+                      <>
+                        <div style={{ fontSize: 13, color: "var(--text)" }}>{title}</div>
+                        <div style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 480, textAlign: "center" }}>
+                          {sub}
+                        </div>
+                      </>
+                    );
+                  })()}
                 </div>
               ) : snapshot.status === "idle" && snapshot.rootPath && treemapFiles.length === 0 ? (
                 // Valid root selected but never scanned — offer a clear CTA.

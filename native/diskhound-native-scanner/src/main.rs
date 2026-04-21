@@ -242,7 +242,14 @@ impl Baseline {
     /// (mtimes + cumulative file counts + cumulative bytes) without
     /// materializing individual file records. File data is re-streamed in
     /// `stream_inherited_files_into` after the walk completes.
-    fn load_metadata(path: &Path) -> Option<Baseline> {
+    ///
+    /// Calls `on_heartbeat` every `HEARTBEAT_LINES` lines so the caller
+    /// can emit Progress snapshots during baseline load — on a drive with
+    /// millions of prior-scan records this phase used to take 20-40s of
+    /// stdout silence, long enough for the renderer's "0 files" display
+    /// to look dead.
+    fn load_metadata<F: FnMut(u64)>(path: &Path, mut on_heartbeat: F) -> Option<Baseline> {
+        const HEARTBEAT_LINES: u64 = 100_000;
         let file = File::open(path).ok()?;
         let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
 
@@ -250,36 +257,53 @@ impl Baseline {
         let mut dirs: HashSet<String> = HashSet::new();
         let mut dir_file_counts: HashMap<String, u64> = HashMap::new();
         let mut dir_total_sizes: HashMap<String, u64> = HashMap::new();
+        let mut lines_read: u64 = 0;
+
+        // Typed-struct deserialization — measurably faster than the prior
+        // serde_json::Value approach because serde can stream the fields
+        // it cares about without building a dynamic tree per line.
+        #[derive(serde::Deserialize)]
+        struct BaselineRec<'a> {
+            p: &'a str,
+            #[serde(default)]
+            s: Option<u64>,
+            #[serde(default)]
+            t: Option<&'a str>,
+            #[serde(default)]
+            m: Option<u64>,
+        }
 
         for line in reader.lines() {
             let Ok(line) = line else { continue };
             if line.is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            lines_read += 1;
+            if lines_read % HEARTBEAT_LINES == 0 {
+                on_heartbeat(lines_read);
+            }
+
+            let Ok(rec) = serde_json::from_str::<BaselineRec>(&line) else {
                 continue;
             };
-            let Some(path_str) = value.get("p").and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let is_dir = value.get("t").and_then(|v| v.as_str()) == Some("d");
-            let normalized = normalize_path(Path::new(path_str));
+            let is_dir = rec.t == Some("d");
+            let normalized = normalize_path(Path::new(rec.p));
 
             if is_dir {
-                let mtime = value.get("m").and_then(|v| v.as_u64()).unwrap_or(0);
+                let mtime = rec.m.unwrap_or(0);
                 dir_mtimes.insert(normalized.clone(), mtime);
                 dirs.insert(normalized);
                 continue;
             }
 
-            let Some(size) = value.get("s").and_then(|v| v.as_u64()) else {
+            let Some(size) = rec.s else {
                 continue;
             };
 
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
             // the walk without having to store individual file records.
-            let mut current = Path::new(path_str).parent().map(normalize_path);
+            let mut current = Path::new(rec.p).parent().map(normalize_path);
             while let Some(dir) = current {
                 if dir.is_empty() {
                     break;
@@ -295,6 +319,9 @@ impl Baseline {
                 current = parent;
             }
         }
+
+        // Final heartbeat so the caller sees the full line count.
+        on_heartbeat(lines_read);
 
         Some(Baseline {
             baseline_path: path.to_path_buf(),
@@ -618,14 +645,41 @@ fn run() -> Result<(), String> {
     };
 
     let root_path_string = normalize_path(&root_path);
+    let scan_started_ms = unix_timestamp_ms(SystemTime::now());
+    let scan_started_instant = Instant::now();
+
+    // Emit an early "running" snapshot BEFORE baseline loading so the
+    // renderer sees the scan is alive even when baseline parsing takes
+    // a while on huge drives. Without this the UI sat on its pre-scan
+    // "0 files, 0 bytes" placeholder for 20-40s during a rescan.
+    let _ = emit_message(&Message::Progress {
+        snapshot: early_running_snapshot(&root_path_string, scan_started_ms, 0),
+    });
 
     // Load baseline if provided. Silent fallback to None on any failure
     // (missing file, corrupt gzip, malformed NDJSON) — the scanner just
-    // does a full walk as before.
-    let baseline = input
-        .baseline_index
-        .as_deref()
-        .and_then(|path| if path.exists() { Baseline::load_metadata(path) } else { None });
+    // does a full walk as before. We pass a heartbeat closure so each
+    // ~100k-line chunk fires a snapshot carrying the current elapsed
+    // time; keeps the UI alive during long baseline parses.
+    let baseline = input.baseline_index.as_deref().and_then(|path| {
+        if !path.exists() {
+            return None;
+        }
+        let root_for_heartbeat = root_path_string.clone();
+        Baseline::load_metadata(path, |_lines_read| {
+            // Stderr line lands in the scanner's log buffer so we can
+            // confirm the fast path in production without noise on stdout
+            // (stdout is reserved for Progress/Done messages).
+            eprintln!(
+                "[diskhound-native-scanner] baseline load heartbeat: {} lines",
+                _lines_read
+            );
+            let elapsed = scan_started_instant.elapsed().as_millis() as u64;
+            let _ = emit_message(&Message::Progress {
+                snapshot: early_running_snapshot(&root_for_heartbeat, scan_started_ms, elapsed),
+            });
+        })
+    });
 
     let mut state = ScanState {
         input: ScanInput {
@@ -636,8 +690,8 @@ fn run() -> Result<(), String> {
             baseline_index: input.baseline_index.clone(),
         },
         root_path_string: root_path_string.clone(),
-        started_at_ms: unix_timestamp_ms(SystemTime::now()),
-        started_at_instant: Instant::now(),
+        started_at_ms: scan_started_ms,
+        started_at_instant: scan_started_instant,
         files_visited: 0,
         directories_visited: 0,
         skipped_entries: 0,
@@ -1106,6 +1160,32 @@ impl ScanState {
             error_message,
             last_updated_at: now_ms,
         }
+    }
+}
+
+/// Minimal Progress snapshot emitted before ScanState is built — during
+/// the baseline-load phase of a rescan. All counters are zero; the UI
+/// uses `status = Running` and `started_at` so it can show "Preparing…"
+/// and start its live elapsed ticker instead of looking frozen.
+fn early_running_snapshot(root_path: &str, started_at_ms: u64, elapsed_ms: u64) -> ScanSnapshot {
+    let now_ms = unix_timestamp_ms(SystemTime::now());
+    ScanSnapshot {
+        status: ScanStatus::Running,
+        engine: ScanEngine::NativeSidecar,
+        root_path: Some(root_path.to_string()),
+        scan_options: ScanOptions {},
+        started_at: Some(started_at_ms),
+        finished_at: None,
+        elapsed_ms,
+        files_visited: 0,
+        directories_visited: 0,
+        skipped_entries: 0,
+        bytes_seen: 0,
+        largest_files: Vec::new(),
+        hottest_directories: Vec::new(),
+        top_extensions: Vec::new(),
+        error_message: None,
+        last_updated_at: now_ms,
     }
 }
 

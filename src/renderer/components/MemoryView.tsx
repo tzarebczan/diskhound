@@ -385,32 +385,33 @@ export function MemoryView() {
           placeholder="Filter by name or PID..."
         />
         <div className="memory-toolbar-spacer" />
-        {/* CPU scale toggle — shown everywhere so List/Treemap/Heatmap all
-         * stay in sync. "Overall" matches Task Manager (each process
-         * as share of 100% total system). "Active" shows each process's
-         * share of the CURRENT load — non-idle processes sum to ~100%
-         * so you can spot "when my CPU is busy, who's driving it?" even
-         * during light overall load. */}
-        <div className="memory-cpu-scale-switch" role="tablist" aria-label="CPU scale">
-          <button
-            type="button"
-            className={`memory-cpu-scale-btn ${cpuScale === "overall" ? "active" : ""}`}
-            aria-pressed={cpuScale === "overall"}
-            title="Overall — % of total system CPU. Idle machine ≈ 0% across the board. Matches Task Manager."
-            onClick={() => setCpuScale("overall")}
-          >
-            Overall
-          </button>
-          <button
-            type="button"
-            className={`memory-cpu-scale-btn ${cpuScale === "active" ? "active" : ""}`}
-            aria-pressed={cpuScale === "active"}
-            title="Active — share of current CPU load. Busy processes sum to ~100% regardless of how much of the machine is in use."
-            onClick={() => setCpuScale("active")}
-          >
-            Active
-          </button>
-        </div>
+        {/* CPU scale toggle — only visible on views that actually show
+         * CPU (list + heatmap). The treemap sorts by memory, so the
+         * toggle would be confusing there. "Overall" matches Task
+         * Manager; "Active" shows each process's share of the current
+         * load so busy processes sum to ~100% regardless of total use. */}
+        {viewMode !== "treemap" && (
+          <div className="memory-cpu-scale-switch" role="tablist" aria-label="CPU scale">
+            <button
+              type="button"
+              className={`memory-cpu-scale-btn ${cpuScale === "overall" ? "active" : ""}`}
+              aria-pressed={cpuScale === "overall"}
+              title="Overall — % of total system CPU. Idle machine ≈ 0% across the board. Matches Task Manager."
+              onClick={() => setCpuScale("overall")}
+            >
+              Overall
+            </button>
+            <button
+              type="button"
+              className={`memory-cpu-scale-btn ${cpuScale === "active" ? "active" : ""}`}
+              aria-pressed={cpuScale === "active"}
+              title="Active — share of current CPU load. Busy processes sum to ~100% regardless of how much of the machine is in use."
+              onClick={() => setCpuScale("active")}
+            >
+              Active
+            </button>
+          </div>
+        )}
         {loadingPhase === "refreshing" && (
           <span className="memory-refresh-indicator" title="Refreshing…">
             <span className="memory-refresh-dot" />

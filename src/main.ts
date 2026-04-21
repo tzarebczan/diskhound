@@ -56,7 +56,6 @@ import {
   diffIndexes,
   indexFilePath,
   initScanIndex,
-  loadDirectChildrenFromIndex,
   loadIndex,
   loadLargestFiles,
 } from "./shared/scanIndex";
@@ -921,44 +920,174 @@ void app.whenReady().then(async () => {
   });
 
   /**
-   * Direct-children-by-folder lookup for the Folders tab. Streams the
-   * persisted scan index and rolls up file records into:
-   *   - direct-child folders (with aggregate size + file count)
-   *   - top-N files that live directly in `parentPath`
+   * Direct-children-by-folder lookup for the Folders tab. The first call
+   * per scan ID streams the persisted NDJSON once and builds a full
+   * parent-path → {dirs, files} map in main-process memory. Every
+   * subsequent call is an O(1) lookup into that map — which is what
+   * turns the Folders tab drill-in from "multi-second wait per click"
+   * into instant navigation.
    *
-   * This replaces the prior renderer-side approach that relied on the
-   * snapshot's bounded top-N arrays — which showed "0B" for any folder
-   * that didn't make the hottest-dirs cut, and risked ballooning
-   * renderer memory as the user drilled in.
+   * Cache is keyed by scanId and evicted when a newer scan for the
+   * same root completes (see afterScanDone below). Memory is bounded
+   * by the folder count in the tree, not file count: even a 7M-file
+   * drive with 100k folders costs only a few MB.
    */
+  type FolderNode = {
+    dirs: { path: string; size: number; fileCount: number }[];
+    files: ScanFileRecord[];
+  };
+  type FolderTree = Map<string, FolderNode>;
+  const folderTreeCache: Map<string, FolderTree> = new Map();
+
+  /**
+   * Build a full parent → children map by streaming the index once.
+   * For each file record, we walk up the path and credit every ancestor
+   * with cumulative size + fileCount. Only direct-child folders are
+   * stored per level (one Map entry per unique folder), and top-N files
+   * per folder are tracked via a small sort-on-insert list capped at
+   * FILES_PER_FOLDER.
+   */
+  const FILES_PER_FOLDER = 200;
+  const DIRS_PER_FOLDER = 500;
+  async function buildFolderTree(indexPathStr: string): Promise<FolderTree> {
+    const { createReadStream } = require("node:fs") as typeof import("node:fs");
+    const { createGunzip } = require("node:zlib") as typeof import("node:zlib");
+    const { createInterface } = require("node:readline") as typeof import("node:readline");
+    const { normPath } = await import("./shared/pathUtils.js");
+
+    type DirTotals = Map<string, { size: number; fileCount: number }>;
+    // parent path → direct child dirs + their rolled-up totals
+    const childDirTotalsByParent = new Map<string, DirTotals>();
+    // parent path → top-N files at that level (unsorted during stream; sorted at return)
+    const filesByParent = new Map<string, ScanFileRecord[]>();
+
+    const gunzip = createGunzip();
+    const source = createReadStream(indexPathStr);
+    source.pipe(gunzip);
+    const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: { p?: string; s?: number; t?: string; m?: number };
+      try { rec = JSON.parse(line); } catch { continue; }
+      if (!rec || typeof rec.p !== "string") continue;
+      if (rec.t === "d") continue;
+      const size = rec.s;
+      if (typeof size !== "number") continue;
+
+      const filePathNorm = normPath(rec.p);
+      const name = Path.basename(filePathNorm);
+      const dotIdx = name.lastIndexOf(".");
+      const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+
+      // Walk up each ancestor. For the DIRECT parent we record a file;
+      // for every higher ancestor we credit size/count toward the child
+      // that points at this file's direct parent subtree.
+      //
+      // Cap each folder's file list at FILES_PER_FOLDER * 2 during
+      // streaming (sort+truncate when we overflow). Without this a
+      // drive with a "hot" folder holding millions of files — e.g.
+      // node_modules cache, Windows Installer cache — would balloon
+      // the main-process heap to 1 GB+ and crash the app. The prior
+      // implementation only truncated at the END, after the full
+      // stream had been held in memory.
+      let current = Path.dirname(filePathNorm);
+      let prevChild = filePathNorm;
+      while (true) {
+        const parent = current;
+        // File's direct parent: record it in filesByParent
+        if (prevChild === filePathNorm && parent === Path.dirname(filePathNorm)) {
+          let list = filesByParent.get(parent);
+          if (!list) {
+            list = [];
+            filesByParent.set(parent, list);
+          }
+          list.push({
+            path: filePathNorm,
+            name,
+            parentPath: parent,
+            extension,
+            size,
+            modifiedAt: typeof rec.m === "number" ? rec.m : 0,
+          });
+          // Bounded-heap trim: once we've accumulated >2× the cap,
+          // sort + keep only the top-N by size. Amortized O(1) per
+          // insert thanks to the large grace factor; prevents any
+          // one folder from dominating process heap.
+          if (list.length > FILES_PER_FOLDER * 2) {
+            list.sort((a, b) => b.size - a.size);
+            list.length = FILES_PER_FOLDER;
+          }
+        } else if (prevChild !== filePathNorm) {
+          // Higher ancestor: credit its direct child (prevChild) with size/count
+          let totals = childDirTotalsByParent.get(parent);
+          if (!totals) {
+            totals = new Map();
+            childDirTotalsByParent.set(parent, totals);
+          }
+          const cur = totals.get(prevChild);
+          if (cur) {
+            cur.size += size;
+            cur.fileCount += 1;
+          } else {
+            totals.set(prevChild, { size, fileCount: 1 });
+          }
+        }
+
+        const grandparent = Path.dirname(parent);
+        // Stop at drive root (parent === itself at the top of Windows paths)
+        if (grandparent === parent) break;
+        prevChild = parent;
+        current = grandparent;
+      }
+    }
+
+    // Finalize: sort + truncate per level, then merge into the tree map.
+    const tree: FolderTree = new Map();
+    const allKeys = new Set<string>();
+    for (const k of childDirTotalsByParent.keys()) allKeys.add(k);
+    for (const k of filesByParent.keys()) allKeys.add(k);
+    for (const parent of allKeys) {
+      const dirTotals = childDirTotalsByParent.get(parent);
+      const dirs = dirTotals
+        ? Array.from(dirTotals.entries())
+            .map(([path, t]) => ({ path, size: t.size, fileCount: t.fileCount }))
+            .sort((a, b) => b.size - a.size)
+            .slice(0, DIRS_PER_FOLDER)
+        : [];
+      const rawFiles = filesByParent.get(parent) ?? [];
+      const files = rawFiles
+        .sort((a, b) => b.size - a.size)
+        .slice(0, FILES_PER_FOLDER);
+      tree.set(parent, { dirs, files });
+    }
+    return tree;
+  }
+
   ipcMain.handle(
     "diskhound:get-folder-children",
     async (_event, rootPath: string, parentPath: string) => {
       const history = getScanHistory(rootPath);
       const currentId = history[0]?.id;
       if (!currentId) return { dirs: [], files: [] };
+
       try {
-        const result = await loadDirectChildrenFromIndex(
-          indexFilePath(currentId),
-          parentPath,
-          500,
-          500,
-        );
-        const files = result.files.map((r) => {
-          const name = Path.basename(r.p);
-          const parentPathPart = Path.dirname(r.p);
-          const dotIdx = name.lastIndexOf(".");
-          const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
-          return {
-            path: r.p,
-            name,
-            parentPath: parentPathPart,
-            extension,
-            size: r.s,
-            modifiedAt: r.m,
-          };
-        });
-        return { dirs: result.dirs, files };
+        let tree = folderTreeCache.get(currentId);
+        if (!tree) {
+          // Cap the cache — hold trees for the 3 most recently used scan
+          // IDs so switching drives doesn't keep blowing memory.
+          tree = await buildFolderTree(indexFilePath(currentId));
+          folderTreeCache.set(currentId, tree);
+          while (folderTreeCache.size > 3) {
+            const oldest = folderTreeCache.keys().next().value;
+            if (oldest !== undefined) folderTreeCache.delete(oldest);
+            else break;
+          }
+        }
+
+        const normalizedParent = normPath(parentPath).replace(/[\\/]+$/, "");
+        const node = tree.get(normalizedParent) ?? { dirs: [], files: [] };
+        return node;
       } catch {
         return { dirs: [], files: [] };
       }

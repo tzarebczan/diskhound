@@ -1912,15 +1912,45 @@ button, input, select, textarea { font: inherit; }
   padding: 4px 0;
 }
 
+/* Column header row — sits above the folder list, purely labels. */
+.folder-list-header {
+  display: grid;
+  grid-template-columns: 26px 1fr 180px 64px 90px 70px 110px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.folder-list-header > span:nth-child(3) {
+  text-align: left;
+}
+.folder-list-header > span:nth-child(4),
+.folder-list-header > span:nth-child(5),
+.folder-list-header > span:nth-child(6) {
+  text-align: right;
+}
+
 /* Directory row */
 .folder-row {
   display: grid;
-  grid-template-columns: 28px 1fr 140px 80px 80px auto;
+  grid-template-columns: 26px 1fr 180px 64px 90px 70px 110px;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-bottom: 1px solid rgba(255,255,255,0.02);
-  transition: background 0.1s;
+  gap: 10px;
+  padding: 9px 16px;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  transition: background 0.12s, border-color 0.12s;
+}
+:root.light .folder-row {
+  border-bottom-color: rgba(0,0,0,0.03);
 }
 .folder-row:hover {
   background: var(--bg-row-hover);
@@ -1929,8 +1959,19 @@ button, input, select, textarea { font: inherit; }
   cursor: pointer;
 }
 .folder-row-clickable:hover {
-  background: rgba(245, 158, 11, 0.04);
-  border-bottom-color: rgba(245, 158, 11, 0.06);
+  background: linear-gradient(90deg, rgba(245,158,11,0.07), rgba(245,158,11,0.02));
+  border-bottom-color: rgba(245,158,11,0.12);
+}
+/* Informational row — "+N more …" footer hints */
+.folder-row-note {
+  grid-template-columns: 1fr;
+  padding: 10px 16px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+  text-align: center;
+  background: rgba(255,255,255,0.015);
+  pointer-events: none;
 }
 
 /* Folder icon */
@@ -1980,20 +2021,30 @@ button, input, select, textarea { font: inherit; }
   transform: translateX(2px);
 }
 
-/* Size bar */
+/* Subtree-percentage bar — larger + more prominent than a filler strip,
+ * styled to feel like a mini-bar chart so users can scan share across
+ * a folder's children at a glance (WinDirStat-style). */
 .folder-row-bar-col {
   padding: 0 4px;
 }
 .folder-row-bar {
-  height: 6px;
+  height: 10px;
   border-radius: 3px;
-  background: rgba(255,255,255,0.04);
+  background: rgba(255,255,255,0.03);
   overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.02);
+  box-shadow: inset 0 1px 0 rgba(0,0,0,0.18);
+}
+:root.light .folder-row-bar {
+  background: rgba(0,0,0,0.04);
+  border-color: rgba(0,0,0,0.04);
+  box-shadow: inset 0 1px 0 rgba(0,0,0,0.04);
 }
 .folder-row-bar-fill {
   height: 100%;
   border-radius: 3px;
   transition: width 0.4s ease;
+  box-shadow: 0 0 6px rgba(245,158,11,0.15);
 }
 .folder-row-bar-fill.hot {
   background: linear-gradient(90deg, var(--orange), var(--red));
@@ -2021,7 +2072,9 @@ button, input, select, textarea { font: inherit; }
   font-weight: 400;
 }
 
-/* Meta column (file count + pct) */
+/* Meta column (file count + pct) — kept for backwards compat. Newer
+ * rows render file count and % as their own columns for cleaner
+ * alignment with the column headers. */
 .folder-row-meta-col {
   display: flex;
   flex-direction: column;
@@ -2030,13 +2083,17 @@ button, input, select, textarea { font: inherit; }
 }
 .folder-row-file-count {
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: 11.5px;
   color: var(--text-tertiary);
+  text-align: right;
+  letter-spacing: 0.01em;
 }
 .folder-row-pct {
   font-family: var(--font-mono);
-  font-size: 10px;
-  color: var(--text-muted);
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+  font-weight: 500;
 }
 
 /* Actions column (reveal/open on hover) */

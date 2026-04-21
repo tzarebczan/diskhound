@@ -708,7 +708,9 @@ export function App() {
               <>
                 <span>&middot;</span>
                 <span className="scan-progress-ticker">
-                  {snapshot.filesVisited.toLocaleString()} files &middot; {formatBytes(snapshot.bytesSeen)}
+                  {snapshot.filesVisited > 0
+                    ? `${snapshot.filesVisited.toLocaleString()} files · ${formatBytes(snapshot.bytesSeen)}`
+                    : "preparing…"}
                 </span>
               </>
             )}

@@ -95,12 +95,15 @@ export function FolderList({ snapshot }: Props) {
   }, [currentPath]);
 
   // Fetch real children (size + count) from the persisted index every
-  // time the user navigates. The IPC streams the gzipped NDJSON once
-  // per call and rolls up — typically 1–3s on a drive-scale index,
-  // but for most drill-ins it's a couple hundred KB and returns
-  // instantly. We debounce by the currentPath dependency alone; the
-  // IPC is idempotent so a stale request landing after a newer one
-  // just gets ignored via the `cancelled` flag.
+  // time the user navigates. The first call per scan streams the full
+  // index into an in-memory tree on the main process (O(seconds) for a
+  // large drive); subsequent drill-ins return instantly from cache.
+  //
+  // We clear the visible rows synchronously on navigate so the old
+  // folder's contents don't linger while the new IPC is in flight —
+  // that was the "path changes but list stays the same" bug users
+  // reported before this rewrite. A matching `loading` flag drives the
+  // visible placeholder so users know the empty state is temporary.
   useEffect(() => {
     if (!rootPath || !currentPath) {
       setChildren([]);
@@ -108,6 +111,12 @@ export function FolderList({ snapshot }: Props) {
       return;
     }
     let cancelled = false;
+    // Clear immediately so the UI reflects the new path even while the
+    // IPC is resolving. Without this the old parent's rows stay
+    // visible until the promise lands, which users read as "clicking
+    // did nothing."
+    setChildren([]);
+    setLooseFiles([]);
     setLoading(true);
     void nativeApi.getFolderChildren(rootPath, currentPath).then((res) => {
       if (cancelled) return;
@@ -232,9 +241,20 @@ export function FolderList({ snapshot }: Props) {
         </button>
       </div>
 
+      {/* ── Column headers ── */}
+      <div className="folder-list-header">
+        <span />
+        <span>Name</span>
+        <span>Subtree %</span>
+        <span>%</span>
+        <span>Size</span>
+        <span>Files</span>
+        <span />
+      </div>
+
       {/* ── Directory list ── */}
       <div className="folder-list-scroll">
-        {loading && children.length === 0 && looseFiles.length === 0 ? (
+        {loading ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>Loading folder contents…</span>
           </div>
@@ -294,8 +314,11 @@ export function FolderList({ snapshot }: Props) {
                       />
                     </div>
                   </div>
+                  <div className="folder-row-pct" style={{ color: "var(--text-muted)" }}>
+                    {folderTotal > 0 ? ((looseTotal / folderTotal) * 100).toFixed(1) : "0.0"}%
+                  </div>
                   <div className="folder-row-size folder-row-size-other">{formatBytes(looseTotal)}</div>
-                  <div className="folder-row-meta-col" />
+                  <div className="folder-row-file-count">{formatCount(looseFiles.length)}</div>
                   <div className="folder-row-actions-col" />
                 </div>
                 {showOtherFiles && (
@@ -380,11 +403,9 @@ function FolderRow(props: {
           />
         </div>
       </div>
+      <div className="folder-row-pct">{pct.toFixed(1)}%</div>
       <div className="folder-row-size">{formatBytes(dir.size)}</div>
-      <div className="folder-row-meta-col">
-        <span className="folder-row-file-count">{formatCount(dir.fileCount)}</span>
-        <span className="folder-row-pct">{pct.toFixed(1)}%</span>
-      </div>
+      <div className="folder-row-file-count">{formatCount(dir.fileCount)}</div>
       <div className="folder-row-actions-col">
         <button
           className="action-btn"

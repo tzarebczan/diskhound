@@ -241,18 +241,12 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               </svg>
             </div>
             <div className="duplicates-empty-text">Find duplicate files</div>
-            <div className="duplicates-empty-hint">
-              Files are compared by content (SHA-256 hash), not by name —
-              a photo copy with a different filename still counts. A 4KB
-              prefix pre-check fast-rejects most non-matches so scans of
-              large trees stay quick.
-            </div>
             <div className="duplicates-empty-scope">
               Scope: <code>{effectiveScope || "—"}</code>
               <span className="duplicates-empty-scope-hint">
                 {scopeOverride
                   ? "narrowed from scan root"
-                  : "= current scan root (change via \"Change scope\" above)"}
+                  : "current scan root — change above"}
               </span>
             </div>
           </div>
