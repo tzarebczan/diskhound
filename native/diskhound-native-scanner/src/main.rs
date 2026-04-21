@@ -661,6 +661,7 @@ fn run() -> Result<(), String> {
     // does a full walk as before. We pass a heartbeat closure so each
     // ~100k-line chunk fires a snapshot carrying the current elapsed
     // time; keeps the UI alive during long baseline parses.
+    let baseline_load_started = Instant::now();
     let baseline = input.baseline_index.as_deref().and_then(|path| {
         if !path.exists() {
             return None;
@@ -680,6 +681,14 @@ fn run() -> Result<(), String> {
             });
         })
     });
+    if input.baseline_index.is_some() {
+        eprintln!(
+            "[diskhound-native-scanner] phase: baseline load took {} ms (loaded={}, dirs={})",
+            baseline_load_started.elapsed().as_millis(),
+            baseline.is_some(),
+            baseline.as_ref().map(|b| b.dirs.len()).unwrap_or(0),
+        );
+    }
 
     let mut state = ScanState {
         input: ScanInput {
@@ -718,7 +727,16 @@ fn run() -> Result<(), String> {
         },
     );
 
+    let walk_started = Instant::now();
     scan_root(&root_path, &mut state)?;
+    eprintln!(
+        "[diskhound-native-scanner] phase: walk took {} ms (files={}, dirs={}, inherited_dirs={}, inherited_files={})",
+        walk_started.elapsed().as_millis(),
+        state.files_visited,
+        state.directories_visited,
+        state.inherited_dirs,
+        state.inherited_files,
+    );
 
     let final_status = if is_cancelled() {
         ScanStatus::Cancelled

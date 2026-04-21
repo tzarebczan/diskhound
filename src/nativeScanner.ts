@@ -17,6 +17,10 @@ export interface NativeScannerSession {
 
 export interface NativeScannerCallbacks {
   onMessage: (message: WorkerToMainMessage) => void;
+  /** Called for every stderr line the scanner emits. Used to surface
+   *  phase-timing diagnostics without parsing them as protocol
+   *  messages. Optional — many callers don't care. */
+  onStderrLine?: (line: string) => void;
   onError: (error: Error) => void;
 }
 
@@ -139,10 +143,26 @@ export function createNativeScannerSession(
     }
   });
 
+  // We split stderr on newlines so the main process can treat each
+  // line individually — the Rust scanner emits human-readable phase
+  // timings like
+  //   [diskhound-native-scanner] phase: walk took 412315 ms (files=7M, ...)
+  // which are the single most useful diagnostic when investigating
+  // why a scan took as long as it did. The final trailing buffer
+  // covers any line that hasn't been newline-terminated yet on exit.
+  let stderrLineBuffer = "";
   child.stderr.on("data", (chunk: string) => {
     stderrBuffer += chunk;
     if (stderrBuffer.length > 16_384) {
       stderrBuffer = stderrBuffer.slice(-16_384);
+    }
+    stderrLineBuffer += chunk;
+    while (true) {
+      const nl = stderrLineBuffer.indexOf("\n");
+      if (nl === -1) break;
+      const line = stderrLineBuffer.slice(0, nl).replace(/\r$/, "");
+      stderrLineBuffer = stderrLineBuffer.slice(nl + 1);
+      if (line.length > 0) callbacks.onStderrLine?.(line);
     }
   });
 
