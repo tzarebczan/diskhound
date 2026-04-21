@@ -262,13 +262,25 @@ impl Baseline {
         // Typed-struct deserialization — measurably faster than the prior
         // serde_json::Value approach because serde can stream the fields
         // it cares about without building a dynamic tree per line.
+        //
+        // IMPORTANT: we MUST use owned `String` (not borrowed `&str`) for
+        // `p` and `t`. Windows paths in the NDJSON source contain escaped
+        // backslashes ("C:\\\\Users\\\\foo"), and serde_json cannot give
+        // back a borrowed slice when the unescaped result is shorter
+        // than the source buffer. Using `&'a str` here silently failed
+        // to deserialize EVERY record containing a backslash — which on
+        // Windows is literally every path — destroying Phase-1 mtime-skip
+        // inheritance across all v0.3.5-v0.3.10 builds (user-visible
+        // symptom: rescans took the same 20 minutes as first-time
+        // scans, and `phase: baseline load` logged `dirs=0` even when
+        // the baseline index contained 1.2M directory entries).
         #[derive(serde::Deserialize)]
-        struct BaselineRec<'a> {
-            p: &'a str,
+        struct BaselineRec {
+            p: String,
             #[serde(default)]
             s: Option<u64>,
             #[serde(default)]
-            t: Option<&'a str>,
+            t: Option<String>,
             #[serde(default)]
             m: Option<u64>,
         }
@@ -286,8 +298,8 @@ impl Baseline {
             let Ok(rec) = serde_json::from_str::<BaselineRec>(&line) else {
                 continue;
             };
-            let is_dir = rec.t == Some("d");
-            let normalized = normalize_path(Path::new(rec.p));
+            let is_dir = rec.t.as_deref() == Some("d");
+            let normalized = normalize_path(Path::new(&rec.p));
 
             if is_dir {
                 let mtime = rec.m.unwrap_or(0);
@@ -303,7 +315,7 @@ impl Baseline {
             // Bubble the file's size/count up to every ancestor directory.
             // This gives us O(1) "how much is under dir D" lookups during
             // the walk without having to store individual file records.
-            let mut current = Path::new(rec.p).parent().map(normalize_path);
+            let mut current = Path::new(&rec.p).parent().map(normalize_path);
             while let Some(dir) = current {
                 if dir.is_empty() {
                     break;

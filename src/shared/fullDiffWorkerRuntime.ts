@@ -354,7 +354,22 @@ export async function runFullDiffWorker(
   input: FullDiffWorkerInput,
   options: RunFullDiffWorkerOptions,
 ): Promise<FullDiffResult | null> {
-  const worker = new Worker(options.workerPath);
+  // Bump the worker's old-generation heap to 4 GB. Default in Node
+  // worker threads is ~2 GB, which a C:\-scale full diff can blow
+  // while parsing both indexes into Map<path, record> — we saw one
+  // real crash in the wild (14:40:20.468Z entry, "Full diff worker
+  // exited with code 1") caused by exactly this.
+  //
+  // Raising the limit doesn't actually commit the memory until it's
+  // touched, so the cost in the common "small diff" case is zero.
+  // V8 will still abort if the OS actually runs out, but on a modern
+  // Windows box with ~16+ GB RAM this gives us comfortable headroom.
+  const worker = new Worker(options.workerPath, {
+    resourceLimits: {
+      maxOldGenerationSizeMb: 4096,
+      maxYoungGenerationSizeMb: 256,
+    },
+  });
   const requestId = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 
   return await new Promise<FullDiffResult | null>((resolve, reject) => {
@@ -401,7 +416,15 @@ export async function runFullDiffWorker(
 
     const onExit = (code: number) => {
       if (!settled && code !== 0) {
-        settle(() => reject(new Error(`Full diff worker exited with code ${code}`)));
+        // Code 1 on a worker thread is almost always the V8 heap
+        // running out of room (ERR_WORKER_OUT_OF_MEMORY surfaces as
+        // exit code 1 in node:worker_threads). Tag it explicitly so
+        // the crash log line reads as a diagnosis rather than a
+        // generic "exited with code 1."
+        const detail = code === 1
+          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 4 GB heap — consider a smaller diff pair.`
+          : `Full diff worker exited with code ${code}`;
+        settle(() => reject(new Error(detail)));
       }
     };
 
