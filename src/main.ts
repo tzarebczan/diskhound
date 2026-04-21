@@ -144,6 +144,20 @@ app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("enable-oop-rasterization");
 app.commandLine.appendSwitch("enable-zero-copy");
 
+// Raise V8's old-generation heap ceiling for the main process from the
+// default ~4 GB to 8 GB. On big drives (1M+ directories) the post-scan
+// pipeline briefly holds BOTH the old cached folder tree (evicted just
+// after) AND the newly-built one (being pre-warmed) — heapTotal spikes
+// past 4 GB and V8 hard-aborts the process with NO crash-log line,
+// because the abort bypasses our uncaughtException/unhandledRejection
+// handlers. Observed in the wild: RSS 3886 MB + heapTotal 3524 MB right
+// before the process vanished at 17:11:05 (see crash.log).
+//
+// Extra ceiling only commits pages when touched; the common case pays
+// nothing. 8 GB is comfortable on a modern 16+ GB machine and still
+// leaves room for renderer + GPU + tray processes.
+app.commandLine.appendSwitch("js-flags", "--max-old-space-size=8192");
+
 let toastCounter = 0;
 const sendToast = (level: ToastMessage["level"], title: string, body?: string) => {
   const toast: ToastMessage = {
@@ -354,17 +368,27 @@ void app.whenReady().then(async () => {
             if (message.snapshot.rootPath) {
               invalidateFolderTreesForRoot(message.snapshot.rootPath, historyId);
             }
-            // Pre-warm the Folders-tab tree. ensureFolderTree streams the
-            // NDJSON once (a few seconds on huge drives) and caches the
-            // parent → children map. Doing it eagerly here means the
-            // user's first Folders drill-in after a scan is instant
-            // instead of a blocking IPC.
-            void ensureFolderTree(historyId, message.snapshot.rootPath ?? undefined).catch((err) => {
-              writeCrashLog(
-                "folder-tree-prewarm",
-                err instanceof Error ? (err.stack ?? err.message) : String(err),
-              );
-            });
+            // Pre-warm the Folders-tab tree, but DEFER it by a few
+            // seconds. Scan-complete leaves the main process with a
+            // large residue of transient allocations (snapshot history
+            // writes, progress-message arrays); kicking off another
+            // 500-800 MB allocation for the new tree immediately can
+            // push heapTotal past V8's ceiling before GC catches up —
+            // observed as a silent hard-abort on a 7.27 M-file C:\
+            // scan. A 3-second gap gives V8 time for a major GC cycle
+            // before we rebuild the tree.
+            const prewarmHistoryId = historyId;
+            const prewarmRootPath = message.snapshot.rootPath ?? undefined;
+            setTimeout(() => {
+              void ensureFolderTree(prewarmHistoryId, prewarmRootPath, {
+                skipIfMemoryPressureMb: PREWARM_RSS_CEILING_MB,
+              }).catch((err) => {
+                writeCrashLog(
+                  "folder-tree-prewarm",
+                  err instanceof Error ? (err.stack ?? err.message) : String(err),
+                );
+              });
+            }, 3000);
           } catch {
             // Scanner may have skipped or failed to write the index — ignore
           }
@@ -1329,8 +1353,20 @@ void app.whenReady().then(async () => {
    *
    * Optional `rootPath` is remembered in folderTreeRootByScanId so a
    * later same-root scan can evict stale siblings.
+   *
+   * Optional `abortIfMemoryOverMb` lets the PRE-WARM path skip the
+   * build when the main process is already sitting on a lot of heap
+   * (e.g. right after a huge scan completes). Returns an empty tree
+   * in that case instead of crashing the process with OOM — the user
+   * will pay the cold-build cost on their next Folders click, but
+   * the app survives to do it.
    */
-  const ensureFolderTree = async (id: string, rootPath?: string): Promise<FolderTree> => {
+  const PREWARM_RSS_CEILING_MB = 5500;
+  const ensureFolderTree = async (
+    id: string,
+    rootPath?: string,
+    opts?: { skipIfMemoryPressureMb?: number },
+  ): Promise<FolderTree> => {
     if (rootPath) folderTreeRootByScanId.set(id, normPath(rootPath));
     const existing = folderTreeCache.get(id);
     if (existing) {
@@ -1339,6 +1375,16 @@ void app.whenReady().then(async () => {
     }
     const inflight = folderTreeInflight.get(id);
     if (inflight) return inflight;
+    if (opts?.skipIfMemoryPressureMb) {
+      const rssMb = process.memoryUsage().rss / 1024 / 1024;
+      if (rssMb > opts.skipIfMemoryPressureMb) {
+        writeCrashLog(
+          "folder-tree-prewarm-skipped",
+          `RSS ${rssMb.toFixed(0)} MB > ${opts.skipIfMemoryPressureMb} MB — skipping pre-warm to avoid OOM. User's first Folders click will build cold.`,
+        );
+        return new Map();
+      }
+    }
 
     const pending = buildFolderTree(indexFilePath(id))
       .then((tree) => {
@@ -1983,14 +2029,21 @@ void app.whenReady().then(async () => {
       // Evict the prior tree for this root before building the new
       // one so peak memory doesn't double during the swap.
       invalidateFolderTreesForRoot(rootPath, historyId);
-      // Same pre-warm as the full-scan path — keep the Folders tab
-      // instant after incremental (USN-journal) rescans too.
-      void ensureFolderTree(historyId, rootPath).catch((err) => {
-        writeCrashLog(
-          "folder-tree-prewarm",
-          err instanceof Error ? (err.stack ?? err.message) : String(err),
-        );
-      });
+      // Same deferred pre-warm as the full-scan path — 3 s gap lets
+      // V8 reclaim scan-time transients before we allocate ~500-800
+      // MB for the new folder tree.
+      const prewarmId = historyId;
+      const prewarmRoot = rootPath;
+      setTimeout(() => {
+        void ensureFolderTree(prewarmId, prewarmRoot, {
+          skipIfMemoryPressureMb: PREWARM_RSS_CEILING_MB,
+        }).catch((err) => {
+          writeCrashLog(
+            "folder-tree-prewarm",
+            err instanceof Error ? (err.stack ?? err.message) : String(err),
+          );
+        });
+      }, 3000);
     } catch { /* ignore */ }
 
     for (const prunedId of consumeLastPrunedIds()) {
