@@ -1260,14 +1260,17 @@ void app.whenReady().then(async () => {
    */
   /**
    * Compact on-heap representation of a file inside the folder-tree
-   * cache. We intentionally skip `name`, `parentPath`, and `extension`
-   * because they're derivable from `path` — 1M parents × avg 5 files
-   * × ~60 redundant string bytes adds up to hundreds of MB of pure
-   * duplication otherwise. Expanded to the full ScanFileRecord shape
-   * on the way out of the IPC handler (toScanFileRecord below).
+   * cache. We store just the FILENAME (~15 bytes on average) — the
+   * parent path is already the Map key, so storing the file's full
+   * path was pure duplication. On a 7.27 M-file drive that cut each
+   * file entry from ~280 bytes to ~110 bytes — around 850 MB off the
+   * cache footprint at the observed 5M file-records total.
+   *
+   * Expanded to the full ScanFileRecord shape at the IPC boundary
+   * via makeFolderFileRecord() below.
    */
   type CompactFolderFile = {
-    path: string;
+    name: string;
     size: number;
     modifiedAt: number;
   };
@@ -1277,15 +1280,18 @@ void app.whenReady().then(async () => {
   };
   type FolderTree = Map<string, FolderNode>;
 
-  const toFolderFileRecord = (f: CompactFolderFile): ScanFileRecord => {
-    const name = Path.basename(f.path);
-    const parentPathDerived = Path.dirname(f.path);
-    const dotIdx = name.lastIndexOf(".");
-    const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+  /**
+   * Reconstruct a full ScanFileRecord from the compact cached form.
+   * Takes the parent path explicitly because the cache omits it — it's
+   * the Map key the caller already has.
+   */
+  const makeFolderFileRecord = (parentPath: string, f: CompactFolderFile): ScanFileRecord => {
+    const dotIdx = f.name.lastIndexOf(".");
+    const extension = dotIdx > 0 ? f.name.slice(dotIdx).toLowerCase() : "(no ext)";
     return {
-      path: f.path,
-      name,
-      parentPath: parentPathDerived,
+      path: `${parentPath}${Path.sep}${f.name}`,
+      name: f.name,
+      parentPath,
       extension,
       size: f.size,
       modifiedAt: f.modifiedAt,
@@ -1561,8 +1567,12 @@ void app.whenReady().then(async () => {
             list = [];
             filesByParent.set(parent, list);
           }
+          // Store just the filename — the parent path is the Map key
+          // already, so repeating it per file record was pure duplication
+          // and on this drive-scale tree was the single biggest heap
+          // consumer.
           list.push({
-            path: filePathNorm,
+            name: Path.basename(filePathNorm),
             size,
             modifiedAt: typeof rec.m === "number" ? rec.m : 0,
           });
@@ -1636,10 +1646,12 @@ void app.whenReady().then(async () => {
         // ScanFileRecord the renderer expects. Done on the way out
         // because the cache holds 1M+ parent entries and duplicating
         // name/parentPath/extension per file would burn hundreds of
-        // MB of heap for no runtime benefit.
+        // MB of heap for no runtime benefit. The cache stores filenames
+        // only — we pass `normalizedParent` so the full path can be
+        // reconstructed for the renderer.
         return {
           dirs: node.dirs,
-          files: node.files.map(toFolderFileRecord),
+          files: node.files.map((f) => makeFolderFileRecord(normalizedParent, f)),
         };
       } catch (err) {
         writeCrashLog(
