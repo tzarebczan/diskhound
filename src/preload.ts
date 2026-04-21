@@ -80,6 +80,8 @@ const api: DiskhoundNativeApi = {
   computeScanDiff: (baselineId, currentId) =>
     ipcRenderer.invoke("diskhound:compute-scan-diff", baselineId, currentId),
   getLatestDiff: (rootPath) => ipcRenderer.invoke("diskhound:get-latest-diff", rootPath),
+  getFullDiffStatus: (baselineId, currentId, limit) =>
+    ipcRenderer.invoke("diskhound:get-full-diff-status", baselineId, currentId, limit),
   computeFullScanDiff: (baselineId, currentId, limit) =>
     ipcRenderer.invoke("diskhound:compute-full-scan-diff", baselineId, currentId, limit),
   getTreemapFiles: (rootPath, limit) =>

@@ -81,7 +81,11 @@ function cycleThemePreference(theme: GeneralSettings["theme"]): GeneralSettings[
  */
 function rootKey(rootPath: string | null | undefined): string {
   if (!rootPath) return "";
-  return rootPath.replace(/[\\/]+$/, "").toLowerCase();
+  const trimmed = rootPath.replace(/[\\/]+$/, "");
+  if (typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)) {
+    return trimmed.toLowerCase();
+  }
+  return trimmed;
 }
 
 export function App() {

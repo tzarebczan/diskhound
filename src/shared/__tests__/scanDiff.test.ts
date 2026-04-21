@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { computeDiff } from "../scanDiff";
 import { createIdleScanSnapshot, type ScanFileRecord, type ScanSnapshot } from "../contracts";
+import { normPath } from "../pathUtils";
 
 function makeSnapshot(overrides: Partial<ScanSnapshot> = {}): ScanSnapshot {
   return {
@@ -152,7 +153,7 @@ describe("computeDiff", () => {
     expect(diff.extensionDeltas[0].previousCount).toBe(2);
   });
 
-  it("handles case-insensitive path matching", () => {
+  it("matches file paths using platform normalization rules", () => {
     const baseline = makeSnapshot({
       largestFiles: [makeFile("C:\\Test\\FILE.TXT", 1000)],
     });
@@ -161,9 +162,14 @@ describe("computeDiff", () => {
     });
     const diff = computeDiff(baseline, current, "b", "c");
 
-    // Should be treated as same file (grew), not added+removed
-    expect(diff.fileDeltas).toHaveLength(1);
-    expect(diff.fileDeltas[0].kind).toBe("grew");
+    if (normPath("C:\\Test\\FILE.TXT") === normPath("C:\\test\\file.txt")) {
+      expect(diff.fileDeltas).toHaveLength(1);
+      expect(diff.fileDeltas[0].kind).toBe("grew");
+      return;
+    }
+
+    expect(diff.fileDeltas).toHaveLength(2);
+    expect(diff.fileDeltas.map((delta) => delta.kind).sort()).toEqual(["added", "removed"]);
   });
 
   it("computes timeBetweenMs from finishedAt timestamps", () => {

@@ -57,7 +57,7 @@ function getInitialShowFolders(): boolean {
 // Dense treemap default — render up to this many files from the full file
 // index on disk. 10k is plenty dense for a WinDirStat feel without hurting
 // canvas render performance.
-const DENSE_TREEMAP_LIMIT = 10_000;
+const DENSE_TREEMAP_LIMIT = 5_000;
 
 export function Overview({ snapshot, onFilterExtension }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
@@ -93,13 +93,17 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
       setDenseFiles(null);
       return;
     }
+    if (snapshot.largestFiles.length >= DENSE_TREEMAP_LIMIT) {
+      setDenseFiles(null);
+      return;
+    }
     let cancelled = false;
     void nativeApi.getTreemapFiles(snapshot.rootPath, DENSE_TREEMAP_LIMIT).then((files) => {
       if (cancelled) return;
       setDenseFiles(files && files.length > 0 ? files : null);
     });
     return () => { cancelled = true; };
-  }, [snapshot.status, snapshot.rootPath]);
+  }, [snapshot.status, snapshot.rootPath, snapshot.largestFiles.length]);
 
   // Prefer the dense file list; fall back to the snapshot's top-N while a
   // scan is running or if the index isn't available.
@@ -491,7 +495,7 @@ function MonitoringNudge() {
       });
       setMonitoringEnabled(true);
       toast("success", "Background monitoring enabled",
-        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60}min and tell you what changed.`);
+        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60} min and keep recording new snapshots for comparison.`);
       dismiss();
     } finally {
       setEnabling(false);
@@ -511,8 +515,9 @@ function MonitoringNudge() {
       <div className="monitoring-nudge-text">
         <strong>Turn on background monitoring</strong>
         <span>
-          {" "}— DiskHound will quietly rescan on a schedule (~50× faster after the first scan
-          thanks to incremental walks) and the Changes tab will fill in automatically.
+          {" "}— DiskHound will rescan on a schedule and keep building scan history for this path.
+          On supported NTFS volumes, some follow-up scans can use the Windows change journal;
+          otherwise DiskHound falls back to scheduled rescans.
         </span>
       </div>
       <div className="monitoring-nudge-actions">

@@ -1,7 +1,10 @@
 import * as FS from "node:fs/promises";
 import * as FS_SYNC from "node:fs";
+import { createReadStream } from "node:fs";
 import * as Path from "node:path";
+import { createInterface } from "node:readline";
 import { Worker } from "node:worker_threads";
+import { createGunzip } from "node:zlib";
 
 import {
   app,
@@ -21,6 +24,8 @@ import {
   normalizeAppSettings,
   type AppSettings,
   type DirectoryHotspot,
+  type FullDiffStatus,
+  type FullDiffResult,
   type PathActionResult,
   type ScanEngine,
   type ScanFileRecord,
@@ -53,17 +58,27 @@ import {
 import { computeDiff } from "./shared/scanDiff";
 import {
   deleteIndex,
-  diffIndexes,
   indexFilePath,
   initScanIndex,
-  loadIndex,
-  loadLargestFiles,
 } from "./shared/scanIndex";
 import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
 import { normPath } from "./shared/pathUtils";
 import { analyzeForCleanup } from "./shared/suggestions";
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
+import {
+  computeFullDiffFromIndexFiles,
+  resolveBundledFullDiffWorkerPath,
+  runFullDiffWorker,
+} from "./shared/fullDiffWorkerRuntime";
+import {
+  deleteFullDiffCachesForScan,
+  hasFullDiffCache,
+  initFullDiffCacheStore,
+  readFullDiffCache,
+  writeFullDiffCache,
+} from "./shared/fullDiffCacheStore";
+import { createTreemapCache } from "./shared/treemapCache";
 import { initUsnCursorStore } from "./shared/usnCursorStore";
 import {
   captureCursorAfterScan,
@@ -84,6 +99,7 @@ const rendererEntryUrl = process.env.VITE_DEV_SERVER_URL;
 const projectRoot = Path.join(__dirname, "..");
 const rendererEntryFile = Path.join(projectRoot, "dist-renderer", "index.html");
 const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
+const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
 
 type WorkerScanSession = {
   kind: "worker";
@@ -208,7 +224,10 @@ void app.whenReady().then(async () => {
   // Initialize scan history + full-file indexes
   initScanHistory(app.getPath("userData"));
   initScanIndex(app.getPath("userData"));
+  initFullDiffCacheStore(app.getPath("userData"));
   await initUsnCursorStore(app.getPath("userData"));
+
+  const treemapCache = createTreemapCache({ maxEntries: 6 });
 
   // ── Scan helpers ──────────────────────────────────────────
 
@@ -264,6 +283,9 @@ void app.whenReady().then(async () => {
         if (historyId && session.tempIndexPath) {
           try {
             await FS.rename(session.tempIndexPath, indexFilePath(historyId));
+            if (message.snapshot.rootPath) {
+              treemapCache.rememberLatest(message.snapshot.rootPath, historyId);
+            }
           } catch {
             // Scanner may have skipped or failed to write the index — ignore
           }
@@ -271,7 +293,9 @@ void app.whenReady().then(async () => {
 
         // Delete index files for any history entries that just got pruned
         for (const prunedId of consumeLastPrunedIds()) {
+          treemapCache.invalidateScan(prunedId);
           void deleteIndex(prunedId);
+          void deleteFullDiffCachesForScan(prunedId);
         }
       }
 
@@ -285,6 +309,9 @@ void app.whenReady().then(async () => {
           activeScans.delete(key);
         }
         markFullScan();
+        if (message.snapshot.rootPath) {
+          warmLatestFullDiff(message.snapshot.rootPath);
+        }
 
         // Phase-2b: capture the volume's current USN cursor so the next
         // monitoring tick can do a cheap incremental scan. Best-effort —
@@ -852,6 +879,27 @@ void app.whenReady().then(async () => {
   // — older entries get evicted on insert.
   const snapshotCache = new Map<string, ScanSnapshot>();
   const SNAPSHOT_CACHE_LIMIT = 8;
+  const fullDiffCache = new Map<string, FullDiffResult | null>();
+  const fullDiffInflight = new Map<string, Promise<FullDiffResult | null>>();
+  const FULL_DIFF_CACHE_LIMIT = 8;
+  const readFullDiffMemoryCache = (key: string) => {
+    const cached = fullDiffCache.get(key);
+    if (cached !== undefined) {
+      fullDiffCache.delete(key);
+      fullDiffCache.set(key, cached);
+      return cached;
+    }
+    return undefined;
+  };
+  const writeFullDiffMemoryCache = (key: string, value: FullDiffResult | null) => {
+    fullDiffCache.delete(key);
+    fullDiffCache.set(key, value);
+    while (fullDiffCache.size > FULL_DIFF_CACHE_LIMIT) {
+      const oldest = fullDiffCache.keys().next().value;
+      if (oldest) fullDiffCache.delete(oldest);
+      else break;
+    }
+  };
   const loadHistoricalSnapshotCached = async (id: string): Promise<ScanSnapshot | null> => {
     const cached = snapshotCache.get(id);
     if (cached) {
@@ -870,6 +918,78 @@ void app.whenReady().then(async () => {
     }
     return snap;
   };
+  const normalizeDiffLimit = (limit?: number) =>
+    typeof limit === "number" && Number.isFinite(limit)
+      ? Math.max(0, Math.floor(limit))
+      : 500;
+  const buildFullDiffCacheKey = (baselineId: string, currentId: string, limit: number) =>
+    `${baselineId}::${currentId}::${limit}`;
+  const getIndexBytes = async (id: string): Promise<number | null> => {
+    try {
+      const stat = await FS.stat(indexFilePath(id));
+      return stat.isFile() ? stat.size : null;
+    } catch {
+      return null;
+    }
+  };
+  const loadOrComputeFullDiff = async (
+    baselineId: string,
+    currentId: string,
+    limit?: number,
+  ): Promise<FullDiffResult | null> => {
+    const normalizedLimit = normalizeDiffLimit(limit);
+    const cacheKey = buildFullDiffCacheKey(baselineId, currentId, normalizedLimit);
+    const memoryCached = readFullDiffMemoryCache(cacheKey);
+    if (memoryCached !== undefined) {
+      return memoryCached;
+    }
+
+    const existing = fullDiffInflight.get(cacheKey);
+    if (existing) {
+      return existing;
+    }
+
+    const pending = (async () => {
+      const diskCached = await readFullDiffCache(baselineId, currentId, normalizedLimit);
+      if (diskCached !== null) {
+        writeFullDiffMemoryCache(cacheKey, diskCached);
+        return diskCached;
+      }
+
+      const input = {
+        baselineId,
+        currentId,
+        baselinePath: indexFilePath(baselineId),
+        currentPath: indexFilePath(currentId),
+        limit: normalizedLimit,
+      };
+
+      let result: FullDiffResult | null;
+      try {
+        result = await runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry });
+      } catch {
+        result = await computeFullDiffFromIndexFiles(input);
+      }
+
+      writeFullDiffMemoryCache(cacheKey, result);
+      if (result) {
+        await writeFullDiffCache(result, normalizedLimit);
+      }
+      return result;
+    })().finally(() => {
+      fullDiffInflight.delete(cacheKey);
+    });
+
+    fullDiffInflight.set(cacheKey, pending);
+    return pending;
+  };
+  const warmLatestFullDiff = (rootPath: string) => {
+    const latestPair = getLatestPair(rootPath);
+    if (!latestPair) return;
+    void loadOrComputeFullDiff(latestPair.baseline.id, latestPair.current.id, 1000).catch(() => {
+      // best effort background warmup
+    });
+  };
 
   ipcMain.handle("diskhound:compute-scan-diff", async (_event, baselineId: string, currentId: string) => {
     const [baseline, current] = await Promise.all([
@@ -880,13 +1000,30 @@ void app.whenReady().then(async () => {
     return computeDiff(baseline, current, baselineId, currentId);
   });
 
-  ipcMain.handle("diskhound:compute-full-scan-diff", async (_event, baselineId: string, currentId: string, limit?: number) => {
-    const [baseline, current] = await Promise.all([
-      loadIndex(indexFilePath(baselineId)),
-      loadIndex(indexFilePath(currentId)),
+  ipcMain.handle("diskhound:get-full-diff-status", async (
+    _event,
+    baselineId: string,
+    currentId: string,
+    limit?: number,
+  ): Promise<FullDiffStatus> => {
+    const normalizedLimit = normalizeDiffLimit(limit);
+    const [cached, baselineIndexBytes, currentIndexBytes] = await Promise.all([
+      hasFullDiffCache(baselineId, currentId, normalizedLimit),
+      getIndexBytes(baselineId),
+      getIndexBytes(currentId),
     ]);
-    if (baseline.size === 0 && current.size === 0) return null;
-    return diffIndexes(baselineId, currentId, baseline, current, limit ?? 500);
+    return {
+      baselineId,
+      currentId,
+      limit: normalizedLimit,
+      cached,
+      baselineIndexBytes,
+      currentIndexBytes,
+    };
+  });
+
+  ipcMain.handle("diskhound:compute-full-scan-diff", async (_event, baselineId: string, currentId: string, limit?: number) => {
+    return await loadOrComputeFullDiff(baselineId, currentId, limit);
   });
 
   // Load a dense file list for the treemap from the persisted full-file index.
@@ -897,24 +1034,23 @@ void app.whenReady().then(async () => {
     const history = getScanHistory(rootPath);
     const currentId = pair?.current.id ?? history[0]?.id;
     if (!currentId) return [];
+
+    treemapCache.rememberLatest(rootPath, currentId);
+
+    const latestSnapshot = await loadHistoricalSnapshotCached(currentId);
+    if (latestSnapshot && latestSnapshot.largestFiles.length >= limit) {
+      return latestSnapshot.largestFiles.slice(0, limit);
+    }
+
     try {
-      const records = await loadLargestFiles(indexFilePath(currentId), limit, 0);
-      // Map to the ScanFileRecord shape the renderer expects
-      return records.map((r) => {
-        const name = Path.basename(r.p);
-        const parentPath = Path.dirname(r.p);
-        const dotIdx = name.lastIndexOf(".");
-        const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
-        return {
-          path: r.p,
-          name,
-          parentPath,
-          extension,
-          size: r.s,
-          modifiedAt: r.m,
-        };
+      return await treemapCache.getOrLoad({
+        scanId: currentId,
+        rootPath,
+        indexPath: indexFilePath(currentId),
+        limit,
       });
     } catch {
+      treemapCache.invalidateScan(currentId);
       return [];
     }
   });
@@ -950,11 +1086,10 @@ void app.whenReady().then(async () => {
   const FILES_PER_FOLDER = 200;
   const DIRS_PER_FOLDER = 500;
   async function buildFolderTree(indexPathStr: string): Promise<FolderTree> {
-    const { createReadStream } = require("node:fs") as typeof import("node:fs");
-    const { createGunzip } = require("node:zlib") as typeof import("node:zlib");
-    const { createInterface } = require("node:readline") as typeof import("node:readline");
-    const { normPath } = await import("./shared/pathUtils.js");
-
+    // All Node built-ins + normPath are already imported at module top.
+    // The prior implementation re-imported them inside the function
+    // body (the `await import(...)` alone added a microtask hop every
+    // folder-tree build for no benefit).
     type DirTotals = Map<string, { size: number; fileCount: number }>;
     // parent path → direct child dirs + their rolled-up totals
     const childDirTotalsByParent = new Map<string, DirTotals>();
@@ -1206,7 +1341,12 @@ void app.whenReady().then(async () => {
    * `C:\Users\foo`, this finds the `C:\` index correctly.
    */
   function findIndexCoveringPath(path: string): string | null {
-    const normalizedTarget = Path.resolve(path).toLowerCase();
+    // Platform-aware: normPath lowercases only on Windows. On Linux /
+    // macOS case-sensitive volumes, "/home/Alice" and "/home/alice" are
+    // genuinely distinct roots; unconditional lowercase used to falsely
+    // match them, causing the duplicates scan to stream the wrong
+    // index.
+    const normalizedTarget = normPath(Path.resolve(path));
     // Walk all known history entries, pick the best (shortest root path
     // that still covers our target, most recently scanned among those).
     let best: { id: string; rootLen: number; scannedAt: number } | null = null;
@@ -1217,7 +1357,7 @@ void app.whenReady().then(async () => {
     const currentSettings = settingsStore?.get();
     const recent = currentSettings?.recentScans ?? [];
     for (const r of recent) {
-      const normalizedRoot = Path.resolve(r.path).toLowerCase();
+      const normalizedRoot = normPath(Path.resolve(r.path));
       const isUnder = normalizedTarget === normalizedRoot ||
         normalizedTarget.startsWith(normalizedRoot + Path.sep) ||
         normalizedTarget.startsWith(normalizedRoot + "/");
@@ -1463,14 +1603,18 @@ void app.whenReady().then(async () => {
 
     try {
       await FS.rename(newIndexPath, indexFilePath(historyId));
+      treemapCache.rememberLatest(rootPath, historyId);
     } catch { /* ignore */ }
 
     for (const prunedId of consumeLastPrunedIds()) {
+      treemapCache.invalidateScan(prunedId);
       void deleteIndex(prunedId);
+      void deleteFullDiffCachesForScan(prunedId);
     }
 
     await broadcastSnapshot(result.snapshot);
     markFullScan();
+    warmLatestFullDiff(rootPath);
 
     // Persist the new cursor so the NEXT tick picks up from here.
     await import("./shared/usnCursorStore").then((m) => m.setCursor(result!.newCursor));
@@ -1785,6 +1929,7 @@ void app.whenReady().then(async () => {
       tray.destroy();
       tray = null;
     }
+    treemapCache.clear();
   });
 }).catch((err) => {
   writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);

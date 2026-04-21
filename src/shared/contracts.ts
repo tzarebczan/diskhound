@@ -381,6 +381,15 @@ export interface FullDiffResult {
   truncated: boolean;
 }
 
+export interface FullDiffStatus {
+  baselineId: string;
+  currentId: string;
+  limit: number;
+  cached: boolean;
+  baselineIndexBytes: number | null;
+  currentIndexBytes: number | null;
+}
+
 // ── Process / Memory Types ─────────────────────────────────
 
 export interface ProcessInfo {
@@ -585,6 +594,7 @@ export interface DiskhoundNativeApi {
   getLatestSnapshotForRoot: (rootPath: string) => Promise<ScanSnapshot | null>;
   computeScanDiff: (baselineId: string, currentId: string) => Promise<ScanDiffResult | null>;
   getLatestDiff: (rootPath: string) => Promise<ScanDiffResult | null>;
+  getFullDiffStatus: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffStatus>;
   /** Compute the full per-file diff from the persisted index files (not top-N). */
   computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;
   /**

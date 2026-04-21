@@ -11,6 +11,7 @@ import {
   openIndexWriter,
   type IndexRecord,
 } from "../scanIndex";
+import { normPath } from "../pathUtils";
 
 let tempDir: string;
 
@@ -27,6 +28,10 @@ function rec(p: string, s: number, m = 1000): IndexRecord {
   return { p, s, m };
 }
 
+function key(p: string): string {
+  return normPath(p);
+}
+
 describe("scanIndex writer + loader round-trip", () => {
   it("writes and reads back entries correctly", async () => {
     const path = indexFilePath("test-round-trip");
@@ -37,8 +42,8 @@ describe("scanIndex writer + loader round-trip", () => {
 
     const loaded = await loadIndex(path);
     expect(loaded.size).toBe(2);
-    expect(loaded.get("c:\\a.txt")?.s).toBe(100);
-    expect(loaded.get("c:\\b.dat")?.s).toBe(200);
+    expect(loaded.get(key("C:\\a.txt"))?.s).toBe(100);
+    expect(loaded.get(key("C:\\b.dat"))?.s).toBe(200);
   });
 
   it("loads empty map when file is missing", async () => {
@@ -61,9 +66,9 @@ describe("scanIndex writer + loader round-trip", () => {
 
 describe("diffIndexes", () => {
   const baseline = new Map<string, IndexRecord>([
-    ["c:\\a.txt", rec("C:\\a.txt", 100)],
-    ["c:\\b.dat", rec("C:\\b.dat", 1000)],
-    ["c:\\c.log", rec("C:\\c.log", 500)],
+    [key("C:\\a.txt"), rec("C:\\a.txt", 100)],
+    [key("C:\\b.dat"), rec("C:\\b.dat", 1000)],
+    [key("C:\\c.log"), rec("C:\\c.log", 500)],
   ]);
 
   it("returns zero changes for identical indexes", () => {
@@ -76,7 +81,7 @@ describe("diffIndexes", () => {
 
   it("detects added files", () => {
     const current = new Map(baseline);
-    current.set("c:\\new.mp4", rec("C:\\new.mp4", 5000));
+    current.set(key("C:\\new.mp4"), rec("C:\\new.mp4", 5000));
 
     const result = diffIndexes("b", "c", baseline, current);
     expect(result.totalAdded).toBe(1);
@@ -88,7 +93,7 @@ describe("diffIndexes", () => {
 
   it("detects removed files", () => {
     const current = new Map(baseline);
-    current.delete("c:\\b.dat");
+    current.delete(key("C:\\b.dat"));
 
     const result = diffIndexes("b", "c", baseline, current);
     expect(result.totalRemoved).toBe(1);
@@ -99,7 +104,7 @@ describe("diffIndexes", () => {
 
   it("detects grew files", () => {
     const current = new Map(baseline);
-    current.set("c:\\b.dat", rec("C:\\b.dat", 3000));
+    current.set(key("C:\\b.dat"), rec("C:\\b.dat", 3000));
 
     const result = diffIndexes("b", "c", baseline, current);
     expect(result.totalGrew).toBe(1);
@@ -111,7 +116,7 @@ describe("diffIndexes", () => {
 
   it("detects shrank files", () => {
     const current = new Map(baseline);
-    current.set("c:\\b.dat", rec("C:\\b.dat", 200));
+    current.set(key("C:\\b.dat"), rec("C:\\b.dat", 200));
 
     const result = diffIndexes("b", "c", baseline, current);
     expect(result.totalShrank).toBe(1);
@@ -121,9 +126,9 @@ describe("diffIndexes", () => {
 
   it("sorts changes by absolute delta descending", () => {
     const current = new Map(baseline);
-    current.set("c:\\a.txt", rec("C:\\a.txt", 150)); // +50
-    current.set("c:\\b.dat", rec("C:\\b.dat", 500)); // -500
-    current.set("c:\\new.bin", rec("C:\\new.bin", 10000)); // +10000
+    current.set(key("C:\\a.txt"), rec("C:\\a.txt", 150)); // +50
+    current.set(key("C:\\b.dat"), rec("C:\\b.dat", 500)); // -500
+    current.set(key("C:\\new.bin"), rec("C:\\new.bin", 10000)); // +10000
 
     const result = diffIndexes("b", "c", baseline, current);
     expect(result.changes[0].path).toBe("C:\\new.bin");
@@ -134,7 +139,7 @@ describe("diffIndexes", () => {
   it("caps results at the given limit and flags truncated", () => {
     const current = new Map<string, IndexRecord>();
     for (let i = 0; i < 100; i++) {
-      current.set(`c:\\file-${i}.bin`, rec(`C:\\file-${i}.bin`, i + 1));
+      current.set(key(`C:\\file-${i}.bin`), rec(`C:\\file-${i}.bin`, i + 1));
     }
     const result = diffIndexes("b", "c", new Map(), current, 10);
     expect(result.totalChanges).toBe(100);
@@ -144,7 +149,7 @@ describe("diffIndexes", () => {
 
   it("does not flag truncated when everything fits", () => {
     const current = new Map(baseline);
-    current.set("c:\\new.txt", rec("C:\\new.txt", 50));
+    current.set(key("C:\\new.txt"), rec("C:\\new.txt", 50));
     const result = diffIndexes("b", "c", baseline, current, 100);
     expect(result.truncated).toBe(false);
   });

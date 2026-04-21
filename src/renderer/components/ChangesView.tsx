@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type {
   DirectoryDelta,
   FileDelta,
+  FullDiffStatus,
   FullDiffResult,
   FullFileChange,
   ScanDiffResult,
@@ -41,6 +42,8 @@ const TIME_RANGES: TimeRange[] = [
   { id: "1M",  label: "1M",  ms: 30 * 24 * 60 * 60 * 1000 },
   { id: "3M",  label: "3M",  ms: 90 * 24 * 60 * 60 * 1000 },
 ];
+
+const FULL_DIFF_AUTOLOAD_MAX_BYTES = 64 * 1024 * 1024;
 
 interface ResolvedRange {
   range: TimeRange;
@@ -93,11 +96,13 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const [activeQuickSelect, setActiveQuickSelect] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("files");
   const [fullDiff, setFullDiff] = useState<FullDiffResult | null>(null);
+  const [fullDiffStatus, setFullDiffStatus] = useState<FullDiffStatus | null>(null);
   const [fullDiffLoading, setFullDiffLoading] = useState(false);
   const [scheduleInfo, setScheduleInfo] = useState<ScanScheduleInfo | null>(null);
   const [enablingMonitoring, setEnablingMonitoring] = useState(false);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const prevStatusRef = useRef(snapshot.status);
+  const fullDiffSeqRef = useRef(0);
 
   // Schedule info: fetch on mount + refresh every 30s so the "next scan in X"
   // label stays roughly current. Also refresh after scans complete.
@@ -161,7 +166,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
       toast(
         "success",
         "Background monitoring enabled",
-        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60} min.`,
+        `DiskHound will rescan every ${s.monitoring.fullScanIntervalMinutes || 60} min and keep adding snapshots for later diffs.`,
       );
       await refreshScheduleInfo();
     } finally {
@@ -191,6 +196,10 @@ export function ChangesView({ rootPath, snapshot }: Props) {
       setDiff(null);
       setSelectedBaseline(null);
       setActiveQuickSelect(null);
+      fullDiffSeqRef.current += 1;
+      setFullDiff(null);
+      setFullDiffStatus(null);
+      setFullDiffLoading(false);
       setLoading(false);
       return;
     }
@@ -201,6 +210,10 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     setDiff(null);
     setSelectedBaseline(null);
     setActiveQuickSelect(null);
+    fullDiffSeqRef.current += 1;
+    setFullDiff(null);
+    setFullDiffStatus(null);
+    setFullDiffLoading(false);
 
     void (async () => {
       const data = await loadData(rootPath);
@@ -258,7 +271,10 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     if (!history.length) return;
     const currentId = history[0].id;
     setSelectedBaseline(baselineId);
+    fullDiffSeqRef.current += 1;
     setFullDiff(null); // invalidate — applies to different baseline now
+    setFullDiffStatus(null);
+    setFullDiffLoading(false);
 
     const cacheKey = `${baselineId}::${currentId}`;
     const cached = diffCache.current.get(cacheKey);
@@ -282,24 +298,63 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
   const loadFullDiff = useCallback(async () => {
     if (!diff) return;
+    const seq = ++fullDiffSeqRef.current;
+    const baselineId = diff.baselineId;
+    const currentId = diff.currentId;
     setFullDiffLoading(true);
-    const result = await nativeApi.computeFullScanDiff(diff.baselineId, diff.currentId, 1000);
-    if (result) setFullDiff(result);
-    setFullDiffLoading(false);
+    try {
+      const result = await nativeApi.computeFullScanDiff(baselineId, currentId, 1000);
+      if (seq !== fullDiffSeqRef.current) return;
+      setFullDiff(result);
+    } finally {
+      if (seq === fullDiffSeqRef.current) {
+        setFullDiffLoading(false);
+      }
+    }
   }, [diff]);
 
-  // Auto-load the full per-file diff whenever a new baseline/current pair is
-  // selected. The persisted index is fast to read (it's the same NDJSON the
-  // top-N summary came from) so there's no reason to hide the detail behind
-  // a button press — users were landing on the tab, seeing only the
-  // summary + a CTA, and not realizing that clicking through was the whole
-  // point of the tab.
   useEffect(() => {
-    if (!diff) return;
+    if (!diff) {
+      setFullDiffStatus(null);
+      return;
+    }
+
+    let cancelled = false;
+    setFullDiffStatus(null);
+    void nativeApi.getFullDiffStatus(diff.baselineId, diff.currentId, 1000).then((status) => {
+      if (!cancelled) {
+        setFullDiffStatus(status);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [diff?.baselineId, diff?.currentId]);
+
+  const fullDiffCombinedBytes = useMemo(() => {
+    if (!fullDiffStatus) return null;
+    if (fullDiffStatus.baselineIndexBytes === null || fullDiffStatus.currentIndexBytes === null) {
+      return null;
+    }
+    return fullDiffStatus.baselineIndexBytes + fullDiffStatus.currentIndexBytes;
+  }, [fullDiffStatus]);
+
+  const shouldAutoLoadFullDiff = Boolean(
+    fullDiffStatus?.cached
+      || (fullDiffCombinedBytes !== null && fullDiffCombinedBytes <= FULL_DIFF_AUTOLOAD_MAX_BYTES),
+  );
+
+  // Auto-load the full per-file diff whenever a new baseline/current pair is
+  // selected when it's already cached or small enough to resolve quickly.
+  // Large uncached pairs fall back to the fast top-N summary first so the
+  // tab stays responsive on multi-million-file scans.
+  useEffect(() => {
+    if (!diff || detailTab !== "files" || !shouldAutoLoadFullDiff) return;
     // Don't refetch if we already have the matching full diff loaded.
     if (fullDiff && fullDiff.baselineId === diff.baselineId && fullDiff.currentId === diff.currentId) return;
     void loadFullDiff();
-  }, [diff, fullDiff, loadFullDiff]);
+  }, [detailTab, diff, fullDiff, loadFullDiff, shouldAutoLoadFullDiff]);
 
   if (!rootPath) {
     return (
@@ -341,11 +396,11 @@ export function ChangesView({ rootPath, snapshot }: Props) {
           <div className="changes-empty-paths">
             <div className="changes-empty-path-title">How to get diffs</div>
             <ol className="changes-empty-path-list">
-              <li><strong>Hit "Rescan now"</strong> above — each run adds a history entry and the diff updates instantly.</li>
+              <li><strong>Hit "Rescan now"</strong> above — each completed scan adds a history entry, then DiskHound compares it with the previous one.</li>
               <li>
-                <strong>Background monitoring</strong> rescans your default path on a schedule (1h by default).{" "}
+                <strong>Background monitoring</strong> rescans your default path on a schedule (1h by default). On supported NTFS volumes, some follow-up scans can use the Windows change journal; other paths keep using scheduled rescans.{" "}
                 {monitoringEnabled === false && "It's currently off — use the banner above to turn it on."}
-                {monitoringEnabled === true && "Already on — scheduled rescans run in the background."}
+                {monitoringEnabled === true && "Already on — new snapshots will keep landing in the background."}
               </li>
             </ol>
           </div>
@@ -361,6 +416,12 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const netColorClass = isZeroDelta ? "neutral" : gained ? "negative" : "positive";
 
   const isScanning = snapshot.status === "running";
+  const showManualFullDiffCta =
+    detailTab === "files"
+    && !fullDiff
+    && !fullDiffLoading
+    && !!fullDiffStatus
+    && !shouldAutoLoadFullDiff;
 
   return (
     <div className={`changes-view ${switching ? "is-switching" : ""}`}>
@@ -518,16 +579,31 @@ export function ChangesView({ rootPath, snapshot }: Props) {
               </div>
             )}
             {detailTab === "files" && !fullDiff && !fullDiffLoading && (
-              // Fallback: show the top-N summary if the full diff is
-              // unavailable (old scans without a persisted index).
-              <FileDeltaList
-                deltas={diff.fileDeltas}
-                busy={busy}
-                onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
-                onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-                onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
-                onEasyMove={(p) => void handleEasyMove(p)}
-              />
+              <>
+                {showManualFullDiffCta && (
+                  <div className="changes-full-diff-cta">
+                    <div className="changes-full-diff-copy">
+                      <div className="changes-full-diff-title">Showing the fast summary first</div>
+                      <div className="changes-full-diff-hint">
+                        {fullDiffCombinedBytes !== null
+                          ? `This pair needs to read ${formatBytes(fullDiffCombinedBytes)} of persisted index data the first time.`
+                          : "This pair needs the persisted file indexes to build the full-file diff the first time."}
+                      </div>
+                    </div>
+                    <button className="action-btn" onClick={() => void loadFullDiff()}>
+                      Load full file diff
+                    </button>
+                  </div>
+                )}
+                <FileDeltaList
+                  deltas={diff.fileDeltas}
+                  busy={busy}
+                  onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
+                  onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
+                  onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
+                  onEasyMove={(p) => void handleEasyMove(p)}
+                />
+              </>
             )}
             {detailTab === "directories" && (
               <DirDeltaList
@@ -595,7 +671,7 @@ function ScheduleStatusStrip({
         <div className="changes-schedule-banner">
           <div className="changes-schedule-banner-text">
             <strong>Background monitoring is off.</strong>{" "}
-            Turn it on so the Changes tab fills up automatically.
+            Turn it on to keep adding scheduled snapshots for this path. On supported NTFS volumes, some follow-up scans can use journal-based incremental updates.
           </div>
           <button
             className="action-btn"

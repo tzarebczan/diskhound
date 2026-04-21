@@ -1,4 +1,5 @@
-/** Normalize a path for case-insensitive comparison: lowercase, strip trailing separators. */
-export function normPath(p: string): string {
-  return p.replace(/[\\/]+$/, "").toLowerCase();
+/** Normalize a path for comparison: strip trailing separators and only case-fold on Windows. */
+export function normPath(p: string, platform: NodeJS.Platform = process.platform): string {
+  const trimmed = p.replace(/[\\/]+$/, "");
+  return platform === "win32" ? trimmed.toLowerCase() : trimmed;
 }
