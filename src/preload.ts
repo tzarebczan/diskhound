@@ -98,6 +98,12 @@ const api: DiskhoundNativeApi = {
   // Theme
   applyTheme: (theme) => ipcRenderer.send("diskhound:apply-theme", theme),
 
+  // Crash logs
+  getCrashLog: () => ipcRenderer.invoke("diskhound:get-crash-log"),
+  revealCrashLog: () => ipcRenderer.send("diskhound:reveal-crash-log"),
+  reportRendererError: (payload) =>
+    ipcRenderer.send("diskhound:report-renderer-error", payload),
+
   // Auto-update
   checkForUpdates: () => ipcRenderer.invoke("diskhound:check-for-updates"),
   quitAndInstall: () => ipcRenderer.send("diskhound:quit-and-install"),

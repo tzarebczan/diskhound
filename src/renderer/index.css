@@ -1894,10 +1894,21 @@ button, input, select, textarea { font: inherit; }
 
 /* ── Folder Explorer ──────────────────────────── */
 .folder-explorer {
-  display: grid;
-  grid-template-rows: auto 1fr;
+  /* Flex column instead of grid: we gained a third child in v0.3.6
+   * (the new column-header row) and the old `grid-template-rows:
+   * auto 1fr` stretched the header row to fill available height,
+   * pushing the folder list against the bottom of the viewport.
+   * Flex sizes every `auto` child to content and lets
+   * `.folder-list-scroll` take the remainder. */
+  display: flex;
+  flex-direction: column;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
+}
+.folder-explorer > .folder-list-scroll {
+  flex: 1;
+  min-height: 0;
 }
 
 /* Breadcrumb bar */
@@ -2673,6 +2684,36 @@ button, input, select, textarea { font: inherit; }
 
 .setting-label { font-size: 12.5px; color: var(--text); }
 .setting-desc { font-size: 11px; color: var(--text-tertiary); margin-top: 2px; }
+
+/* Crash-log row — stacks the header + buttons on top of an optional
+ * expanded <pre> pane that streams the log text inline. */
+.setting-row-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  grid-template-columns: unset;
+  padding: 8px 0;
+}
+.setting-row-main {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 16px;
+}
+.settings-crash-log-pane {
+  max-height: 320px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 
 /* Toggle switch */
 .toggle {
@@ -4956,6 +4997,16 @@ button, input, select, textarea { font: inherit; }
   color: var(--text-muted);
   font-size: 11px;
   line-height: 1.45;
+}
+.changes-full-diff-cta.changes-full-diff-cta-error {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: color-mix(in srgb, var(--bg-row) 80%, var(--red) 20%);
+}
+.changes-full-diff-cta.changes-full-diff-cta-error .changes-full-diff-title {
+  color: var(--red);
+}
+:root.colorblind .changes-full-diff-cta.changes-full-diff-cta-error {
+  background: color-mix(in srgb, var(--bg-row) 80%, var(--red) 20%);
 }
 
 .changes-row {

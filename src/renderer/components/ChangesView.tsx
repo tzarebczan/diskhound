@@ -200,6 +200,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
       setFullDiff(null);
       setFullDiffStatus(null);
       setFullDiffLoading(false);
+      setFullDiffError(null);
       setLoading(false);
       return;
     }
@@ -275,6 +276,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     setFullDiff(null); // invalidate — applies to different baseline now
     setFullDiffStatus(null);
     setFullDiffLoading(false);
+    setFullDiffError(null);
 
     const cacheKey = `${baselineId}::${currentId}`;
     const cached = diffCache.current.get(cacheKey);
@@ -296,16 +298,34 @@ export function ChangesView({ rootPath, snapshot }: Props) {
     setSwitching(false);
   };
 
+  const [fullDiffError, setFullDiffError] = useState<string | null>(null);
   const loadFullDiff = useCallback(async () => {
     if (!diff) return;
     const seq = ++fullDiffSeqRef.current;
     const baselineId = diff.baselineId;
     const currentId = diff.currentId;
     setFullDiffLoading(true);
+    setFullDiffError(null);
     try {
       const result = await nativeApi.computeFullScanDiff(baselineId, currentId, 1000);
       if (seq !== fullDiffSeqRef.current) return;
-      setFullDiff(result);
+      if (result) {
+        setFullDiff(result);
+      } else {
+        // Null result means the main process couldn't produce a diff —
+        // usually because one of the indexes is missing or unreadable.
+        // Surface that instead of silently flipping the UI back to
+        // the "Load full file diff" CTA, which looked identical to
+        // the pre-load state and felt like a hang to users.
+        setFullDiffError(
+          "Couldn't compute the full diff. One of the scan indexes may be missing or in use. See crash.log for details.",
+        );
+      }
+    } catch (err) {
+      if (seq !== fullDiffSeqRef.current) return;
+      setFullDiffError(
+        err instanceof Error ? err.message : "Unknown error computing full diff",
+      );
     } finally {
       if (seq === fullDiffSeqRef.current) {
         setFullDiffLoading(false);
@@ -580,7 +600,18 @@ export function ChangesView({ rootPath, snapshot }: Props) {
             )}
             {detailTab === "files" && !fullDiff && !fullDiffLoading && (
               <>
-                {showManualFullDiffCta && (
+                {fullDiffError && (
+                  <div className="changes-full-diff-cta changes-full-diff-cta-error" role="alert">
+                    <div className="changes-full-diff-copy">
+                      <div className="changes-full-diff-title">Full diff didn't complete</div>
+                      <div className="changes-full-diff-hint">{fullDiffError}</div>
+                    </div>
+                    <button className="action-btn" onClick={() => void loadFullDiff()}>
+                      Retry
+                    </button>
+                  </div>
+                )}
+                {!fullDiffError && showManualFullDiffCta && (
                   <div className="changes-full-diff-cta">
                     <div className="changes-full-diff-copy">
                       <div className="changes-full-diff-title">Showing the fast summary first</div>

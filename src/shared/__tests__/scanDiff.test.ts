@@ -46,9 +46,16 @@ describe("computeDiff", () => {
   });
 
   it("detects added files", () => {
-    const baseline = makeSnapshot({ largestFiles: [] });
+    // Bump aggregates to match the itemized add. In real scans a file
+    // appearing always moves both bytesSeen and filesVisited; the
+    // "phantom add" filter in computeDiff kicks in only when aggregates
+    // are untouched (which means the itemized entry is top-N churn,
+    // not a real add).
+    const baseline = makeSnapshot({ largestFiles: [], bytesSeen: 0, filesVisited: 0 });
     const current = makeSnapshot({
       largestFiles: [makeFile("C:\\test\\new.mp4", 5000)],
+      bytesSeen: 5000,
+      filesVisited: 1,
     });
     const diff = computeDiff(baseline, current, "b", "c");
 
@@ -62,8 +69,10 @@ describe("computeDiff", () => {
   it("detects removed files", () => {
     const baseline = makeSnapshot({
       largestFiles: [makeFile("C:\\test\\old.log", 3000)],
+      bytesSeen: 3000,
+      filesVisited: 1,
     });
-    const current = makeSnapshot({ largestFiles: [] });
+    const current = makeSnapshot({ largestFiles: [], bytesSeen: 0, filesVisited: 0 });
     const diff = computeDiff(baseline, current, "b", "c");
 
     expect(diff.fileDeltas).toHaveLength(1);
@@ -71,6 +80,31 @@ describe("computeDiff", () => {
     expect(diff.fileDeltas[0].size).toBe(0);
     expect(diff.fileDeltas[0].previousSize).toBe(3000);
     expect(diff.fileDeltas[0].deltaBytes).toBe(-3000);
+  });
+
+  it("suppresses top-N ranking churn when aggregates are unchanged", () => {
+    // Regression: a directory falling off one snapshot's top-N cap
+    // but still existing on disk used to appear as 'added' in the
+    // current scan's directoryDeltas. With totalBytes/totalFiles
+    // equal across both scans it's impossible for real adds/removes
+    // to exist — filter them out so the Changes tab doesn't show
+    // 9,999 phantom "ADDED" rows for genuinely-unchanged drives.
+    const baseline = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\a.bin", 1000)],
+      bytesSeen: 1000,
+      filesVisited: 1,
+    });
+    const current = makeSnapshot({
+      largestFiles: [makeFile("C:\\test\\b.bin", 1000)],
+      bytesSeen: 1000,
+      filesVisited: 1,
+    });
+    const diff = computeDiff(baseline, current, "b", "c");
+
+    expect(diff.totalBytesDelta).toBe(0);
+    expect(diff.totalFilesDelta).toBe(0);
+    // Would be 2 entries (1 removed + 1 added) without the filter.
+    expect(diff.fileDeltas).toHaveLength(0);
   });
 
   it("detects files that grew", () => {

@@ -175,6 +175,33 @@ export function App() {
     });
   }, [syncThemePreference, applyColorBlindMode]);
 
+  // Forward renderer-side errors to the main process so they land in
+  // crash.log alongside main-process exceptions. Without this, any
+  // uncaught exception or promise rejection in the UI was lost once
+  // the DevTools console was closed.
+  useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      nativeApi.reportRendererError({
+        message: event.message,
+        stack: event.error?.stack,
+        source: event.filename ? `${event.filename}:${event.lineno}:${event.colno}` : undefined,
+      });
+    };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      nativeApi.reportRendererError({
+        message: reason instanceof Error ? reason.message : `Unhandled rejection: ${String(reason)}`,
+        stack: reason instanceof Error ? reason.stack : undefined,
+      });
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
+  }, []);
+
   // Keep "System" theme in sync with OS changes while the app is open.
   useEffect(() => {
     if (themePreference !== "system") {

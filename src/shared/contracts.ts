@@ -621,6 +621,22 @@ export interface DiskhoundNativeApi {
   // Theme
   applyTheme: (theme: "dark" | "light") => void;
 
+  // Crash logs
+  /** Read the tail of the crash log file (64 KB) for in-app display.
+   *  Returns the absolute path too so users can share it with the
+   *  developer. */
+  getCrashLog: () => Promise<{ path: string; sizeBytes: number; text: string }>;
+  /** Open the userData folder in the OS file browser, highlighting
+   *  crash.log. */
+  revealCrashLog: () => void;
+  /** Forward a renderer-side error to the main process so it lands in
+   *  the same crash.log alongside main-process exceptions. */
+  reportRendererError: (payload: {
+    message: string;
+    stack?: string;
+    source?: string;
+  }) => void;
+
   // Auto-update
   checkForUpdates: () => Promise<void>;
   quitAndInstall: () => void;

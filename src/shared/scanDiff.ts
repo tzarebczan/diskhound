@@ -25,6 +25,29 @@ export function computeDiff(
 ): ScanDiffResult {
   const rootPath = current.rootPath ?? baseline.rootPath ?? "";
 
+  const totalBytesDelta = current.bytesSeen - baseline.bytesSeen;
+  const totalFilesDelta = current.filesVisited - baseline.filesVisited;
+
+  // Itemized deltas. When BOTH aggregates are zero (the scans saw the
+  // same bytes and file count) every "added"/"removed" entry is
+  // ranking churn: a directory fell off one snapshot's top-N cap but
+  // is still on disk — not a real add. Suppress those churns to stop
+  // the Changes > Directories tab from showing 9,999 phantom "added"
+  // rows with huge sizes when nothing actually changed.
+  //
+  // "grew"/"shrank" entries are still meaningful in the aggregate-zero
+  // case (one dir gained bytes while another lost the same amount —
+  // rare but legitimate), so we keep those.
+  const aggregateUnchanged = totalBytesDelta === 0 && totalFilesDelta === 0;
+  const rawFileDeltas = diffFiles(baseline, current);
+  const rawDirDeltas = diffDirectories(baseline, current);
+  const fileDeltas = aggregateUnchanged
+    ? rawFileDeltas.filter((d) => d.kind === "grew" || d.kind === "shrank")
+    : rawFileDeltas;
+  const directoryDeltas = aggregateUnchanged
+    ? rawDirDeltas.filter((d) => d.kind === "grew" || d.kind === "shrank")
+    : rawDirDeltas;
+
   return {
     baselineId,
     baselineScannedAt: baseline.finishedAt ?? baseline.startedAt ?? 0,
@@ -33,15 +56,15 @@ export function computeDiff(
     rootPath,
 
     // ── Aggregates ──
-    totalBytesDelta: current.bytesSeen - baseline.bytesSeen,
-    totalFilesDelta: current.filesVisited - baseline.filesVisited,
+    totalBytesDelta,
+    totalFilesDelta,
     totalDirsDelta: current.directoriesVisited - baseline.directoriesVisited,
     previousBytesSeen: baseline.bytesSeen,
     currentBytesSeen: current.bytesSeen,
 
     // ── Itemized ──
-    fileDeltas: diffFiles(baseline, current),
-    directoryDeltas: diffDirectories(baseline, current),
+    fileDeltas,
+    directoryDeltas,
     extensionDeltas: diffExtensions(baseline, current),
 
     timeBetweenMs: (current.finishedAt ?? 0) - (baseline.finishedAt ?? 0),

@@ -111,7 +111,17 @@ export async function loadHistoricalSnapshot(id: string): Promise<ScanSnapshot |
   const filePath = snapshotPath(id);
   try {
     const raw = await FSP.readFile(filePath, "utf-8");
-    return JSON.parse(raw) as ScanSnapshot;
+    const snap = JSON.parse(raw) as ScanSnapshot;
+    // Defensive floor mirrored from scanStore — historical snapshots
+    // saved by earlier versions can carry directoriesVisited = 0/1 on
+    // drives with thousands of dirs. The Changes tab reads these when
+    // computing diffs + rendering prior scan rows; flooring to the
+    // hottestDirectories count keeps the "N dirs" labels honest.
+    const floor = snap.hottestDirectories?.length ?? 0;
+    if (floor > snap.directoriesVisited) {
+      return { ...snap, directoriesVisited: floor };
+    }
+    return snap;
   } catch {
     return null;
   }

@@ -94,6 +94,23 @@ export function FolderList({ snapshot }: Props) {
     setShowOtherFiles(false);
   }, [currentPath]);
 
+  // Auto-expand the file list when this folder is clearly "a folder
+  // of files." The click-to-expand collapse was the right default at
+  // the drive root (where you don't want 200 top-level files spamming
+  // the list above a few subfolders), but it's the wrong default for
+  // leaf folders where the user drilled in specifically to see the
+  // files. Heuristics:
+  //   - No subfolders at all → always expand
+  //   - ≤ 5 subfolders AND ≥ 1 direct file → expand (small leafy folder)
+  // Otherwise keep the old collapsed "N files in this folder" toggle.
+  useEffect(() => {
+    const dirs = children.length;
+    const files = looseFiles.length;
+    const shouldAuto =
+      files > 0 && (dirs === 0 || dirs <= 5);
+    if (shouldAuto) setShowOtherFiles(true);
+  }, [children.length, looseFiles.length]);
+
   // Fetch real children (size + count) from the persisted index every
   // time the user navigates. The first call per scan streams the full
   // index into an in-memory tree on the main process (O(seconds) for a

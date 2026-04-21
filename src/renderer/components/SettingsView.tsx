@@ -134,6 +134,7 @@ export function SettingsView() {
           onChange={(v) => void save({ ...settings, general: { ...settings.general, colorBlindMode: v } })}
         />
         <UpdateRow />
+        <CrashLogRow />
       </div>
 
       {/* "Default scan path" is no longer user-editable — it auto-populates
@@ -355,6 +356,63 @@ function UpdateRow() {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Inline viewer + "reveal" affordance for the crash.log file the main
+ * process maintains under %APPDATA%/DiskHound. Users don't typically
+ * open this; the button is here so when something goes wrong we can
+ * say "click View crash log and send me the contents" without having
+ * to explain where the file lives.
+ */
+function CrashLogRow() {
+  const [expanded, setExpanded] = useState(false);
+  const [log, setLog] = useState<{ path: string; sizeBytes: number; text: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  const toggle = async () => {
+    if (!expanded) {
+      setLoading(true);
+      const result = await nativeApi.getCrashLog();
+      setLog(result);
+      setLoading(false);
+    }
+    setExpanded((v) => !v);
+  };
+
+  const reveal = () => nativeApi.revealCrashLog();
+
+  const hasText = Boolean(log?.text?.trim());
+
+  return (
+    <div className="setting-row setting-row-stack">
+      <div className="setting-row-main">
+        <div>
+          <div className="setting-label">Crash log</div>
+          <div className="setting-desc">
+            {log
+              ? log.sizeBytes === 0
+                ? "Nothing logged — if something goes wrong, check back here."
+                : `${(log.sizeBytes / 1024).toFixed(1)} KB on disk.`
+              : "Main-process exceptions, worker failures, and renderer errors land in a single file you can share."}
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button className="action-btn" onClick={() => void toggle()}>
+            {expanded ? "Hide" : loading ? "Loading…" : "View"}
+          </button>
+          <button className="action-btn" onClick={reveal} title="Open the DiskHound data folder in Explorer / Finder">
+            Open folder
+          </button>
+        </div>
+      </div>
+      {expanded && (
+        <pre className="settings-crash-log-pane">
+          {hasText ? log!.text : "No crash log entries yet."}
+        </pre>
+      )}
     </div>
   );
 }

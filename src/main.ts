@@ -181,22 +181,73 @@ function createTrayIconImage(): Electron.NativeImage {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-// Log startup diagnostics so "app silently fails to launch" is debuggable.
-// Writes to %APPDATA%/DiskHound/startup.log (or equivalent on other OSes).
-function writeStartupLog(message: string): void {
-  try {
-    const logPath = Path.join(app.getPath("userData"), "startup.log");
-    FS.mkdir(Path.dirname(logPath), { recursive: true }).catch(() => {});
-    FS.appendFile(logPath, `[${new Date().toISOString()}] ${message}\n`).catch(() => {});
-  } catch { /* best effort */ }
+// ─ Crash + diagnostic logging ────────────────────────────────────────────
+//
+// We write to %APPDATA%/DiskHound/crash.log (cross-platform: userData).
+// The same file covers startup diagnostics, main-process exceptions,
+// unhandled rejections, renderer errors (forwarded via IPC), and scan
+// worker failures. The Settings UI has a "View crash logs" button so
+// users can zip-and-send the file when asking for help.
+//
+// Bounded by simple size-based rotation — once the file exceeds
+// CRASH_LOG_MAX_BYTES, we rename it to crash.log.old so we always keep
+// at least one archived copy without growing unbounded over months.
+
+const CRASH_LOG_FILENAME = "crash.log";
+const CRASH_LOG_ARCHIVE_FILENAME = "crash.log.old";
+const CRASH_LOG_MAX_BYTES = 1 * 1024 * 1024; // 1 MiB
+
+function crashLogPath(): string {
+  return Path.join(app.getPath("userData"), CRASH_LOG_FILENAME);
+}
+function crashLogArchivePath(): string {
+  return Path.join(app.getPath("userData"), CRASH_LOG_ARCHIVE_FILENAME);
 }
 
-// Surface uncaught exceptions so a silent crash at least shows up.
+async function maybeRotateCrashLog(): Promise<void> {
+  try {
+    const stat = await FS.stat(crashLogPath());
+    if (stat.size > CRASH_LOG_MAX_BYTES) {
+      await FS.rename(crashLogPath(), crashLogArchivePath()).catch(() => {});
+    }
+  } catch {
+    // missing file is fine — nothing to rotate
+  }
+}
+
+/**
+ * Append a timestamped line to crash.log. Categorized by `tag` so it's
+ * easy to grep for a specific failure class when triaging.
+ */
+function writeCrashLog(tag: string, message: string): void {
+  const line = `[${new Date().toISOString()}] [${tag}] ${message}\n`;
+  try {
+    const logPath = crashLogPath();
+    FS.mkdir(Path.dirname(logPath), { recursive: true }).catch(() => {});
+    FS.appendFile(logPath, line).catch(() => {});
+  } catch { /* best effort */ }
+  // Rotate opportunistically — cheap check, runs on a microtask so it
+  // doesn't block the writer.
+  void maybeRotateCrashLog();
+}
+
+// Back-compat alias — older call sites still use writeStartupLog.
+function writeStartupLog(message: string): void {
+  writeCrashLog("startup", message);
+}
+
+// Surface uncaught exceptions so a silent crash at least shows up and
+// leaves breadcrumbs in crash.log.
 process.on("uncaughtException", (err) => {
-  writeStartupLog(`UNCAUGHT: ${err?.stack ?? err?.message ?? String(err)}`);
+  writeCrashLog("main-uncaught", err?.stack ?? err?.message ?? String(err));
   try {
     dialog.showErrorBox("DiskHound — Unexpected error", String(err?.stack ?? err?.message ?? err));
   } catch { /* noop */ }
+});
+
+process.on("unhandledRejection", (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason));
+  writeCrashLog("main-rejection", err.stack ?? err.message);
 });
 
 void app.whenReady().then(async () => {
@@ -827,6 +878,48 @@ void app.whenReady().then(async () => {
     }),
   );
 
+  // ── IPC: Crash logs ───────────────────────────────────────
+  //
+  // Read-only helpers for the Settings "View crash logs" UI. The log
+  // itself is written by the writeCrashLog() helper declared up top.
+
+  ipcMain.handle("diskhound:get-crash-log", async () => {
+    const path = crashLogPath();
+    try {
+      const stat = await FS.stat(path);
+      const text = await FS.readFile(path, "utf-8");
+      // Ship the TAIL — users don't need to scroll through 1 MB of
+      // boot diagnostics when triaging a recent crash. 64 KB tail
+      // covers weeks of typical logging and is easy to paste.
+      const TAIL_BYTES = 64 * 1024;
+      const trimmed = text.length > TAIL_BYTES
+        ? "[…earlier entries truncated…]\n" + text.slice(text.length - TAIL_BYTES)
+        : text;
+      return { path, sizeBytes: stat.size, text: trimmed };
+    } catch {
+      return { path, sizeBytes: 0, text: "" };
+    }
+  });
+
+  // Fire-and-forget — preload uses `ipcRenderer.send` because there's
+  // nothing to await here. `showItemInFolder` opens the user's OS
+  // file browser, highlighting crash.log alongside its rotated
+  // crash.log.old sibling.
+  ipcMain.on("diskhound:reveal-crash-log", () => {
+    shell.showItemInFolder(crashLogPath());
+  });
+
+  // Renderer errors get forwarded here via window.onerror / onunhandled-
+  // rejection, so uncaught rendering bugs also land in the same file.
+  ipcMain.on("diskhound:report-renderer-error", (_event, payload: {
+    message: string;
+    stack?: string;
+    source?: string;
+  }) => {
+    const loc = payload.source ? ` @ ${payload.source}` : "";
+    writeCrashLog("renderer", `${payload.message}${loc}\n${payload.stack ?? ""}`);
+  });
+
   // ── IPC: Settings ─────────────────────────────────────────
 
   ipcMain.handle("diskhound:get-settings", () => settingsStore!.get());
@@ -972,15 +1065,32 @@ void app.whenReady().then(async () => {
         limit: normalizedLimit,
       };
 
-      let result: FullDiffResult | null;
+      let result: FullDiffResult | null = null;
       try {
         result = await runFullDiffWorker(input, { workerPath: fullDiffWorkerEntry });
-      } catch {
-        result = await computeFullDiffFromIndexFiles(input);
+      } catch (err) {
+        writeCrashLog("full-diff-worker", err instanceof Error ? (err.stack ?? err.message) : String(err));
+        // Fallback: run inline on the main thread. Still slow for big
+        // indexes but at least produces a result rather than leaving
+        // the user stuck on "preparing…" forever.
+        try {
+          result = await computeFullDiffFromIndexFiles(input);
+        } catch (fallbackErr) {
+          writeCrashLog(
+            "full-diff-inline",
+            fallbackErr instanceof Error ? (fallbackErr.stack ?? fallbackErr.message) : String(fallbackErr),
+          );
+          result = null;
+        }
       }
 
-      writeFullDiffMemoryCache(cacheKey, result);
+      // Only cache POSITIVE results. A null result typically means one of
+      // the index files is missing or unreadable — caching that as null
+      // would let a transient condition (file still being written, brief
+      // permission hiccup) poison the cache and surface as the permanent
+      // "Load full file diff" CTA loop the user reported.
       if (result) {
+        writeFullDiffMemoryCache(cacheKey, result);
         await writeFullDiffCache(result, normalizedLimit);
       }
       return result;
