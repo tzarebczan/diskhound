@@ -14,6 +14,8 @@ import {
   type UpdateStatus,
 } from "../shared/contracts";
 import { formatBytes } from "./lib/format";
+import { setColorBlindPalette } from "./lib/treemap";
+import { setProcessPaletteColorBlind } from "./components/MemoryView";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents";
 import { nativeApi } from "./nativeApi";
 
@@ -144,18 +146,30 @@ export function App() {
     setActiveTheme(resolved);
   }, []);
 
+  // Apply color-blind mode globally: toggles the .colorblind class on
+  // <html> (CSS variables kick in from index.css) AND flips the JS
+  // palette flags for treemap extension colors + process treemap hash
+  // colors. Done as one operation so the user never sees a half-swapped
+  // UI mid-save.
+  const applyColorBlindMode = useCallback((on: boolean) => {
+    document.documentElement.classList.toggle("colorblind", on);
+    setColorBlindPalette(on);
+    setProcessPaletteColorBlind(on);
+  }, []);
+
   const syncThemePreference = useCallback((theme: GeneralSettings["theme"]) => {
     setThemePreference(theme);
     applyResolvedTheme(resolveThemePreference(theme));
   }, [applyResolvedTheme]);
 
-  // Load and apply theme
+  // Load and apply theme + accessibility options on mount.
   useEffect(() => {
     void nativeApi.getSettings().then((s) => {
       if (!s) return;
       syncThemePreference(s.general.theme);
+      applyColorBlindMode(Boolean(s.general.colorBlindMode));
     });
-  }, [syncThemePreference]);
+  }, [syncThemePreference, applyColorBlindMode]);
 
   // Keep "System" theme in sync with OS changes while the app is open.
   useEffect(() => {
@@ -183,6 +197,7 @@ export function App() {
       const detail = (event as CustomEvent<AppSettings>).detail;
       if (detail) {
         syncThemePreference(detail.general.theme);
+        applyColorBlindMode(Boolean(detail.general.colorBlindMode));
       }
     };
 
@@ -190,7 +205,7 @@ export function App() {
     return () => {
       window.removeEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
     };
-  }, [syncThemePreference]);
+  }, [syncThemePreference, applyColorBlindMode]);
 
   // Boot: load current snapshot + drives + IPC listeners (run once)
   useEffect(() => {

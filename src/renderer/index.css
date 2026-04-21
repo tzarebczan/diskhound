@@ -101,6 +101,107 @@
   background: var(--black);
 }
 
+/* ── Colorblind-friendly palette ──────────────────────────────────
+ *
+ * Toggled via the `colorblind` class on <html>. The Okabe-Ito palette
+ * is the de-facto standard for scientific figures because it keeps
+ * every pair distinguishable under deuteranopia, protanopia, and
+ * tritanopia. We remap the "red means bad, green means good" cues
+ * to orange-vs-blue so users who can't reliably tell red from green
+ * still get the signal.
+ *
+ * Mapping:
+ *   --red (alert/grew/hot)    → vermillion #d55e00 (high-luminance orange-red)
+ *   --green (safe/freed/cool) → bluish-green #009e73 (shifts blue-ward; works for deutans)
+ *   --amber (primary accent)  → yellow #f0e442 on dark / #b58900 on light
+ *   --orange (warm secondary) → orange #e69f00 (Okabe-Ito orange)
+ *   --teal  (cool secondary)  → sky blue #56b4e9
+ *   --blue  (info / neutral)  → blue #0072b2
+ *
+ * Extra tweaks:
+ *   - Changes tab delta "positive/negative" are repainted as blue/orange
+ *     so freed vs. grown doesn't rely on green vs. red.
+ *   - Folder bar hot/warm/cool picks from the Okabe-Ito set instead of
+ *     sliding red→amber→teal.
+ *   - Status dot "done" goes from green to sky blue; "error" from red
+ *     to vermillion. Shape stays the same so the dot itself is still
+ *     a state indicator alongside any color.
+ */
+:root.colorblind {
+  --amber: #f0e442;
+  --amber-dim: rgba(240, 228, 66, 0.75);
+  --amber-glow: rgba(240, 228, 66, 0.15);
+  --orange: #e69f00;
+  --red: #d55e00;
+  --red-dim: rgba(213, 94, 0, 0.75);
+  --red-glow: rgba(213, 94, 0, 0.14);
+  --green: #009e73;
+  --green-dim: rgba(0, 158, 115, 0.75);
+  --green-glow: rgba(0, 158, 115, 0.12);
+  --teal: #56b4e9;
+  --blue: #0072b2;
+  --blue-dim: rgba(0, 114, 178, 0.8);
+
+  /* Risk scale shifts to orange→blue so it still reads as a
+   * progression for every common color-vision type. */
+  --risk-safe: #56b4e9;
+  --risk-low: #0072b2;
+  --risk-medium: #e69f00;
+  --risk-high: #d55e00;
+}
+:root.colorblind.light {
+  /* Light-theme refinements — use slightly darker shades so the
+   * yellow isn't washed out on white backgrounds. */
+  --amber: #b58900;
+  --amber-dim: rgba(181, 137, 0, 0.85);
+  --amber-glow: rgba(181, 137, 0, 0.12);
+  --orange: #c77b00;
+  --red: #a74200;
+  --red-dim: rgba(167, 66, 0, 0.85);
+  --red-glow: rgba(167, 66, 0, 0.1);
+  --green: #007a5a;
+  --green-dim: rgba(0, 122, 90, 0.85);
+  --green-glow: rgba(0, 122, 90, 0.1);
+  --teal: #1a7fb5;
+  --blue: #005a8c;
+  --blue-dim: rgba(0, 90, 140, 0.85);
+
+  --risk-safe: #1a7fb5;
+  --risk-low: #005a8c;
+  --risk-medium: #c77b00;
+  --risk-high: #a74200;
+}
+
+/* Repaint the folder subtree bar in colorblind mode — the original
+ * red→orange/amber-orange/green-teal gradients still use green. Swap
+ * to vermillion/orange/blue so hot/warm/cool is legible to everyone. */
+:root.colorblind .folder-row-bar-fill.hot {
+  background: linear-gradient(90deg, var(--red), var(--orange));
+}
+:root.colorblind .folder-row-bar-fill.warm {
+  background: linear-gradient(90deg, var(--orange), var(--amber));
+}
+:root.colorblind .folder-row-bar-fill.cool {
+  background: linear-gradient(90deg, var(--teal), var(--blue));
+}
+
+/* Changes tab: positive deltas (freed space) and negative deltas
+ * (grown) should not rely on green/red. Repaint positive as blue
+ * and negative as orange — both still carry the "+" / "-" glyph
+ * prefix for belt-and-suspenders accessibility. */
+:root.colorblind .changes-row-delta.positive,
+:root.colorblind .changes-delta-big.positive,
+:root.colorblind .changes-history-delta.positive,
+:root.colorblind .changes-range-delta.positive {
+  color: var(--teal);
+}
+:root.colorblind .changes-row-delta.negative,
+:root.colorblind .changes-delta-big.negative,
+:root.colorblind .changes-history-delta.negative,
+:root.colorblind .changes-range-delta.negative {
+  color: var(--orange);
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {

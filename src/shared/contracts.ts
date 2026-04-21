@@ -111,6 +111,15 @@ export interface GeneralSettings {
   launchOnStartup: boolean;
   theme: "dark" | "light" | "system";
   autoUpdate: boolean;
+  /**
+   * When true, swap red/green-heavy color cues for an Okabe-Ito-derived
+   * palette (orange, sky blue, bluish-green, yellow, blue, vermillion,
+   * reddish purple). Affects treemap extension colors, folder subtree
+   * bars, Changes delta positive/negative, scan-status dots, drive-pill
+   * free-space bars, and risk indicators — every place where we'd
+   * otherwise rely on red/green to communicate meaning.
+   */
+  colorBlindMode: boolean;
 }
 
 export interface ScanningSettings {
@@ -633,6 +642,7 @@ export function defaultSettings(): AppSettings {
       launchOnStartup: true,
       theme: "dark",
       autoUpdate: true,
+      colorBlindMode: false,
     },
     scanning: {
       defaultRootPath: "",
@@ -722,6 +732,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
       launchOnStartup: Boolean(merged.general.launchOnStartup),
       theme: isThemeValue(merged.general.theme) ? merged.general.theme : defaults.general.theme,
       autoUpdate: merged.general.autoUpdate === undefined ? defaults.general.autoUpdate : Boolean(merged.general.autoUpdate),
+      colorBlindMode: Boolean(merged.general.colorBlindMode),
     },
     scanning: {
       defaultRootPath:

@@ -127,6 +127,12 @@ export function SettingsView() {
           value={settings.general.autoUpdate}
           onChange={(v) => void save({ ...settings, general: { ...settings.general, autoUpdate: v } })}
         />
+        <ToggleRow
+          label="Color-blind friendly palette"
+          desc="Swaps red/green-heavy color cues for an Okabe-Ito palette (orange, sky blue, bluish-green, yellow). Affects treemap colors, folder subtree bars, Changes tab deltas, and status indicators."
+          value={settings.general.colorBlindMode}
+          onChange={(v) => void save({ ...settings, general: { ...settings.general, colorBlindMode: v } })}
+        />
         <UpdateRow />
       </div>
 

@@ -752,12 +752,31 @@ const COLOR_PALETTE = [
   "#14b8a6", "#a855f7", "#eab308", "#22c55e", "#0ea5e9",
 ];
 
+/**
+ * Okabe-Ito-derived palette used when Color-blind mode is on. Each
+ * entry is either an Okabe-Ito canonical color or a subtle variation
+ * that preserves perceptual distance under deuteranopia/protanopia/
+ * tritanopia. No red-green pair anywhere.
+ */
+const COLOR_PALETTE_COLORBLIND = [
+  "#0072b2", "#009e73", "#e69f00", "#d55e00", "#cc79a7",
+  "#56b4e9", "#f0e442", "#925e9f", "#117733", "#332288",
+  "#88ccee", "#999933", "#aa4499", "#44aa99", "#882255",
+];
+
+let processPaletteColorBlind = false;
+
+export function setProcessPaletteColorBlind(on: boolean): void {
+  processPaletteColorBlind = on;
+}
+
 function colorForProcessName(name: string): string {
   let h = 0;
   for (let i = 0; i < name.length; i++) {
     h = ((h << 5) - h + name.charCodeAt(i)) | 0;
   }
-  return COLOR_PALETTE[Math.abs(h) % COLOR_PALETTE.length];
+  const palette = processPaletteColorBlind ? COLOR_PALETTE_COLORBLIND : COLOR_PALETTE;
+  return palette[Math.abs(h) % palette.length];
 }
 
 /**

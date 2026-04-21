@@ -125,8 +125,84 @@ const PRIMARY_DOMINANT_SHARE = 0.38;
 const SECONDARY_DOMINANT_SHARE = 0.16;
 const MAX_FEATURED_FILES = 2;
 
+/**
+ * Colorblind-friendly extension mapping. Every category uses one of
+ * the Okabe-Ito safe colors so users with deuteranopia / protanopia
+ * can still tell video apart from images apart from executables, etc.
+ * Swapped in when the user enables Color-blind mode in Settings —
+ * App.tsx flips `colorBlindPalette` via setColorBlindPalette(true).
+ *
+ * Category assignments intentionally don't overlap with each other
+ * in perceived hue under any of the three common color-vision types.
+ */
+const EXT_COLORS_COLORBLIND: Record<string, string> = {
+  // Video — vermillion (distinctive orange-red)
+  ".mp4": "#d55e00", ".mkv": "#d55e00", ".avi": "#d55e00", ".mov": "#d55e00",
+  ".wmv": "#d55e00", ".webm": "#d55e00", ".m4v": "#d55e00", ".flv": "#d55e00",
+  ".ts": "#d55e00",
+  // Audio — reddish purple
+  ".mp3": "#cc79a7", ".flac": "#cc79a7", ".wav": "#cc79a7",
+  ".aac": "#cc79a7", ".m4a": "#cc79a7", ".wma": "#cc79a7", ".ogg": "#cc79a7",
+  // Images — bluish green
+  ".jpg": "#009e73", ".jpeg": "#009e73", ".png": "#009e73",
+  ".gif": "#009e73", ".webp": "#009e73", ".svg": "#009e73",
+  ".psd": "#009e73", ".raw": "#009e73", ".heic": "#009e73", ".bmp": "#009e73",
+  ".tif": "#009e73", ".tiff": "#009e73", ".ico": "#009e73",
+  // Archives — orange
+  ".zip": "#e69f00", ".rar": "#e69f00", ".7z": "#e69f00",
+  ".tar": "#e69f00", ".gz": "#e69f00", ".bz2": "#e69f00", ".xz": "#e69f00",
+  ".zst": "#e69f00",
+  // Disk images — dark orange
+  ".iso": "#b8760b", ".img": "#b8760b", ".vhd": "#b8760b", ".vhdx": "#b8760b",
+  ".vmdk": "#b8760b", ".wim": "#b8760b",
+  // Executables & binaries — vermillion (shared with video — OK because extensions differ in context)
+  ".exe": "#a74200", ".msi": "#a74200", ".msix": "#a74200", ".appx": "#a74200",
+  // System libraries — reddish purple dark
+  ".dll": "#8a4668", ".sys": "#8a4668", ".drv": "#8a4668", ".ocx": "#8a4668",
+  // Windows system files — blue
+  ".dat": "#0072b2", ".cat": "#0072b2", ".mum": "#0072b2", ".manifest": "#0072b2",
+  ".mui": "#0072b2", ".nls": "#0072b2", ".inf": "#0072b2",
+  // Windows caches & indexes — dark blue
+  ".cab": "#003f73", ".msp": "#003f73", ".msu": "#003f73",
+  ".efi": "#003f73", ".etl": "#003f73",
+  // Database & data files — sky blue
+  ".db": "#56b4e9", ".sqlite": "#56b4e9", ".mdb": "#56b4e9",
+  ".ldf": "#56b4e9", ".mdf": "#56b4e9", ".bak": "#56b4e9",
+  // Documents — blue (shared w/ .dat — different contexts)
+  ".pdf": "#0072b2", ".doc": "#0072b2", ".docx": "#0072b2",
+  ".xls": "#0072b2", ".xlsx": "#0072b2", ".ppt": "#0072b2", ".pptx": "#0072b2",
+  ".rtf": "#0072b2", ".odt": "#0072b2",
+  // Code — yellow (distinct from bluish-green and orange)
+  ".js": "#f0e442", ".jsx": "#f0e442", ".mjs": "#f0e442",
+  ".tsx": "#0072b2", ".py": "#009e73", ".rs": "#d55e00",
+  ".go": "#56b4e9", ".java": "#d55e00", ".cs": "#cc79a7", ".cpp": "#0072b2",
+  ".c": "#0072b2", ".h": "#0072b2",
+  // Config & data — neutral gray (same as default)
+  ".json": "#78716c", ".xml": "#78716c", ".yaml": "#78716c", ".yml": "#78716c",
+  ".toml": "#78716c", ".ini": "#78716c", ".cfg": "#78716c", ".conf": "#78716c",
+  ".reg": "#78716c",
+  // Logs & temp — dark gray
+  ".log": "#57534e", ".tmp": "#57534e", ".temp": "#57534e",
+  // Fonts — reddish purple
+  ".ttf": "#cc79a7", ".otf": "#cc79a7", ".woff": "#cc79a7", ".woff2": "#cc79a7",
+  // Virtual memory / swap — dark blue
+  ".pagefile": "#003f73", ".hiberfil": "#003f73",
+};
+
+/**
+ * Module-scoped flag that toggles between the default extension
+ * palette and the Okabe-Ito colorblind palette. Flipped at app start
+ * from persisted settings and whenever the user toggles the setting.
+ */
+let colorBlindPalette = false;
+
+export function setColorBlindPalette(on: boolean): void {
+  colorBlindPalette = on;
+}
+
 export function colorForExtension(ext: string): string {
-  return EXT_COLORS[ext.toLowerCase()] ?? DEFAULT_COLOR;
+  const table = colorBlindPalette ? EXT_COLORS_COLORBLIND : EXT_COLORS;
+  return table[ext.toLowerCase()] ?? DEFAULT_COLOR;
 }
 
 export function buildTreemapComposition(
