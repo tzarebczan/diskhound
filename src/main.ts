@@ -348,12 +348,18 @@ void app.whenReady().then(async () => {
             if (message.snapshot.rootPath) {
               treemapCache.rememberLatest(message.snapshot.rootPath, historyId);
             }
+            // Evict the prior folder tree for this same root BEFORE
+            // kicking off the new build — keeping both in memory
+            // doubles peak heap during every rescan cycle.
+            if (message.snapshot.rootPath) {
+              invalidateFolderTreesForRoot(message.snapshot.rootPath, historyId);
+            }
             // Pre-warm the Folders-tab tree. ensureFolderTree streams the
             // NDJSON once (a few seconds on huge drives) and caches the
             // parent → children map. Doing it eagerly here means the
             // user's first Folders drill-in after a scan is instant
             // instead of a blocking IPC.
-            void ensureFolderTree(historyId).catch((err) => {
+            void ensureFolderTree(historyId, message.snapshot.rootPath ?? undefined).catch((err) => {
               writeCrashLog(
                 "folder-tree-prewarm",
                 err instanceof Error ? (err.stack ?? err.message) : String(err),
@@ -382,6 +388,7 @@ void app.whenReady().then(async () => {
         if (activeScans.get(key) === session) {
           activeScans.delete(key);
         }
+        retuneMemoryDiagCadence();
         markFullScan();
         // Snapshot memory right after a scan settles so users can
         // correlate "I scanned C:\ and now DiskHound is using 800 MB"
@@ -500,6 +507,7 @@ void app.whenReady().then(async () => {
     if (activeScans.get(key) === session) {
       activeScans.delete(key);
     }
+    retuneMemoryDiagCadence();
     // Clean up orphaned temp index file
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
@@ -735,6 +743,7 @@ void app.whenReady().then(async () => {
       trigger,
     );
     activeScans.set(scanKey(rootPath), session);
+    retuneMemoryDiagCadence();
     await broadcastSnapshot(startingSnapshot);
     return startingSnapshot;
   };
@@ -1225,11 +1234,39 @@ void app.whenReady().then(async () => {
    * by the folder count in the tree, not file count: even a 7M-file
    * drive with 100k folders costs only a few MB.
    */
+  /**
+   * Compact on-heap representation of a file inside the folder-tree
+   * cache. We intentionally skip `name`, `parentPath`, and `extension`
+   * because they're derivable from `path` — 1M parents × avg 5 files
+   * × ~60 redundant string bytes adds up to hundreds of MB of pure
+   * duplication otherwise. Expanded to the full ScanFileRecord shape
+   * on the way out of the IPC handler (toScanFileRecord below).
+   */
+  type CompactFolderFile = {
+    path: string;
+    size: number;
+    modifiedAt: number;
+  };
   type FolderNode = {
     dirs: { path: string; size: number; fileCount: number }[];
-    files: ScanFileRecord[];
+    files: CompactFolderFile[];
   };
   type FolderTree = Map<string, FolderNode>;
+
+  const toFolderFileRecord = (f: CompactFolderFile): ScanFileRecord => {
+    const name = Path.basename(f.path);
+    const parentPathDerived = Path.dirname(f.path);
+    const dotIdx = name.lastIndexOf(".");
+    const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
+    return {
+      path: f.path,
+      name,
+      parentPath: parentPathDerived,
+      extension,
+      size: f.size,
+      modifiedAt: f.modifiedAt,
+    };
+  };
   /**
    * In-memory cache of built folder trees, keyed by scan ID.
    *
@@ -1246,6 +1283,12 @@ void app.whenReady().then(async () => {
   const FOLDER_TREE_MAX_TOTAL_ENTRIES = 600_000;
   const folderTreeCache: Map<string, FolderTree> = new Map();
   const folderTreeInflight: Map<string, Promise<FolderTree>> = new Map();
+  // Track which root each cached/inflight tree belongs to so we can
+  // evict the PRIOR tree for root R the moment R gets a new scan.
+  // Without this, a fresh C:\ scan would build a new 1M-entry tree
+  // while the previous C:\ tree was still in the cache — peak memory
+  // doubled during every same-root rescan cycle.
+  const folderTreeRootByScanId: Map<string, string> = new Map();
   let folderTreeTotalEntries = 0;
 
   const evictOldestFolderTree = (): boolean => {
@@ -1283,8 +1326,12 @@ void app.whenReady().then(async () => {
    * builds it exactly once even if called multiple times concurrently.
    * Used both by the IPC handler AND the post-scan pre-warm path, so
    * the user's first drill-in on a fresh scan hits a warm cache.
+   *
+   * Optional `rootPath` is remembered in folderTreeRootByScanId so a
+   * later same-root scan can evict stale siblings.
    */
-  const ensureFolderTree = async (id: string): Promise<FolderTree> => {
+  const ensureFolderTree = async (id: string, rootPath?: string): Promise<FolderTree> => {
+    if (rootPath) folderTreeRootByScanId.set(id, normPath(rootPath));
     const existing = folderTreeCache.get(id);
     if (existing) {
       touchFolderTree(id);
@@ -1313,6 +1360,22 @@ void app.whenReady().then(async () => {
       if (folderTreeTotalEntries < 0) folderTreeTotalEntries = 0;
     }
     folderTreeInflight.delete(id);
+    folderTreeRootByScanId.delete(id);
+  };
+
+  /**
+   * Drop every cached folder tree that belongs to the given root
+   * EXCEPT the excluded scan ID. Called on scan-complete so the new
+   * scan's tree supersedes the prior one for that same drive instead
+   * of sharing heap space with it.
+   */
+  const invalidateFolderTreesForRoot = (rootPath: string, exceptScanId: string | null) => {
+    const rootKey = normPath(rootPath);
+    for (const [scanId, tracked] of folderTreeRootByScanId) {
+      if (tracked === rootKey && scanId !== exceptScanId) {
+        invalidateFolderTree(scanId);
+      }
+    }
   };
 
   /**
@@ -1330,14 +1393,33 @@ void app.whenReady().then(async () => {
     ].join(" | ");
   };
 
-  // Log a memory snapshot every 5 minutes while the app is running.
-  // Cheap (single readout) and gives us a durable trail in crash.log
-  // so we can reconstruct when a balloon happened. Unref the timer
-  // so it doesn't keep the process alive on quit.
-  const memoryDiagInterval = setInterval(() => {
-    writeCrashLog("memory", describeCacheMemory());
-  }, 5 * 60 * 1000);
-  memoryDiagInterval.unref?.();
+  // Log a memory snapshot on a cadence that tracks activity:
+  //   - 1 minute while a scan is live (catches the peak mid-walk)
+  //   - 5 minutes when idle (enough to notice slow leaks without
+  //     spamming the log when nothing's happening)
+  // Unref so it doesn't keep the process alive on quit.
+  let memoryDiagIntervalHandle: ReturnType<typeof setInterval> | null = null;
+  let memoryDiagCadence: "scanning" | "idle" = "idle";
+  const startMemoryDiag = (cadence: "scanning" | "idle") => {
+    if (memoryDiagIntervalHandle) clearInterval(memoryDiagIntervalHandle);
+    const ms = cadence === "scanning" ? 60 * 1000 : 5 * 60 * 1000;
+    memoryDiagIntervalHandle = setInterval(() => {
+      const tag = activeScans.size > 0 ? "memory-scanning" : "memory";
+      writeCrashLog(tag, describeCacheMemory());
+    }, ms);
+    memoryDiagIntervalHandle.unref?.();
+    memoryDiagCadence = cadence;
+  };
+  /**
+   * Bump the cadence to 1 min while a scan is active and drop back to
+   * 5 min when everything settles. Called from the running/done scan
+   * broadcast paths so we cover both manual and scheduled scans.
+   */
+  const retuneMemoryDiagCadence = () => {
+    const desired: "scanning" | "idle" = activeScans.size > 0 ? "scanning" : "idle";
+    if (desired !== memoryDiagCadence) startMemoryDiag(desired);
+  };
+  startMemoryDiag("idle");
   // One snapshot at boot for the "after restart" baseline.
   writeCrashLog("memory", `boot: ${describeCacheMemory()}`);
 
@@ -1352,7 +1434,7 @@ void app.whenReady().then(async () => {
       const hist = getScanHistory(rehydrated.rootPath);
       const latestId = hist[0]?.id;
       if (!latestId) return;
-      await ensureFolderTree(latestId);
+      await ensureFolderTree(latestId, rehydrated.rootPath);
     } catch (err) {
       writeCrashLog(
         "folder-tree-prewarm-boot",
@@ -1379,8 +1461,11 @@ void app.whenReady().then(async () => {
     type DirTotals = Map<string, { size: number; fileCount: number }>;
     // parent path → direct child dirs + their rolled-up totals
     const childDirTotalsByParent = new Map<string, DirTotals>();
-    // parent path → top-N files at that level (unsorted during stream; sorted at return)
-    const filesByParent = new Map<string, ScanFileRecord[]>();
+    // parent path → top-N files at that level (unsorted during stream;
+    // sorted at return). Compact shape to keep 1M-dir cache under
+    // control — derived strings (name, parentPath, extension) are
+    // reconstructed when the IPC handler hands the records out.
+    const filesByParent = new Map<string, CompactFolderFile[]>();
 
     // Consistent key shape: normalized (platform-aware case) + no trailing
     // separator. Node's Path.dirname is inconsistent about trailing slashes
@@ -1406,9 +1491,6 @@ void app.whenReady().then(async () => {
       if (typeof size !== "number") continue;
 
       const filePathNorm = toKey(rec.p);
-      const name = Path.basename(filePathNorm);
-      const dotIdx = name.lastIndexOf(".");
-      const extension = dotIdx > 0 ? name.slice(dotIdx).toLowerCase() : "(no ext)";
 
       // Walk up each ancestor. For the DIRECT parent we record a file;
       // for every higher ancestor we credit size/count toward the child
@@ -1435,9 +1517,6 @@ void app.whenReady().then(async () => {
           }
           list.push({
             path: filePathNorm,
-            name,
-            parentPath: parent,
-            extension,
             size,
             modifiedAt: typeof rec.m === "number" ? rec.m : 0,
           });
@@ -1503,10 +1582,19 @@ void app.whenReady().then(async () => {
       if (!currentId) return { dirs: [], files: [] };
 
       try {
-        const tree = await ensureFolderTree(currentId);
+        const tree = await ensureFolderTree(currentId, rootPath);
         const normalizedParent = normPath(parentPath).replace(/[\\/]+$/, "");
-        const node = tree.get(normalizedParent) ?? { dirs: [], files: [] };
-        return node;
+        const node = tree.get(normalizedParent);
+        if (!node) return { dirs: [], files: [] };
+        // Expand the compact in-cache file shape into the full
+        // ScanFileRecord the renderer expects. Done on the way out
+        // because the cache holds 1M+ parent entries and duplicating
+        // name/parentPath/extension per file would burn hundreds of
+        // MB of heap for no runtime benefit.
+        return {
+          dirs: node.dirs,
+          files: node.files.map(toFolderFileRecord),
+        };
       } catch (err) {
         writeCrashLog(
           "folder-tree",
@@ -1892,9 +1980,12 @@ void app.whenReady().then(async () => {
     try {
       await FS.rename(newIndexPath, indexFilePath(historyId));
       treemapCache.rememberLatest(rootPath, historyId);
+      // Evict the prior tree for this root before building the new
+      // one so peak memory doesn't double during the swap.
+      invalidateFolderTreesForRoot(rootPath, historyId);
       // Same pre-warm as the full-scan path — keep the Folders tab
       // instant after incremental (USN-journal) rescans too.
-      void ensureFolderTree(historyId).catch((err) => {
+      void ensureFolderTree(historyId, rootPath).catch((err) => {
         writeCrashLog(
           "folder-tree-prewarm",
           err instanceof Error ? (err.stack ?? err.message) : String(err),

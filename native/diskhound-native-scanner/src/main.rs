@@ -849,9 +849,27 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
 
 #[cfg(windows)]
 fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
-    let mut stack = vec![root_path.to_path_buf()];
+    // Each stack entry carries an optional mtime hint inherited from the
+    // parent's FindFirstFileExW data. Populated for every subdirectory
+    // during enumeration so we don't need to `metadata()` them again at
+    // pop time. Only the initial root has no hint — we pay one syscall
+    // for it, not 1.2 million.
+    let mut stack: Vec<(PathBuf, Option<u64>)> = vec![(root_path.to_path_buf(), None)];
+    // Decide up front whether any directory has a chance of being
+    // inheritance-matched. When the baseline is absent or carries no
+    // dir_mtimes (the case when the prior scan was a USN-journal
+    // incremental that dropped {t:"d"} entries), EVERY dir is walked
+    // from scratch and the per-dir metadata() syscall for mtime is
+    // pure waste — we still want the mtime to write into the new
+    // index, but that now comes from the hint instead of an I/O call.
+    let baseline_can_inherit = state
+        .baseline
+        .as_ref()
+        .map(|b| !b.dir_mtimes.is_empty())
+        .unwrap_or(false);
+    let mut mtime_syscalls_saved: u64 = 0;
 
-    while let Some(directory_path) = stack.pop() {
+    while let Some((directory_path, mtime_hint)) = stack.pop() {
         if is_cancelled() {
             return Ok(());
         }
@@ -862,7 +880,17 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         // mtime matches the baseline. If so, inherit the entire subtree from
         // the baseline's file records and don't walk further.
         let directory_path_str = normalize_path(&directory_path);
-        let current_mtime = directory_mtime(&directory_path).unwrap_or(0);
+        // Prefer the hint from the parent enumeration. Only fall back to
+        // the metadata syscall when we truly need a fresh number (root
+        // dir, or we're going to compare against a baseline entry).
+        let current_mtime = match mtime_hint {
+            Some(m) => {
+                mtime_syscalls_saved += 1;
+                m
+            }
+            None if !baseline_can_inherit => 0, // nothing to compare against
+            None => directory_mtime(&directory_path).unwrap_or(0),
+        };
 
         // Streaming-baseline inheritance path: if this dir's mtime matches
         // the baseline, we defer the actual file-record copying to a
@@ -969,6 +997,18 @@ fn scan_windows(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             state.inherited_dirs, state.inherited_files,
         );
     }
+    // And how many mtime syscalls we avoided via parent-enum hints.
+    eprintln!(
+        "[diskhound-native-scanner] mtime syscalls saved via enum-hint: {} (baseline_can_inherit={})",
+        mtime_syscalls_saved, baseline_can_inherit,
+    );
+
+    // Baseline maps are no longer needed once the walk + post-walk
+    // stream are done. Drop them to release RAM before the final
+    // Done snapshot is built — on a 1M-dir drive this frees ~100 MB
+    // of the scanner's peak resident footprint before the process
+    // exits.
+    state.baseline = None;
 
     Ok(())
 }
@@ -1041,7 +1081,7 @@ fn directory_mtime(dir: &Path) -> Option<u64> {
 fn enumerate_windows_directory(
     directory_path: &Path,
     state: &mut ScanState,
-    stack: &mut Vec<PathBuf>,
+    stack: &mut Vec<(PathBuf, Option<u64>)>,
 ) -> Result<(), String> {
     let search_pattern = windows_search_pattern(directory_path);
     let wide_search_pattern = windows_wide_string(&search_pattern);
@@ -1076,7 +1116,16 @@ fn enumerate_windows_directory(
           if is_reparse_point || is_device {
               state.skipped_entries += 1;
           } else if is_directory {
-              stack.push(directory_path.join(&file_name));
+              // Capture the child's mtime from the FindFirstFileExW data
+              // so we don't have to re-stat it when it's popped later.
+              // Saves one metadata() syscall per directory, which on a
+              // 1M-dir drive used to add ~30-60 s of pure I/O wait to
+              // every cold-cache scan.
+              let child_mtime = windows_filetime_to_unix_ms(
+                  find_data.ftLastWriteTime.dwHighDateTime,
+                  find_data.ftLastWriteTime.dwLowDateTime,
+              );
+              stack.push((directory_path.join(&file_name), Some(child_mtime)));
           } else {
               let file_size =
                   ((find_data.nFileSizeHigh as u64) << 32) | find_data.nFileSizeLow as u64;
