@@ -2,7 +2,7 @@
   "name": "diskhound",
   "private": true,
   "type": "module",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Fast disk space analyzer — find and clean up large files",
   "author": "DiskHound",
   "main": "dist-electron/main.cjs",

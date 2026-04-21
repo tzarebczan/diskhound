@@ -20,6 +20,14 @@ const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 interface Props {
   snapshot: ScanSnapshot;
   onFilterExtension: (ext: string) => void;
+  /**
+   * Scan progress percent (0–99) when a scan is live and we have
+   * enough drive metadata to compute a ratio. null otherwise — the
+   * metric strip and scanning empty-state use it to decide whether
+   * to show a progress bar / "X%" label vs. the older indeterminate
+   * spinner copy.
+   */
+  scanPercent?: number | null;
 }
 
 type TreemapMode = "condensed" | "all";
@@ -59,7 +67,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension }: Props) {
+export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -158,6 +166,18 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
         <Metric value={formatCount(directoriesVisited)} label="dirs" />
         <Metric value={formatCount(skippedEntries)} label="skipped" />
         <Metric value={formatElapsed(displayElapsedMs)} label="elapsed" />
+        {/* Progress metric — only rendered during live scans when we
+         * have a real ratio. Shows both the number AND a thin fill
+         * bar so users have a visual sense of pace at a glance. */}
+        {snapshot.status === "running" && typeof scanPercent === "number" && (
+          <div className="metric metric-progress">
+            <span className="metric-value accent">{scanPercent}%</span>
+            <span className="metric-label">progress</span>
+            <div className="metric-progress-track" aria-hidden="true">
+              <div className="metric-progress-fill" style={{ width: `${scanPercent}%` }} />
+            </div>
+          </div>
+        )}
       </div>
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
@@ -309,13 +329,23 @@ export function Overview({ snapshot, onFilterExtension }: Props) {
                         ? `Preparing from previous scan of ${snapshot.rootPath}…`
                         : `Starting scan of ${snapshot.rootPath}…`;
                     const sub = hasFiles
-                      ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
+                      ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed${
+                          typeof scanPercent === "number" ? ` · ${scanPercent}%` : ""
+                        }`
                       : longLoad
                         ? `Reading the prior scan's index so unchanged folders can be inherited instead of re-walked (${formatElapsed(displayElapsedMs)} elapsed).`
                         : `Enumerating the root — largest files appear as soon as the first few are seen (${formatElapsed(displayElapsedMs)} elapsed)`;
                     return (
                       <>
                         <div style={{ fontSize: 13, color: "var(--text)" }}>{title}</div>
+                        {typeof scanPercent === "number" && (
+                          <div className="scanning-empty-progress" aria-hidden="true">
+                            <div
+                              className="scanning-empty-progress-fill"
+                              style={{ width: `${scanPercent}%` }}
+                            />
+                          </div>
+                        )}
                         <div style={{ fontSize: 11, color: "var(--text-muted)", maxWidth: 480, textAlign: "center" }}>
                           {sub}
                         </div>
