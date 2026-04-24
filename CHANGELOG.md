@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.5.3 — 2026-04-24
+
+Walker-scan polish pass, rooted in user-reported log evidence:
+
+- **Folders tab showed 21 files / zero subdirs at C:\ on non-elevated
+  rescans.** Root cause: the walker's inheritance branch wrote
+  inherited dirs to the NDJSON index but skipped adding them to
+  `state.directory_totals`. The sidecar builder assembles each
+  parent's `d` (subdirs) array from `directory_totals` — with only
+  the root present, every parent's `d` was `[]`. Fix: inheritance
+  branch now populates `directory_totals` for every subtree dir
+  using the baseline's `dir_total_sizes` + `dir_file_counts` for
+  accurate per-dir size + file count. Applies to both the
+  sequential walker and the parallel walker's root-inheritance
+  shortcut. On a C:\ scan: root now shows C:\Users, C:\Windows,
+  C:\ProgramData, etc. — 1 M+ dirs populated correctly in the
+  sidecar instead of 0.
+
+- **Progress bar stuck at 99% for minutes on non-elevated rescans.**
+  Walker path never set `scan_phase`, so the UI's files-indexed
+  fraction ("1.6 M / 8.3 M files indexed · 99%") never kicked in —
+  the bar clamped at 99% with no hint the scan was still working.
+  Fix: walker entry sets `scan_phase = Indexing` (seeds
+  `expected_total_files` from baseline when available) and
+  `Finalizing` at post-walk-stream entry. UI now shows a moving
+  files-indexed fraction + "Finalizing" copy rather than a stuck
+  percentage.
+
+- **No tiles streaming during non-elevated scans.** The walker
+  populates `state.largest_files` in-process, but
+  `stream_inherited_files_into` (which processes 7 M+ inherited
+  file records post-walk) didn't call `maybe_emit_progress`
+  anywhere in its loop. Tiles grew in memory but never left to the
+  UI. Fix: emit every 50 K records; maybe_emit_progress's 200 ms
+  throttle handles the rate limit.
+
+- **Abrupt tile update at scan-end.** Running snapshots carried
+  top-200 tiles, Done carried top-5000. User saw the 4 800
+  additional small rectangles pop in at finalization. Fix: bump
+  running cap to 500. Pipe cost: ~1 MB/sec stdout at 5 emits/sec —
+  modest. Done transition now feels like a polish rather than a
+  redraw.
+
 ## 0.5.2 — 2026-04-24
 
 EasyMove on TrustedInstaller-owned paths (Hyper-V VHDX in

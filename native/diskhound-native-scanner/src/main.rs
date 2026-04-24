@@ -615,6 +615,19 @@ fn stream_inherited_files_into(
     let file = File::open(baseline_path)?;
     let reader = BufReader::new(GzDecoder::new(BufReader::new(file)));
 
+    // Emit a progress snapshot every N file records processed. The
+    // inherited stream can be 7 M+ file records on a rescan of a
+    // big drive, and without periodic emits the UI sits on its
+    // pre-stream snapshot with no tile movement for the full
+    // stream duration (observed as "no tiles streaming" on
+    // non-elevated rescans). 50 K is a good cadence — at typical
+    // stream rate of ~1 M records/sec that's ~50 ms between emits,
+    // which is thinly below the 200 ms snapshot-interval throttle
+    // inside maybe_emit_progress, so only the snapshot-interval
+    // cap actually limits emissions.
+    const EMIT_EVERY_N_FILES: u64 = 50_000;
+    let mut files_since_last_emit: u64 = 0;
+
     for line in reader.lines() {
         let Ok(line) = line else { continue };
         if line.is_empty() {
@@ -697,6 +710,17 @@ fn stream_inherited_files_into(
                 list.sort_by(|a, b| b.1.cmp(&a.1));
                 list.truncate(FOLDER_TREE_FILES_PER_PARENT);
             }
+        }
+
+        // Periodic progress emit so tiles stream into the UI during
+        // the long inherited-file stream. The maybe_emit_progress
+        // throttle (200 ms) ensures we don't spam stdout; this
+        // counter is just a cheap way to avoid checking the clock on
+        // every single record.
+        files_since_last_emit += 1;
+        if files_since_last_emit >= EMIT_EVERY_N_FILES {
+            files_since_last_emit = 0;
+            let _ = maybe_emit_progress(state);
         }
     }
 
@@ -1884,6 +1908,29 @@ fn split_parent_and_name(full_path: &str) -> (String, String) {
 
 #[cfg(windows)]
 fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
+    // The walker's own "indexing" phase starts here. UI uses
+    // scan_phase to decide copy and which progress bar to show.
+    // Pre-0.5.3 the walker left scan_phase at Starting, which made
+    // the UI stay on "Scanning — first files should appear in a few
+    // seconds" forever, then at the end flip straight to Done —
+    // never reaching the files-indexed/total fraction copy that
+    // actually reflected progress.
+    state.scan_phase = ScanPhase::Indexing;
+    // Expected-total-files is needed for the files-indexed fraction
+    // display. We seed from the baseline file count when available
+    // so the UI has a denominator. Baseline-less scans get None and
+    // fall back to the generic byte-based percentage.
+    if let Some(baseline) = state.baseline.as_ref() {
+        // Sum all per-dir file counts for an approximate total. The
+        // baseline's dir_file_counts is bubbled up, so the root's
+        // value is the recursive total — read it directly when
+        // present, or sum when not.
+        let root_key = &state.root_path_string;
+        if let Some(total) = baseline.dir_file_counts.get(root_key) {
+            state.expected_total_files = Some(*total);
+        }
+    }
+
     // Each stack entry carries an optional mtime hint inherited from the
     // parent's FindFirstFileExW data. Populated for every subdirectory
     // during enumeration so we don't need to `metadata()` them again at
@@ -1998,6 +2045,37 @@ fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<()
                     let _ = writer.write_dir_entry(sub, *m);
                 }
             }
+
+            // Populate directory_totals with each inherited subtree dir
+            // so the folder-tree sidecar's `d` (subdir) arrays are
+            // populated per parent. Without this, the inherited dirs
+            // only exist in the index but not in directory_totals, and
+            // the sidecar builder emits `"d":[]` for every parent —
+            // user-visible symptom: Folders tab shows 21 files at C:\
+            // with no directories (no C:\Users, C:\Windows, etc.),
+            // despite the tree having 938k+ entries.
+            //
+            // We reach into the baseline's per-dir aggregates for
+            // accurate size + file_count per subdir. Same memory was
+            // already paid for the inheritance check above, so this is
+            // cheap.
+            if let Some(baseline) = state.baseline.as_ref() {
+                let root_path_snapshot = state.root_path_string.clone();
+                for (sub, _mtime) in &subtree_dir_entries {
+                    let sub_size = baseline.dir_total_sizes.get(sub).copied().unwrap_or(0);
+                    let sub_fc = baseline.dir_file_counts.get(sub).copied().unwrap_or(0);
+                    state
+                        .directory_totals
+                        .entry(sub.clone())
+                        .or_insert_with(|| DirectoryHotspot {
+                            path: sub.clone(),
+                            size: sub_size,
+                            file_count: sub_fc,
+                            depth: directory_depth(&root_path_snapshot, sub),
+                        });
+                }
+            }
+
             maybe_emit_progress(state)?;
             continue;
         }
@@ -2009,6 +2087,16 @@ fn scan_windows_sequential(root_path: &Path, state: &mut ScanState) -> Result<()
 
         enumerate_windows_directory(&directory_path, state, &mut stack)?;
     }
+
+    // Main walk is done — the UI can now show "Finalizing" copy
+    // instead of the indeterminate-scanning copy. The post-walk
+    // stream below does the remaining work (copying inherited file
+    // records out of the baseline), which on a full-inherit scan
+    // represents 90%+ of total files but doesn't need a visible
+    // percentage (the walker's `filesVisited` counter is already
+    // credited from the inheritance aggregates).
+    state.scan_phase = ScanPhase::Finalizing;
+    let _ = maybe_emit_progress(state);
 
     // Post-walk streaming pass: if any subtrees were inherited, stream the
     // baseline NDJSON one more time to copy file records + update top-N
@@ -2381,6 +2469,27 @@ fn try_scan_windows_parallel(root_path: &Path, state: &mut ScanState) -> Paralle
                 let _ = writer.write_dir_entry(&child_path_str, current_mtime);
                 for (sub_path, sub_mtime) in &subtree_dir_entries {
                     let _ = writer.write_dir_entry(sub_path, *sub_mtime);
+                }
+            }
+            // Mirror of the sequential path fix: populate
+            // directory_totals for each inherited subtree dir so the
+            // folder-tree sidecar's `d` arrays are complete. Without
+            // this, inherited dirs only live in the index and the
+            // Folders tab shows empty subtrees.
+            if let Some(baseline) = baseline_opt.as_ref() {
+                let root_path_snapshot = state.root_path_string.clone();
+                for (sub, _mtime) in &subtree_dir_entries {
+                    let sub_size = baseline.dir_total_sizes.get(sub).copied().unwrap_or(0);
+                    let sub_fc = baseline.dir_file_counts.get(sub).copied().unwrap_or(0);
+                    state
+                        .directory_totals
+                        .entry(sub.clone())
+                        .or_insert_with(|| DirectoryHotspot {
+                            path: sub.clone(),
+                            size: sub_size,
+                            file_count: sub_fc,
+                            depth: directory_depth(&root_path_snapshot, sub),
+                        });
                 }
             }
             // Record the subtree prefix so the post-walk streamer copies
@@ -3076,9 +3185,7 @@ impl ScanState {
         top_extensions.truncate(TOP_EXTENSION_LIMIT);
 
         // largest_files: always included during Running, but CAPPED to
-        // 200 entries (~30 KB of JSON). That's well under the Windows
-        // 64 KB pipe buffer per emit, and at 5 emits/sec it's 150 KB/s
-        // of traffic — plenty of headroom. This is what makes tiles
+        // 500 entries (~75 KB of JSON). This is what makes tiles
         // stream into the treemap mid-scan on BOTH code paths:
         //   - MFT parallel emit: shards publish to tile_slot, pump
         //     swaps into state.largest_files. Always-capped emit now
@@ -3088,9 +3195,16 @@ impl ScanState {
         //     state.largest_files on every file. With lite-mode
         //     previously erasing largest_files from Running snapshots,
         //     the walker NEVER streamed tiles at all. Now it does.
-        // Done snapshots keep the full top-K (5000 entries).
+        //
+        // Why 500 and not 200: users reported the final "Done" snapshot
+        // with 5000 tiles caused a visible jump at scan-end ("they
+        // abruptly all updated"). 500 gets close enough to the full
+        // set that the end transition feels like a polish rather than
+        // a redraw. Pipe-traffic cost is modest: 500 records * ~400 B
+        // JSON = ~200 KB/emit; at 5 emits/sec that's 1 MB/sec, well
+        // within Node's readline drain rate.
         let largest_files = if matches!(status, ScanStatus::Running) {
-            const RUNNING_LARGEST_FILES_CAP: usize = 200;
+            const RUNNING_LARGEST_FILES_CAP: usize = 500;
             self.largest_files
                 .iter()
                 .take(RUNNING_LARGEST_FILES_CAP)
