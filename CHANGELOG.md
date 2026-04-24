@@ -1,5 +1,136 @@
 # Changelog
 
+## 0.5.4 — 2026-04-24
+
+Second Linux polish pass. A screenshot from an Ubuntu VM showed
+DiskHound running with no sidebar icon and a black glyph in the
+title bar — neither of which 0.5.3's icon work fully fixed. Also
+a platform audit because most testing had been Windows-only.
+
+### Linux sidebar + title-bar icons
+
+Root cause was two issues layered together:
+
+- **Single-size window icon.** `BrowserWindow.icon` was a 512×512
+  PNG. GNOME downscales that into a smudge at the 16 / 24 px sizes
+  it needs for the title bar, and some WMs read the icon *after*
+  the window is realized (the constructor option is too early).
+  Fixed by loading the full 16/24/32/48/64/128/256/512 set into a
+  multi-rep `NativeImage` and calling `win.setIcon()` post-
+  creation so the `_NET_WM_ICON` atom ends up with every size the
+  WM might ask for.
+- **No XDG `.desktop` file.** AppImage embeds a launcher *inside*
+  the mount, which GNOME's dock can't see. Without AppImageLauncher
+  the dock shows a generic Electron glyph (or nothing) because
+  there's no `StartupWMClass` match on the XDG search path. Fixed
+  with a first-run (and every-run, idempotently) self-integration
+  step that writes `~/.local/share/applications/diskhound.desktop`
+  with `Exec=` pointing at `$APPIMAGE` (or the tar.gz binary) and
+  drops the hicolor PNGs into
+  `~/.local/share/icons/hicolor/<size>/apps/diskhound.png`. Runs
+  `update-desktop-database` + `gtk-update-icon-cache` best-effort
+  so users don't have to log out / back in.
+
+`build/icons/*.png` is now shipped as `resources/icons/` in the
+packaged app so the runtime has real pixels to copy.
+
+### Platform audit — hide Windows-only UI
+
+Much of DiskHound is built around the Windows MFT fast-scan path
+(UAC, Scheduled Task elevation, Get-Counter GPU sampling,
+`SetProcessAffinityMask`). On Linux/Mac those handlers stub out,
+but the UI still showed the buttons — users saw "Running elevated
+— MFT fast-scan path active" on Ubuntu because `isElevated()`
+returns `true` as a non-Windows stub, and the scheduled-task
+buttons tried to invoke `schtasks.exe`.
+
+- **`nativeApi.platform`** — new static string (`"win32" | "darwin"
+  | "linux"`) set at preload time. Replaces the UA-sniffing in
+  `resolvePlatformClass` / `rootKey` throughout the renderer.
+- **Settings → Performance section** is now Windows-only.
+- **Processes → GPU + Affinity Rules tabs** are now Windows-only,
+  along with the per-process "Set CPU affinity…" / "Pin CPU
+  affinity rule…" context-menu items.
+- **Scan-root input placeholder** switches between `C:\Users\…`,
+  `/Users/…`, `/home/…` per platform instead of always showing
+  the Windows form.
+- **Kill-error toast** now maps POSIX `EPERM` / "operation not
+  permitted" to a `sudo`-flavored remediation message. Mac and
+  Linux get slightly different phrasing (Activity Monitor vs.
+  terminal `sudo kill`).
+- **GPU empty-state copy** no longer blames WDDM when the user is
+  on macOS/Linux.
+
+### Minor
+
+- **Admin banner** now has an explicit `platform === "win32"`
+  guard. It was implicitly Windows-only because the non-Windows
+  `isElevated()` stub returns `true`, but one refactor of that
+  stub would have brought the banner back to Linux without
+  notice.
+- **ChangesView copy** no longer mentions NTFS / Windows change
+  journal on Linux/Mac, where DiskHound falls back to scheduled
+  rescans exclusively.
+
+## 0.5.3 — 2026-04-24
+
+Two-part Linux pass following 0.5.2's first drive/filesystem fix.
+
+### Native scanner on Linux + macOS
+
+Previously the Rust scanner was Windows-gated and non-Windows fell
+through to the slower JS walker. Flipped that:
+
+- **Native scanner now enabled everywhere.** Non-Windows sessions
+  spawn the same `diskhound-native-scanner` binary (built via
+  cargo for x64 Linux / universal macOS in CI).
+- **Thread pool sizing.** Rayon pool is now
+  `num_cpus::get().clamp(4, 16)` instead of the prior `[2, 8]` —
+  high-core NVMe boxes were bottlenecked by the old clamp.
+- **Baseline-driven progress.** `expected_total_files` populates
+  from the previous scan's per-directory totals during indexing,
+  so the progress-% UI has a live denominator from the start of a
+  rescan instead of stalling at "counting…".
+
+### Accurate disk usage on Unix (sparse files)
+
+Both the Rust scanner and the JS fallback now report
+`stat.blocks * 512` instead of nominal file length on non-Windows.
+This is what `du` reports — accounts for sparse files
+(ext4 / btrfs / APFS holes) and filesystem-level compression.
+Fixes inflated totals on systems with sparse VM images or
+compressed APFS volumes.
+
+### Linux integration (first pass)
+
+- **Taskbar grouping fix.** The X11 `WM_CLASS` now matches the
+  `StartupWMClass=diskhound` in the embedded `.desktop` file
+  (`app.commandLine.appendSwitch("class", "diskhound")`).
+- **Multi-size icons.** `scripts/generate-icon.mjs` now emits
+  16/24/32/48/64/128/256/512 PNGs into `build/icons/`, and
+  electron-builder packages them into the AppImage.
+
+### Auto-updates: "manual" phase for tar.gz builds
+
+`electron-updater` only works with AppImage on Linux. Prior
+builds errored out when the tar.gz user's update check ran. Now
+non-AppImage Linux builds surface a "Update available — download
+from GitHub" toast that links straight to the release page.
+
+### CI / workflow
+
+- `scripts/sync-version-from-tag.mjs` patches `package.json`'s
+  version from the git tag at release time, so the CHANGELOG is
+  the authoritative version source.
+
+### UX polish
+
+- `platform-windows` / `platform-macos` / `platform-linux` root
+  classes for OS-specific CSS tweaks (Windows title-bar overlay
+  padding, etc.).
+- Header drag regions refined so the window remains draggable
+  around buttons and drive pills.
+
 ## 0.5.2 — 2026-04-24
 
 Linux support pass. A user screenshot on Ubuntu 24.04 flagged four

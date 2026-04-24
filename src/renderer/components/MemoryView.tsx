@@ -48,10 +48,17 @@ function getInitialCpuScale(): CpuScale {
 function getInitialViewMode(): ViewMode {
   if (typeof window === "undefined") return "list";
   const stored = window.localStorage.getItem(VIEW_MODE_KEY);
+  // GPU (PowerShell Get-Counter against Windows WDDM) and CPU affinity
+  // rules (SetProcessAffinityMask) are both Windows-only code paths.
+  // If a user's last-saved mode was one of them and they've since
+  // moved to Linux/Mac (or we're previewing on a new platform), we'd
+  // land on an empty "unavailable" screen. Fall back to the list view
+  // there so the tab is always useful on open.
+  const isWin = nativeApi.platform === "win32";
   if (stored === "treemap") return "treemap";
   if (stored === "heatmap") return "heatmap";
-  if (stored === "gpu") return "gpu";
-  if (stored === "rules") return "rules";
+  if (stored === "gpu" && isWin) return "gpu";
+  if (stored === "rules" && isWin) return "rules";
   return "list";
 }
 
@@ -304,17 +311,30 @@ export function MemoryView() {
       return;
     }
 
-    // Make the Windows "Access is denied" error actionable. taskkill emits
-    // it whenever the target is system-owned or otherwise protected —
-    // elevation is the only recourse, and most users don't know that
-    // without being told.
+    // Map common permission-denied errors to actionable remediation.
+    // Windows' taskkill emits "Access is denied" on protected / system-
+    // owned processes; POSIX process.kill throws EPERM ("operation not
+    // permitted") when we don't own the target. Each platform has a
+    // different fix — spell it out instead of surfacing raw errno.
     const msg = (r?.message ?? "").toLowerCase();
-    const denied = msg.includes("access is denied") || msg.includes("access denied");
-    if (denied) {
+    const deniedWin = msg.includes("access is denied") || msg.includes("access denied");
+    const deniedPosix =
+      msg.includes("eperm") ||
+      msg.includes("operation not permitted") ||
+      msg.includes("permission denied");
+    if (deniedWin) {
       toast(
         "error",
         `Needs admin privileges`,
         `${proc.name} is a protected process. Close DiskHound, right-click its shortcut, choose "Run as administrator", then try again.`,
+      );
+    } else if (deniedPosix) {
+      toast(
+        "error",
+        `Needs elevated privileges`,
+        nativeApi.platform === "darwin"
+          ? `${proc.name} is owned by another user or the system. Launch DiskHound with \`sudo open\`, or stop the process via Activity Monitor.`
+          : `${proc.name} is owned by another user or the system. Relaunch DiskHound with \`sudo\`, or use \`sudo kill\` from a terminal.`,
       );
     } else {
       toast("error", `Couldn't kill ${proc.name}`, r?.message ?? "Unknown error");
@@ -409,39 +429,48 @@ export function MemoryView() {
             </svg>
             CPU Heatmap
           </button>
-          <button
-            role="tab"
-            aria-selected={viewMode === "gpu"}
-            className={`memory-view-tab ${viewMode === "gpu" ? "active" : ""}`}
-            onClick={() => setViewMode("gpu")}
-            title="GPU — per-process GPU utilisation + VRAM, adapter overview"
-          >
-            {/* Stylised "GPU module" — a rounded rectangle card with
-                radiating heat lines, to distinguish from the Heatmap
-                icon and signal "hardware device" rather than "graph". */}
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <rect x="1.5" y="4" width="11" height="6" rx="1" />
-              <circle cx="5" cy="7" r="1.2" />
-              <path d="M4 1.5V3.5M7 1.5V3.5M10 1.5V3.5M4 10.5V12.5M7 10.5V12.5M10 10.5V12.5" opacity="0.6" />
-            </svg>
-            GPU
-          </button>
-          <button
-            role="tab"
-            aria-selected={viewMode === "rules"}
-            className={`memory-view-tab ${viewMode === "rules" ? "active" : ""}`}
-            onClick={() => setViewMode("rules")}
-            title="CPU affinity rules — pin processes to specific cores persistently"
-          >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <rect x="1.5" y="1.5" width="4" height="4" />
-              <rect x="8.5" y="1.5" width="4" height="4" />
-              <rect x="1.5" y="8.5" width="4" height="4" />
-              <rect x="8.5" y="8.5" width="4" height="4" />
-              <path d="M5.5 3.5H8.5M5.5 10.5H8.5M3.5 5.5V8.5M10.5 5.5V8.5" opacity="0.5" />
-            </svg>
-            Affinity Rules
-          </button>
+          {/* GPU + Affinity Rules are Windows-only — the samplers rely
+           * on PowerShell's Get-Counter (WDDM) and
+           * SetProcessAffinityMask respectively, neither of which
+           * has a macOS/Linux equivalent we ship. Hide the tabs
+           * entirely there so users don't click into dead views. */}
+          {nativeApi.platform === "win32" && (
+            <>
+              <button
+                role="tab"
+                aria-selected={viewMode === "gpu"}
+                className={`memory-view-tab ${viewMode === "gpu" ? "active" : ""}`}
+                onClick={() => setViewMode("gpu")}
+                title="GPU — per-process GPU utilisation + VRAM, adapter overview"
+              >
+                {/* Stylised "GPU module" — a rounded rectangle card with
+                    radiating heat lines, to distinguish from the Heatmap
+                    icon and signal "hardware device" rather than "graph". */}
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                  <rect x="1.5" y="4" width="11" height="6" rx="1" />
+                  <circle cx="5" cy="7" r="1.2" />
+                  <path d="M4 1.5V3.5M7 1.5V3.5M10 1.5V3.5M4 10.5V12.5M7 10.5V12.5M10 10.5V12.5" opacity="0.6" />
+                </svg>
+                GPU
+              </button>
+              <button
+                role="tab"
+                aria-selected={viewMode === "rules"}
+                className={`memory-view-tab ${viewMode === "rules" ? "active" : ""}`}
+                onClick={() => setViewMode("rules")}
+                title="CPU affinity rules — pin processes to specific cores persistently"
+              >
+                <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                  <rect x="1.5" y="1.5" width="4" height="4" />
+                  <rect x="8.5" y="1.5" width="4" height="4" />
+                  <rect x="1.5" y="8.5" width="4" height="4" />
+                  <rect x="8.5" y="8.5" width="4" height="4" />
+                  <path d="M5.5 3.5H8.5M5.5 10.5H8.5M3.5 5.5V8.5M10.5 5.5V8.5" opacity="0.5" />
+                </svg>
+                Affinity Rules
+              </button>
+            </>
+          )}
         </div>
         <input
           className="filter-input"
@@ -1585,47 +1614,57 @@ function ProcessContextMenu(props: {
           <div className="process-ctx-divider" />
         </>
       )}
-      <button
-        className="process-ctx-item"
-        role="menuitem"
-        onClick={() => setAffinityOpen(true)}
-      >
-        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-          <rect x="2" y="2" width="4" height="4" />
-          <rect x="8" y="2" width="4" height="4" />
-          <rect x="2" y="8" width="4" height="4" />
-          <rect x="8" y="8" width="4" height="4" />
-        </svg>
-        Set CPU affinity… (once)
-      </button>
-      {matchedRule ? (
-        <button
-          className="process-ctx-item process-ctx-highlight"
-          role="menuitem"
-          onClick={() => setEditRuleOpen(true)}
-          title={`Rule already exists: ${matchedRule.name || matchedRule.matchPattern}. Click to edit.`}
-        >
-          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-            <path d="M2 10L2 12L4 12L11 5L9 3L2 10Z" />
-            <path d="M8.5 3.5L10.5 5.5" />
-          </svg>
-          Edit affinity rule…
-        </button>
-      ) : (
-        <button
-          className="process-ctx-item"
-          role="menuitem"
-          onClick={() => setPinRuleOpen(true)}
-          title="Create a persistent rule that re-applies this affinity every time the process starts"
-        >
-          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-            <path d="M7 2L7 9M7 9L4 6M7 9L10 6" />
-            <circle cx="7" cy="11.5" r="1" />
-          </svg>
-          Pin CPU affinity rule…
-        </button>
+      {/* CPU-affinity items are Windows-only — the backend calls
+       * Win32 SetProcessAffinityMask via PowerShell. On Linux the
+       * equivalent is sched_setaffinity + a per-process rule
+       * engine we haven't built yet, and on macOS affinity isn't
+       * exposed at all (the scheduler treats it as a hint at best).
+       * Hide the items rather than showing ones that always fail. */}
+      {nativeApi.platform === "win32" && (
+        <>
+          <button
+            className="process-ctx-item"
+            role="menuitem"
+            onClick={() => setAffinityOpen(true)}
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="2" y="2" width="4" height="4" />
+              <rect x="8" y="2" width="4" height="4" />
+              <rect x="2" y="8" width="4" height="4" />
+              <rect x="8" y="8" width="4" height="4" />
+            </svg>
+            Set CPU affinity… (once)
+          </button>
+          {matchedRule ? (
+            <button
+              className="process-ctx-item process-ctx-highlight"
+              role="menuitem"
+              onClick={() => setEditRuleOpen(true)}
+              title={`Rule already exists: ${matchedRule.name || matchedRule.matchPattern}. Click to edit.`}
+            >
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <path d="M2 10L2 12L4 12L11 5L9 3L2 10Z" />
+                <path d="M8.5 3.5L10.5 5.5" />
+              </svg>
+              Edit affinity rule…
+            </button>
+          ) : (
+            <button
+              className="process-ctx-item"
+              role="menuitem"
+              onClick={() => setPinRuleOpen(true)}
+              title="Create a persistent rule that re-applies this affinity every time the process starts"
+            >
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <path d="M7 2L7 9M7 9L4 6M7 9L10 6" />
+                <circle cx="7" cy="11.5" r="1" />
+              </svg>
+              Pin CPU affinity rule…
+            </button>
+          )}
+          <div className="process-ctx-divider" />
+        </>
       )}
-      <div className="process-ctx-divider" />
       <button
         className="process-ctx-item process-ctx-warn"
         role="menuitem"

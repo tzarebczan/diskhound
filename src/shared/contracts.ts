@@ -732,7 +732,22 @@ export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMov
 
 // ── IPC API ─────────────────────────────────────────────────
 
+/**
+ * Normalized platform string exposed to the renderer. Narrower than
+ * `NodeJS.Platform` because the renderer only needs to distinguish
+ * the three OSes we ship binaries for; anything else maps to "linux"
+ * since the feature set (no MFT, no UAC, ps-based process sampling)
+ * is the same as a standard Linux host. Keeping this narrow avoids
+ * `switch` statements that have to handle "freebsd" / "aix" / etc.
+ */
+export type DiskhoundPlatform = "win32" | "darwin" | "linux";
+
 export interface DiskhoundNativeApi {
+  /** Static OS identifier, resolved once at preload time. Lets the
+   *  renderer gate Windows-only UI (MFT elevation, CPU affinity rules,
+   *  GPU counters) without relying on user-agent sniffing. */
+  platform: DiskhoundPlatform;
+
   // Scan
   pickRootPath: () => Promise<string | null>;
   getCurrentSnapshot: () => Promise<ScanSnapshot>;

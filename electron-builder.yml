@@ -19,6 +19,16 @@ extraResources:
       - "diskhound-native-scanner.exe"
   - from: build/icon.png
     to: icon.png
+  # Multi-size PNGs used at runtime to (a) build a multi-rep NativeImage
+  # so the Linux window manager has the right pixels for every WM_ICON
+  # request size (16/24/32/48/64/128/256/512), and (b) drop into
+  # ~/.local/share/icons/hicolor/<size>/apps/ when the app self-integrates
+  # on first run so the dock/sidebar picks up the real icon instead of
+  # Electron's default glyph.
+  - from: build/icons
+    to: icons
+    filter:
+      - "*.png"
 
 asar: true
 compression: maximum

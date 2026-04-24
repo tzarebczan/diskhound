@@ -142,8 +142,19 @@ export function SettingsView() {
        * logic). One less knob to tune; the app reopens to the last-
        * scanned root automatically on launch. */}
 
-      {/* ── Performance / Elevation ── */}
-      <PerformanceSection />
+      {/* ── Performance / Elevation ── Windows-only: the whole section
+       * describes MFT fast-scan elevation via Scheduled Task / UAC,
+       * which are Windows concepts. On Linux and macOS the scanner
+       * already has full read access to the user's files without
+       * elevation (MFT isn't a thing — ext4/APFS/btrfs have no
+       * equivalent privileged-only enumeration path we'd need to
+       * unlock). Rendering the section there confused users: the
+       * status line claimed "Running elevated — MFT fast-scan path
+       * active" because isElevated() returns true as a stub on
+       * non-Windows, and the buttons triggered schtasks commands
+       * that don't exist. Gate on nativeApi.platform so the section
+       * disappears entirely on non-Windows instead of half-working. */}
+      {nativeApi.platform === "win32" && <PerformanceSection />}
 
       {/* ── Monitoring ── */}
       <div className="settings-section">

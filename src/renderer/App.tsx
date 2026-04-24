@@ -75,12 +75,22 @@ function cycleThemePreference(theme: GeneralSettings["theme"]): GeneralSettings[
 }
 
 function resolvePlatformClass(): "platform-windows" | "platform-macos" | "platform-linux" {
-  if (typeof navigator !== "undefined") {
-    const ua = navigator.userAgent.toLowerCase();
-    if (ua.includes("windows")) return "platform-windows";
-    if (ua.includes("mac")) return "platform-macos";
+  switch (nativeApi.platform) {
+    case "win32": return "platform-windows";
+    case "darwin": return "platform-macos";
+    default: return "platform-linux";
   }
-  return "platform-linux";
+}
+
+/** Example path the scan-root input shows when empty. Platform-
+ *  specific so Linux/Mac users aren't staring at a Windows-style
+ *  path and guessing what DiskHound expects. */
+function scanInputPlaceholder(): string {
+  switch (nativeApi.platform) {
+    case "win32": return "C:\\Users\\...";
+    case "darwin": return "/Users/...";
+    default: return "/home/...";
+  }
 }
 
 /**
@@ -91,7 +101,7 @@ function resolvePlatformClass(): "platform-windows" | "platform-macos" | "platfo
 function rootKey(rootPath: string | null | undefined): string {
   if (!rootPath) return "";
   const trimmed = rootPath.replace(/[\\/]+$/, "");
-  if (typeof navigator !== "undefined" && /windows/i.test(navigator.userAgent)) {
+  if (nativeApi.platform === "win32") {
     return trimmed.toLowerCase();
   }
   return trimmed;
@@ -800,8 +810,15 @@ export function App() {
          *  users fall back to the 10-20× slower FindFirstFile walker
          *  without ever knowing the fast path existed. Dismissed
          *  permanently via localStorage once the user engages (or
-         *  explicitly dismisses). */}
-        {elevationStatus
+         *  explicitly dismisses).
+         *
+         *  Windows-only: MFT doesn't exist on macOS/Linux. The banner
+         *  is already implicitly suppressed there because the
+         *  `isElevated()` stub returns true outside Windows, but an
+         *  explicit platform guard keeps it that way if the stub ever
+         *  changes (and makes the intent readable). */}
+        {nativeApi.platform === "win32"
+          && elevationStatus
           && !elevationStatus.elevated
           && !elevationStatus.scheduledTaskRegistered
           && !adminBannerDismissed
@@ -893,7 +910,7 @@ export function App() {
               className="scan-input"
               value={rootPath}
               onInput={(e) => setRootPath((e.target as HTMLInputElement).value)}
-              placeholder="C:\Users\..."
+              placeholder={scanInputPlaceholder()}
               onKeyDown={(e) => { if (e.key === "Enter") void doScan(); }}
             />
             {snapshot.status === "running" ? (

@@ -226,6 +226,84 @@ function resolveAppIconPath(): string | null {
   return null;
 }
 
+function resolveIconsDir(): string | null {
+  const dirs = [
+    Path.join(process.resourcesPath ?? projectRoot, "icons"),
+    Path.join(projectRoot, "build", "icons"),
+  ];
+  for (const dir of dirs) {
+    try {
+      if (FS_SYNC.existsSync(dir) && FS_SYNC.statSync(dir).isDirectory()) {
+        return dir;
+      }
+    } catch { /* try next */ }
+  }
+  return null;
+}
+
+/**
+ * Build a window icon with every size we ship as a separate
+ * representation. Linux window managers read _NET_WM_ICON as a list
+ * of (w, h, ARGB) tuples and pick the best match for each chrome
+ * target (dock 48 px, title-bar 16/24 px, Alt-Tab switcher 128 px,
+ * Activities overview 256 px, etc.). Passing one 512×512 PNG forces
+ * them to downscale — fine for a simple logo, terrible for the
+ * DiskHound treemap tiles which alias into an unreadable smudge at
+ * 16 px. With explicit 16/24/32/48/64/128/256/512 reps the WM picks
+ * the pre-rendered one and the sidebar + title-bar icons both look
+ * crisp.
+ *
+ * Returns null if neither the packaged nor the dev icons/ directory
+ * exists — caller falls back to the single-size 512 PNG.
+ */
+function createAppIconImage(): Electron.NativeImage | null {
+  const iconsDir = resolveIconsDir();
+  if (!iconsDir) return null;
+
+  const sizes = [512, 256, 128, 64, 48, 32, 24, 16];
+  const base = nativeImage.createEmpty();
+  let added = 0;
+
+  for (const size of sizes) {
+    const pngPath = Path.join(iconsDir, `${size}x${size}.png`);
+    try {
+      if (!FS_SYNC.existsSync(pngPath)) continue;
+      const img = nativeImage.createFromPath(pngPath);
+      if (img.isEmpty()) continue;
+      if (added === 0) {
+        // First representation becomes the base; subsequent calls add
+        // extra scale factors. We use 1x as the base scale and express
+        // the others as fractional scaleFactors relative to it — this
+        // is how Electron's NativeImage lets you bundle multiple pixel
+        // densities for a single logical image.
+        base.addRepresentation({
+          scaleFactor: 1,
+          width: size,
+          height: size,
+          buffer: img.toPNG(),
+        });
+      } else {
+        // Anchor scaleFactor off the base (512 → 1.0). Linux WMs read
+        // all reps out of the NativeImage regardless of scaleFactor
+        // semantics, but keeping the ratios honest avoids surprising
+        // HiDPI tray-icon behavior on macOS if we ever reuse this
+        // image there.
+        base.addRepresentation({
+          scaleFactor: size / sizes[0],
+          width: size,
+          height: size,
+          buffer: img.toPNG(),
+        });
+      }
+      added += 1;
+    } catch {
+      // Skip a bad file, keep whatever reps we've collected.
+    }
+  }
+
+  return added > 0 ? base : null;
+}
+
 function createTrayIconImage(): Electron.NativeImage {
   const iconPath = resolveAppIconPath();
   if (iconPath) {
@@ -415,6 +493,36 @@ void app.whenReady().then(async () => {
   await acquireSingleInstanceLockOrExit();
   if (process.platform === "win32") {
     app.setAppUserModelId("com.diskhound.app");
+  }
+
+  if (process.platform === "linux") {
+    // First-run (and every-run, idempotently) XDG desktop integration:
+    // drop the .desktop file into ~/.local/share/applications and the
+    // hicolor icons into ~/.local/share/icons/hicolor so GNOME's dock
+    // can match the running window to a proper launcher entry. Without
+    // this, AppImage users saw a blank/generic icon in the sidebar
+    // because the .desktop file embedded *inside* the AppImage isn't
+    // on the XDG search path. Runs in parallel with the rest of
+    // startup — the window doesn't block on it.
+    const { integrateLinuxDesktop } = await import("./linuxDesktopIntegration");
+    const os = await import("node:os");
+    void integrateLinuxDesktop({
+      homeDir: os.homedir(),
+      iconsDir: resolveIconsDir(),
+      // APPIMAGE is the env var set by the AppImage runtime and points
+      // at the .AppImage file the user double-clicked. process.execPath
+      // inside an AppImage resolves to /tmp/.mount_XXXXX/... which
+      // vanishes the moment the AppImage unmounts — useless as an
+      // Exec= target. Outside AppImage (tar.gz extract, dev run) fall
+      // back to the real binary path.
+      execPath: process.env.APPIMAGE || process.execPath,
+      logger: writeCrashLog,
+    }).catch((err) => {
+      writeCrashLog(
+        "linux-integration",
+        `top-level await rejected: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
   }
 
   if (process.platform === "win32") {
@@ -2993,6 +3101,19 @@ void app.whenReady().then(async () => {
 
   const createWindow = async () => {
     const appIconPath = resolveAppIconPath();
+    const appIconImage = createAppIconImage();
+    // Linux: prefer the multi-rep NativeImage so the WM picks the
+    // right pixels for each chrome slot (16 px title-bar, 48 px dock,
+    // 128 px switcher, …). Fall back to the 512 PNG path if the
+    // icons/ directory wasn't shipped for some reason.
+    // Windows + macOS: packaging already embeds the correct icon
+    // (ICO / ICNS) in the binary, so the `icon` option is mostly
+    // redundant there — we only set it on Linux.
+    const linuxIcon: Electron.BrowserWindowConstructorOptions["icon"] | undefined =
+      process.platform === "linux"
+        ? (appIconImage ?? appIconPath ?? undefined)
+        : undefined;
+
     mainWindow = new BrowserWindow({
       width: 1560,
       height: 980,
@@ -3000,7 +3121,7 @@ void app.whenReady().then(async () => {
       minHeight: 640,
       backgroundColor: "#0a0a0f",
       title: isDevelopment ? "DiskHound (Dev)" : "DiskHound",
-      ...(process.platform === "linux" && appIconPath ? { icon: appIconPath } : {}),
+      ...(linuxIcon ? { icon: linuxIcon } : {}),
       titleBarStyle: "hidden",
       titleBarOverlay: {
         color: "#0a0a0f",
@@ -3014,6 +3135,19 @@ void app.whenReady().then(async () => {
         sandbox: false,
       },
     });
+
+    // Some Linux window managers (notably GNOME Shell with the default
+    // dash-to-dock) ignore the constructor `icon` option and only read
+    // the icon after the window is realized. Explicit setIcon() after
+    // construction covers that case. No-op on macOS / Windows (the
+    // bundled ICNS / ICO is authoritative there).
+    if (process.platform === "linux" && appIconImage) {
+      try {
+        mainWindow.setIcon(appIconImage);
+      } catch {
+        /* non-fatal — WM just uses the default Electron icon */
+      }
+    }
 
     if (rendererEntryUrl) {
       await mainWindow.loadURL(rendererEntryUrl);

@@ -4,6 +4,7 @@ import type {
   AppSettings,
   DiskDelta,
   DiskhoundNativeApi,
+  DiskhoundPlatform,
   DuplicateAnalysis,
   DuplicateScanProgress,
   EasyMoveProgress,
@@ -11,6 +12,16 @@ import type {
   ToastMessage,
   UpdateStatus,
 } from "./shared/contracts";
+
+// Normalize node's rich NodeJS.Platform union down to the three
+// platforms we actually ship binaries for. FreeBSD / AIX / SunOS are
+// vanishingly rare in practice and behave like Linux for DiskHound's
+// purposes (ps-based sampling, no MFT, no UAC), so bucket them there
+// rather than forcing every UI consumer to handle "unknown OS".
+const platform: DiskhoundPlatform =
+  process.platform === "win32" ? "win32"
+    : process.platform === "darwin" ? "darwin"
+    : "linux";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
 const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
@@ -20,6 +31,8 @@ const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
 
 const api: DiskhoundNativeApi = {
+  platform,
+
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
   getCurrentSnapshot: () => ipcRenderer.invoke("diskhound:get-current-snapshot"),

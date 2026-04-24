@@ -418,7 +418,9 @@ export function ChangesView({ rootPath, snapshot }: Props) {
             <ol className="changes-empty-path-list">
               <li><strong>Hit "Rescan now"</strong> above — each completed scan adds a history entry, then DiskHound compares it with the previous one.</li>
               <li>
-                <strong>Background monitoring</strong> rescans your default path on a schedule (1h by default). On supported NTFS volumes, some follow-up scans can use the Windows change journal; other paths keep using scheduled rescans.{" "}
+                <strong>Background monitoring</strong> rescans your default path on a schedule (1h by default).
+                {nativeApi.platform === "win32" && " On supported NTFS volumes, some follow-up scans can use the Windows change journal; other paths keep using scheduled rescans."}
+                {" "}
                 {monitoringEnabled === false && "It's currently off — use the banner above to turn it on."}
                 {monitoringEnabled === true && "Already on — new snapshots will keep landing in the background."}
               </li>

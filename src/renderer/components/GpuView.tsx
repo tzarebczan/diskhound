@@ -112,16 +112,22 @@ export function GpuView({ refreshMs = REFRESH_MS }: Props) {
   }
 
   if (!snapshot || snapshot.unavailable) {
+    // Pick the right explanation for why this machine has no GPU
+    // stats. On non-Windows the tab is hidden anyway, but in case a
+    // user somehow lands here (e.g. saved view mode from a prior
+    // Windows-on-this-account) give an honest answer rather than
+    // blaming WDDM.
+    const subText = snapshot?.errorMessage
+      ? `Sampler error: ${snapshot.errorMessage}`
+      : nativeApi.platform === "win32"
+        ? "Windows exposes GPU counters only when a WDDM 2.0+ driver is installed. VMs and some older integrated GPUs won't show usage here."
+        : "GPU sampling currently only works on Windows (WDDM performance counters). macOS/Linux support is on the roadmap.";
     return (
       <div className="gpu-view">
         <div className="gpu-view-empty">
           <div className="gpu-view-empty-icon">◇</div>
           <div>GPU stats aren't available on this machine.</div>
-          <div className="gpu-view-empty-sub">
-            {snapshot?.errorMessage
-              ? `Sampler error: ${snapshot.errorMessage}`
-              : "Windows exposes GPU counters only when a WDDM 2.0+ driver is installed. VMs and some older integrated GPUs won't show usage here."}
-          </div>
+          <div className="gpu-view-empty-sub">{subText}</div>
         </div>
       </div>
     );

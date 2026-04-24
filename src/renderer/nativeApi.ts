@@ -1,4 +1,4 @@
-import type { DiskhoundNativeApi } from "../shared/contracts";
+import type { DiskhoundNativeApi, DiskhoundPlatform } from "../shared/contracts";
 
 // Lazy proxy: defers window.diskhound access until actual method calls.
 // This prevents crashes when the preload bridge hasn't been injected yet
@@ -10,6 +10,13 @@ export const nativeApi: DiskhoundNativeApi = new Proxy(
       const bridge = window.diskhound;
 
       if (!bridge) {
+        // Platform is a static string the preload sets eagerly. Before
+        // the bridge lands (Vite HMR, first paint), fall back to UA
+        // sniffing so renderer components can still gate platform-
+        // specific UI without waiting on an async handshake.
+        if (prop === "platform") {
+          return guessPlatformFromUserAgent();
+        }
         // Event listeners: return no-op unsubscriber
         if (prop.startsWith("on")) {
           return (_listener: unknown) => () => {};
@@ -28,3 +35,11 @@ export const nativeApi: DiskhoundNativeApi = new Proxy(
     },
   },
 );
+
+function guessPlatformFromUserAgent(): DiskhoundPlatform {
+  if (typeof navigator === "undefined") return "linux";
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes("windows")) return "win32";
+  if (ua.includes("mac os") || ua.includes("macintosh")) return "darwin";
+  return "linux";
+}
