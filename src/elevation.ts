@@ -473,16 +473,34 @@ export async function runElevatedEasyMove(
   }
 
   // The inner PS command. Runs in the elevated context.
-  //   - Move-Item -Force so a partially-copied dest from a prior attempt doesn't block us.
-  //   - -LiteralPath so paths with brackets, dollar signs, etc. aren't wildcard-expanded.
-  //   - New-Item ItemType is Junction for directories (cheap, no admin
-  //     was needed but we're already elevated) and SymbolicLink for
-  //     files (only needs admin / Dev Mode — we've got admin).
-  //   - Output is piped to Out-Null so stderr stays clean for error reporting.
+  //
+  // We use robocopy with /b (backup semantics, uses SeBackupPrivilege)
+  // instead of Move-Item because Move-Item can't read files with
+  // restrictive ACLs — most importantly TrustedInstaller-owned
+  // paths like C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\.
+  // robocopy /b is specifically designed for administrative moves
+  // across ACL-locked files.
+  //
+  // After the move, we create a Junction (dir) or SymbolicLink (file)
+  // at the original source location. We do this via New-Item because
+  // it's already elevated — both link types work here.
+  //
+  // Errors are piped to stderr so the wrapper captures them. On
+  // robocopy's bit-flag exit codes, 0-7 = success, 8+ = real failure;
+  // we check `$LASTEXITCODE -lt 8` to decide.
   const linkType = isDirectory ? "Junction" : "SymbolicLink";
+  const srcParent = Path.dirname(sourcePath);
+  const destParent = Path.dirname(destinationPath);
+  const filename = Path.basename(sourcePath);
+  const robocopyArgs = isDirectory
+    // Dir move: src + dest ARE the dir paths, /e to copy subtree.
+    ? `'${psEscapeSingleQuoted(sourcePath)}','${psEscapeSingleQuoted(destinationPath)}','/move','/e','/b'`
+    // File move: src parent, dest parent, filename.
+    : `'${psEscapeSingleQuoted(srcParent)}','${psEscapeSingleQuoted(destParent)}','${psEscapeSingleQuoted(filename)}','/move','/b'`;
   const innerScript =
-    `Move-Item -LiteralPath '${psEscapeSingleQuoted(sourcePath)}' ` +
-    `-Destination '${psEscapeSingleQuoted(destinationPath)}' -Force; ` +
+    `New-Item -Force -ItemType Directory '${psEscapeSingleQuoted(destParent)}' | Out-Null; ` +
+    `$p = Start-Process robocopy.exe -ArgumentList ${robocopyArgs},'/copy:DAT','/r:1','/w:1','/njh','/njs','/ndl','/nc','/ns','/np' -Wait -PassThru -NoNewWindow; ` +
+    `if ($p.ExitCode -ge 8) { Write-Error "robocopy exit $($p.ExitCode)"; exit $p.ExitCode } ` +
     `New-Item -ItemType ${linkType} -Path '${psEscapeSingleQuoted(sourcePath)}' ` +
     `-Target '${psEscapeSingleQuoted(destinationPath)}' -Force | Out-Null`;
 

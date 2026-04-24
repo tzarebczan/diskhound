@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.2 — 2026-04-24
+
+EasyMove on TrustedInstaller-owned paths (Hyper-V VHDX in
+`C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\`, etc.) now
+works. 0.5.1 got past `fs.stat` EPERM but `fs.rename` itself still
+failed because Node doesn't enable `SeBackupPrivilege` — so even an
+elevated DiskHound couldn't move the file.
+
+Fix: escalate to `robocopy /move /b` when `fs.rename` hits a
+permission error. `/b` (backup semantics) uses the admin token's
+`SeBackupPrivilege`, which is specifically designed for this case —
+Windows ships robocopy exactly for administrative moves across
+ACL-locked files. Applies to both the direct move path (when already
+elevated) and the elevated-PowerShell retry (when a non-elevated
+user accepts UAC).
+
+Non-elevated users hitting a protected path still get the
+`requiresElevation: true` signal, so the renderer prompts for UAC
+before attempting the move.
+
 ## 0.5.1 — 2026-04-24
 
 Bug-fix follow-up to 0.5.0:

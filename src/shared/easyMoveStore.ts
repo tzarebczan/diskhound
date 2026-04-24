@@ -2,7 +2,7 @@ import * as FS from "node:fs";
 import * as FSP from "node:fs/promises";
 import * as Path from "node:path";
 import { randomUUID } from "node:crypto";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 
 import type { EasyMoveRecord, EasyMoveResult, PathActionResult } from "./contracts";
 
@@ -136,18 +136,84 @@ export async function easyMove(
     // Ensure destination directory exists
     await FSP.mkdir(destinationDir, { recursive: true });
 
-    // Move the file/folder
+    // Move strategy — four tiers, each only attempted if the previous
+    // failed. Escalates in capability:
+    //   1. fs.rename: atomic same-volume move. Fastest.
+    //   2. fs.copyFile + unlink: cross-drive fallback.
+    //   3. robocopy /move /b: backup-semantics move using
+    //      SeBackupPrivilege. The only built-in tool that can move
+    //      TrustedInstaller-owned files (e.g. Hyper-V VHDX under
+    //      ProgramData\Microsoft\Windows\Virtual Hard Disks\) because
+    //      Node's fs doesn't enable SeBackupPrivilege on its own.
+    //      Requires admin; we skip this tier when not elevated.
+    //   4. Defer to caller via requiresElevation: the renderer will
+    //      prompt for UAC and call easyMoveElevated, which re-runs
+    //      from step 3 in an elevated process.
+    let moveSucceeded = false;
+    let lastMoveError: unknown = null;
     try {
       await FSP.rename(sourcePath, destPath);
-    } catch {
-      // rename fails across drives — fall back to copy + delete
-      if (isDirectory) {
-        await copyDirRecursive(sourcePath, destPath);
-        await FSP.rm(sourcePath, { recursive: true, force: true });
-      } else {
-        await FSP.copyFile(sourcePath, destPath);
-        await FSP.unlink(sourcePath);
+      moveSucceeded = true;
+    } catch (renameErr) {
+      lastMoveError = renameErr;
+      // Try the copy + delete fallback only if rename wasn't a
+      // permission error — for permission errors, copy will fail
+      // identically (Node's fs uses the same underlying CreateFile).
+      // Skipping the dead-end copy attempt shaves seconds off the
+      // user-visible failure path and lands cleanly in the robocopy
+      // escalation below.
+      const renameCode = (renameErr as NodeJS.ErrnoException)?.code;
+      const renameIsPerm = renameCode === "EPERM" || renameCode === "EACCES";
+      if (!renameIsPerm) {
+        try {
+          if (isDirectory) {
+            await copyDirRecursive(sourcePath, destPath);
+            await FSP.rm(sourcePath, { recursive: true, force: true });
+          } else {
+            await FSP.copyFile(sourcePath, destPath);
+            await FSP.unlink(sourcePath);
+          }
+          moveSucceeded = true;
+        } catch (copyErr) {
+          lastMoveError = copyErr;
+        }
       }
+    }
+    if (!moveSucceeded && process.platform === "win32") {
+      // Only try robocopy when we're elevated — /b requires admin.
+      // If not elevated, skip to the requiresElevation signal below
+      // so the renderer can offer a UAC retry (which WILL be
+      // elevated, and can then reach robocopy).
+      const { isElevated } = await import("../elevation");
+      const elevated = await isElevated();
+      if (elevated) {
+        const roboResult = await robocopyMove(sourcePath, destPath, isDirectory);
+        if (roboResult.ok) {
+          moveSucceeded = true;
+        } else {
+          // robocopy failed even with admin. At this point either the
+          // file is genuinely locked by another process (WSL with VHDX
+          // open, Hyper-V VM running, etc.) or an ACL deny applies
+          // even to admins. Propagate the robocopy message via the
+          // outer catch's "locked" branch.
+          lastMoveError = new Error(
+            `robocopy failed: ${roboResult.message ?? "exit " + roboResult.exitCode}`,
+          );
+        }
+      } else {
+        // Non-elevated hitting a path we can't move — signal the
+        // renderer to offer UAC retry. Short-circuit the outer catch.
+        return {
+          ok: false,
+          requiresElevation: true,
+          message:
+            `${Path.basename(sourcePath)} may require admin rights (Windows-protected path). ` +
+            `Retry with admin — DiskHound will use an elevated helper to perform the move.`,
+        };
+      }
+    }
+    if (!moveSucceeded) {
+      throw lastMoveError ?? new Error("Move failed for unknown reason");
     }
 
     // Create link at the original location
@@ -413,4 +479,89 @@ async function copyDirRecursive(src: string, dest: string): Promise<void> {
       await FSP.copyFile(srcPath, destPath);
     }
   }
+}
+
+/**
+ * Robocopy-based move with backup semantics. Ships with every Windows
+ * install and is the only built-in tool that reliably moves files
+ * under restrictive ACLs (TrustedInstaller-owned VHDX files, etc.).
+ *
+ * /move         = move (copy + delete source)
+ * /b            = backup mode — uses SeBackupPrivilege (needs admin)
+ * /copy:DAT     = copy Data + Attributes + Timestamps; skip ACLs so the
+ *                 destination gets the destination folder's default ACL
+ *                 rather than the source's restrictive one.
+ * /r:1 /w:1     = retry once, wait 1 s — don't hang forever on a lock.
+ * /njh /njs /ndl /nc /ns /np = quiet output (no job header/summary, no
+ *                 dir list, no class/size/progress columns). Keeps the
+ *                 pipe traffic minimal so we don't backpressure.
+ *
+ * Exit codes: 0 = nothing to copy, 1 = copied OK, 2-7 = various benign
+ * outcomes (skipped, mismatched, etc.). 8+ = real failure.
+ */
+interface RobocopyResult { ok: boolean; message?: string; exitCode?: number }
+
+function robocopyMove(
+  sourcePath: string,
+  destPath: string,
+  isDirectory: boolean,
+): Promise<RobocopyResult> {
+  return new Promise((resolve) => {
+    // robocopy's API is awkward: it takes a SOURCE DIR, a DEST DIR,
+    // and an optional filename. For files, pass source's parent as
+    // source dir + the filename. For directories, source path IS the
+    // source dir, and we /e to copy subtree. Destination dir must
+    // exist or robocopy creates it.
+    const args: string[] = [];
+    if (isDirectory) {
+      // Directory move: robocopy SRC_DIR DEST_DIR /move /e /b
+      args.push(sourcePath, destPath, "/move", "/e", "/b");
+    } else {
+      // File move: robocopy SRC_PARENT DEST_PARENT FILENAME /move /b
+      const srcParent = Path.dirname(sourcePath);
+      const destParent = Path.dirname(destPath);
+      const filename = Path.basename(sourcePath);
+      args.push(srcParent, destParent, filename, "/move", "/b");
+    }
+    args.push(
+      "/copy:DAT", "/r:1", "/w:1",
+      "/njh", "/njs", "/ndl", "/nc", "/ns", "/np",
+    );
+
+    let stderrBuf = "";
+    let stdoutBuf = "";
+    try {
+      const child = spawn("robocopy.exe", args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      child.stdout?.on("data", (chunk) => { stdoutBuf += String(chunk); });
+      child.stderr?.on("data", (chunk) => { stderrBuf += String(chunk); });
+      child.on("error", (err) => {
+        resolve({ ok: false, message: err.message });
+      });
+      child.on("exit", (code) => {
+        // robocopy uses a BIT-FLAG exit model: codes 0-7 are success
+        // (bits 1=copied, 2=extra files, 4=mismatched), 8+ are real
+        // failures (8=copy errors, 16=fatal). Treat <8 as success.
+        const exitCode = code ?? -1;
+        if (exitCode >= 0 && exitCode < 8) {
+          resolve({ ok: true, exitCode });
+          return;
+        }
+        const errText = stderrBuf.trim() || stdoutBuf.trim() ||
+          `robocopy exited with ${exitCode}`;
+        resolve({
+          ok: false,
+          exitCode,
+          message: errText.slice(0, 400),
+        });
+      });
+    } catch (err) {
+      resolve({
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
 }
