@@ -118,6 +118,7 @@ const rendererEntryFile = Path.join(projectRoot, "dist-renderer", "index.html");
 const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
 const folderTreeWorkerEntry = resolveBundledFolderTreeWorkerPath(__dirname);
+const RELEASES_URL = "https://github.com/tzarebczan/diskhound/releases";
 
 type WorkerScanSession = {
   kind: "worker";
@@ -190,6 +191,9 @@ app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 // nothing. 8 GB is comfortable on a modern 16+ GB machine and still
 // leaves room for renderer + GPU + tray processes.
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=8192");
+if (process.platform === "linux") {
+  app.commandLine.appendSwitch("class", "diskhound");
+}
 
 let toastCounter = 0;
 const sendToast = (level: ToastMessage["level"], title: string, body?: string) => {
@@ -203,20 +207,34 @@ const sendToast = (level: ToastMessage["level"], title: string, body?: string) =
   mainWindow?.webContents.send(NOTIFICATION_CHANNEL, toast);
 };
 
-function createTrayIconImage(): Electron.NativeImage {
-  // Use the app icon (build/icon.png), resized to tray dimensions
+function resolveAppIconPath(): string | null {
   const iconPaths = [
-    Path.join(projectRoot, "build", "icon.png"),
     Path.join(process.resourcesPath ?? projectRoot, "icon.png"),
+    Path.join(projectRoot, "build", "icon.png"),
   ];
 
   for (const iconPath of iconPaths) {
     try {
-      if (require("fs").existsSync(iconPath)) {
-        const icon = nativeImage.createFromPath(iconPath);
-        return icon.resize({ width: 16, height: 16 });
+      if (FS_SYNC.existsSync(iconPath)) {
+        return iconPath;
       }
-    } catch { /* continue */ }
+    } catch {
+      // Try the next fallback.
+    }
+  }
+
+  return null;
+}
+
+function createTrayIconImage(): Electron.NativeImage {
+  const iconPath = resolveAppIconPath();
+  if (iconPath) {
+    try {
+      const icon = nativeImage.createFromPath(iconPath);
+      return icon.resize({ width: 16, height: 16 });
+    } catch {
+      // Fall through to the generated fallback below.
+    }
   }
 
   // Fallback: simple amber square if icon file not found
@@ -397,7 +415,9 @@ void app.whenReady().then(async () => {
   await acquireSingleInstanceLockOrExit();
   if (process.platform === "win32") {
     app.setAppUserModelId("com.diskhound.app");
+  }
 
+  if (process.platform === "win32") {
     // Auto-relaunch via the registered Scheduled Task (if any). This
     // is what makes "Always run as admin" actually always: normal
     // shortcut click → this non-elevated instance detects the task,
@@ -2972,6 +2992,7 @@ void app.whenReady().then(async () => {
   // ── Window ────────────────────────────────────────────────
 
   const createWindow = async () => {
+    const appIconPath = resolveAppIconPath();
     mainWindow = new BrowserWindow({
       width: 1560,
       height: 980,
@@ -2979,6 +3000,7 @@ void app.whenReady().then(async () => {
       minHeight: 640,
       backgroundColor: "#0a0a0f",
       title: isDevelopment ? "DiskHound (Dev)" : "DiskHound",
+      ...(process.platform === "linux" && appIconPath ? { icon: appIconPath } : {}),
       titleBarStyle: "hidden",
       titleBarOverlay: {
         color: "#0a0a0f",
@@ -3062,6 +3084,7 @@ void app.whenReady().then(async () => {
   let autoUpdater: any = null;
   const UPDATE_STATUS_CHANNEL = "diskhound:update-status";
   const currentVersion = app.getVersion();
+  const linuxManualUpdateBuild = process.platform === "linux" && !process.env.APPIMAGE;
   // Interval between automatic update checks once the app is running.
   // 4 hours is a middle ground — fast enough to catch same-day releases
   // without thrashing GitHub's rate limit on always-on installs.
@@ -3106,7 +3129,7 @@ void app.whenReady().then(async () => {
     persistUpdaterState();
   };
 
-  if (!isDevelopment) {
+  if (!isDevelopment && !linuxManualUpdateBuild) {
     try {
       autoUpdater = require("electron-updater").autoUpdater;
       autoUpdater.autoDownload = false;
@@ -3161,7 +3184,24 @@ void app.whenReady().then(async () => {
     }
   }
 
+  if (linuxManualUpdateBuild) {
+    emitUpdateStatus({
+      phase: "manual",
+      currentVersion,
+      manualMessage: "Automatic updates are only supported for the AppImage build. Use GitHub releases for tar.gz or other manual Linux installs.",
+    });
+  }
+
   ipcMain.handle("diskhound:check-for-updates", async () => {
+    if (linuxManualUpdateBuild) {
+      void shell.openExternal(RELEASES_URL);
+      emitUpdateStatus({
+        phase: "manual",
+        currentVersion,
+        manualMessage: "Automatic updates are only supported for the AppImage build. Opened GitHub releases instead.",
+      });
+      return;
+    }
     if (!autoUpdater) return;
     try { await autoUpdater.checkForUpdates(); } catch { /* ignore */ }
   });

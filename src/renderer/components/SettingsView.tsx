@@ -492,6 +492,7 @@ function UpdateRow() {
       case "available":     statusText = `Update available: v${status.availableVersion}`; break;
       case "downloading":   statusText = `Downloading... ${status.downloadPercent ?? 0}%`; break;
       case "downloaded":    statusText = `Ready to install: v${status.availableVersion}`; break;
+      case "manual":        statusText = status.manualMessage ?? "Manual download required for this build."; break;
       case "up-to-date":
         statusText = `Up to date (v${status.currentVersion})${
           persistedLastCheckedAt ? ` · checked ${formatLastChecked(persistedLastCheckedAt)}` : ""
@@ -502,6 +503,7 @@ function UpdateRow() {
   }
 
   const canInstall = status?.phase === "downloaded";
+  const isManual = status?.phase === "manual";
 
   return (
     <div className="setting-row">
@@ -516,7 +518,7 @@ function UpdateRow() {
           </button>
         ) : (
           <button className="action-btn" disabled={checking} onClick={() => void check()}>
-            {checking ? "Checking..." : "Check now"}
+            {checking ? "Checking..." : isManual ? "Open releases" : "Check now"}
           </button>
         )}
       </div>

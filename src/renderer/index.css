@@ -795,14 +795,16 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
   gap: 12px;
   padding: 0 12px;
-  /* Reserve space for Windows title-bar overlay buttons (min/max/close) */
-  padding-right: 140px;
   background: var(--bg);
   border-bottom: 1px solid var(--border);
   -webkit-app-region: drag;
   user-select: none;
 }
-.header > * { -webkit-app-region: no-drag; }
+
+:root.platform-windows .header {
+  /* Reserve space for Windows title-bar overlay buttons (min/max/close). */
+  padding-right: 140px;
+}
 
 .header-brand {
   display: flex;
@@ -824,7 +826,10 @@ button, input, select, textarea { font: inherit; }
   align-items: center;
   gap: 8px;
   min-width: 0;
+  -webkit-app-region: drag;
 }
+
+.scan-controls > * { -webkit-app-region: no-drag; }
 
 .scan-input {
   flex: 1;
@@ -914,6 +919,7 @@ button, input, select, textarea { font: inherit; }
   overflow-x: auto;
   scrollbar-width: none;
   min-width: 0; /* lets flex shrink this below content-width */
+  -webkit-app-region: drag;
   /* Soft fade on the right edge when content overflows, to hint
      more-content-offscreen without a visible scrollbar. Uses a
      mask so it works over any background. */
@@ -921,6 +927,7 @@ button, input, select, textarea { font: inherit; }
           mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
 }
 .drive-pills::-webkit-scrollbar { display: none; }
+.drive-pills > * { -webkit-app-region: no-drag; }
 
 .drive-pill {
   display: flex;
@@ -1019,6 +1026,7 @@ button, input, select, textarea { font: inherit; }
   color: var(--text-tertiary);
   cursor: pointer;
   transition: all 0.12s;
+  -webkit-app-region: no-drag;
 }
 .header-icon-btn:hover {
   background: var(--bg-row-hover);
@@ -1028,6 +1036,12 @@ button, input, select, textarea { font: inherit; }
   border-color: var(--border-focus);
   background: var(--amber-glow);
   color: var(--amber);
+}
+
+.scan-input,
+.scan-btn,
+.drive-pill {
+  -webkit-app-region: no-drag;
 }
 
 /* ── Search Bar ───────────────────────────── */

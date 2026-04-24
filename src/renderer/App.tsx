@@ -74,6 +74,15 @@ function cycleThemePreference(theme: GeneralSettings["theme"]): GeneralSettings[
   }
 }
 
+function resolvePlatformClass(): "platform-windows" | "platform-macos" | "platform-linux" {
+  if (typeof navigator !== "undefined") {
+    const ua = navigator.userAgent.toLowerCase();
+    if (ua.includes("windows")) return "platform-windows";
+    if (ua.includes("mac")) return "platform-macos";
+  }
+  return "platform-linux";
+}
+
 /**
  * Normalize a root path for use as a snapshotsByRoot key. Case-insensitive
  * on Windows (where C:\ and c:\ are the same drive) and trims trailing
@@ -264,6 +273,16 @@ export function App() {
       applyColorBlindMode(Boolean(s.general.colorBlindMode));
     });
   }, [syncThemePreference, applyColorBlindMode]);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    const platformClass = resolvePlatformClass();
+    root.classList.remove("platform-windows", "platform-macos", "platform-linux");
+    root.classList.add(platformClass);
+    return () => {
+      root.classList.remove(platformClass);
+    };
+  }, []);
 
   // Forward renderer-side errors to the main process so they land in
   // crash.log alongside main-process exceptions. Without this, any

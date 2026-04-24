@@ -25,6 +25,8 @@ compression: maximum
 
 publish:
   provider: github
+  owner: tzarebczan
+  repo: diskhound
 
 icon: build/icon.png
 
@@ -59,6 +61,7 @@ mac:
   artifactName: "${productName}-${version}-${arch}.${ext}"
 
 linux:
+  executableName: diskhound
   target:
     # AppImage is the "just works" option — single-file binary with
     # built-in auto-update via electron-updater. Primary recommended
@@ -80,17 +83,19 @@ linux:
   # sidebar icon. Without this override, some distros' AppImage
   # integrators fall back to a generic Electron glyph (user report:
   # blank icon in Ubuntu's dash/taskbar on 0.5.1).
-  icon: build/icon.png
+  icon: build/icons
   # Metadata embedded in the .desktop file — controls the name +
   # tooltip the DE shows alongside the icon. electron-builder 26
   # expects these under `desktop.entry`, not directly on `desktop`.
   desktop:
     entry:
       Name: DiskHound
+      Icon: diskhound
       Comment: Fast disk space analyzer — find and clean up large files
       Categories: Utility;System;Filesystem;
       Keywords: disk;space;analyzer;duplicates;cleanup;treemap;
-      StartupWMClass: DiskHound
+      StartupWMClass: diskhound
+      X-GNOME-WMClass: diskhound
   # Metadata used outside the .desktop file (synopsis shows up in
   # some AppImage catalogs; maintainer is required for deb/rpm if
   # we add those targets later).

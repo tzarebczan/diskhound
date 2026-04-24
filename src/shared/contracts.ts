@@ -637,7 +637,15 @@ export interface GpuSnapshot {
 
 // ── Auto-Update Types ──────────────────────────────────────
 
-export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "up-to-date" | "error";
+export type UpdatePhase =
+  | "idle"
+  | "checking"
+  | "available"
+  | "downloading"
+  | "downloaded"
+  | "up-to-date"
+  | "manual"
+  | "error";
 
 export interface UpdateStatus {
   phase: UpdatePhase;
@@ -645,6 +653,7 @@ export interface UpdateStatus {
   availableVersion?: string;
   downloadPercent?: number;
   errorMessage?: string;
+  manualMessage?: string;
   /** Epoch ms of the last successful check attempt (available / up-to-date / error).
    *  Persists across app restarts so the Settings UI doesn't say "Never checked"
    *  after a cold boot that's about to trigger a check. */
