@@ -79,10 +79,50 @@ export async function easyMove(
       };
     }
 
-    // Validate source exists
-    const stat = await FSP.stat(sourcePath);
-    const isDirectory = stat.isDirectory();
-    const size = stat.size;
+    // Try fs.stat first. On Windows-protected paths (e.g., Hyper-V
+    // VHDX files under C:\\ProgramData\\Microsoft\\Windows\\Virtual
+    // Hard Disks\\, which are TrustedInstaller-owned), fs.stat can
+    // throw EPERM even for admins because Node doesn't enable
+    // SeBackupPrivilege by default. The actual MOVE (fs.rename) often
+    // succeeds anyway — rename only needs write access to the source
+    // directory, not the file's metadata handle. So: stat first for
+    // fast info; on perm error, fall back to lstat (which uses a
+    // different CreateFile flag set) or guess from the path, then
+    // attempt the move regardless. If the move fails, the caller
+    // gets a real, accurate error from that failure.
+    let isDirectory = false;
+    let size = 0;
+    let statSucceeded = false;
+    try {
+      const stat = await FSP.stat(sourcePath);
+      isDirectory = stat.isDirectory();
+      size = stat.size;
+      statSucceeded = true;
+    } catch (statErr) {
+      const statCode = (statErr as NodeJS.ErrnoException)?.code;
+      const permy = statCode === "EPERM" || statCode === "EACCES";
+      if (!permy) {
+        // ENOENT / other — not a permission issue, rethrow to outer catch.
+        throw statErr;
+      }
+      // Permission-flavoured stat failure. Try lstat (which uses
+      // FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS
+      // under the hood on Windows and works for more paths).
+      try {
+        const lstat = await FSP.lstat(sourcePath);
+        isDirectory = lstat.isDirectory();
+        size = lstat.size;
+        statSucceeded = true;
+      } catch {
+        // Both stat and lstat failed. Guess isDirectory from the
+        // filename (presence of extension = file). Proceed with
+        // the move — rename can still succeed.
+        isDirectory = !/\.[^\\/]+$/.test(Path.basename(sourcePath));
+        size = 0;
+      }
+    }
+    // `statSucceeded` is kept for future diagnostics — harmless if unused.
+    void statSucceeded;
 
     // Build destination path
     const baseName = Path.basename(sourcePath);

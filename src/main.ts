@@ -2801,6 +2801,40 @@ void app.whenReady().then(async () => {
     try {
       await FS.rename(newIndexPath, indexFilePath(historyId));
       treemapCache.rememberLatest(rootPath, historyId);
+
+      // Carry the predecessor's folder-tree sidecar forward.
+      //
+      // USN rescans update the NDJSON index with deltas, but the
+      // folder-tree sidecar is only written by the Rust scanner's
+      // full-scan/walker path — NEVER by runIncrementalScan. Without
+      // this copy, history[0] (the USN scan) lands in userData with
+      // NO sidecar, and the next Folders-tab open falls through to
+      // buildFolderTree which streams the 300+ MB gzipped NDJSON
+      // into the worker (slow + OOM-prone on big drives; observed
+      // as "folder tree worker out of memory" + truncated Folders
+      // results).
+      //
+      // The predecessor's sidecar is accurate for 99%+ of a USN
+      // rescan (deltas are a tiny fraction of total entries) and is
+      // refreshed on the next full scan. A slightly stale sidecar
+      // beats a 300 MB rebuild that might OOM.
+      try {
+        const prevSidecar = folderTreeSidecarPath(mostRecent.id);
+        const nextSidecar = folderTreeSidecarPath(historyId);
+        if (FS_SYNC.existsSync(prevSidecar) && !FS_SYNC.existsSync(nextSidecar)) {
+          await FS.copyFile(prevSidecar, nextSidecar);
+          writeCrashLog(
+            "folder-tree-sidecar-carry-forward",
+            `usn scan ${historyId} carried forward sidecar from ${mostRecent.id}`,
+          );
+        }
+      } catch (err) {
+        writeCrashLog(
+          "folder-tree-sidecar-carry-forward",
+          `copy failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       // Evict the prior tree for this root before building the new
       // one so peak memory doesn't double during the swap.
       invalidateFolderTreesForRoot(rootPath, historyId);

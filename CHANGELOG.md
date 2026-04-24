@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.5.1 — 2026-04-24
+
+Bug-fix follow-up to 0.5.0:
+
+- **Folders tab empty / showing handful of entries after USN rescan.**
+  USN-journal scans update the NDJSON index incrementally but never
+  emitted a folder-tree sidecar, so `history[0]` became a USN scan
+  with no sidecar, the next Folders-tab open fell through to the
+  worker-based rebuild (300+ MB gzipped NDJSON → 1.5 GB decompressed),
+  and on big drives the worker either OOM'd or produced a partial
+  tree. Fix: USN completion now copies the predecessor full scan's
+  sidecar forward to the new history entry. Accuracy is near-perfect
+  (USN deltas affect a tiny fraction of entries) and the next full
+  scan refreshes it. Logs: `[folder-tree-sidecar-carry-forward] usn
+  scan <id> carried forward sidecar from <prev-id>`.
+
+- **EasyMove EPERM on Windows-protected paths even when elevated.**
+  Hyper-V VHDX files under `C:\ProgramData\Microsoft\Windows\Virtual
+  Hard Disks\` are TrustedInstaller-owned, so `fs.stat` fails with
+  EPERM even for admins (Node doesn't enable SeBackupPrivilege by
+  default). Before: the user saw "Another process is likely holding
+  the file open" but nothing was locking it. Fix: on stat EPERM,
+  fall back to `lstat` (different CreateFile flags — works on more
+  paths), or guess `isDirectory` from the filename extension and
+  attempt the rename anyway. `fs.rename` on Windows only needs
+  write access to the source directory, not the file metadata
+  handle, so moves now succeed on paths where stat doesn't.
+
 ## 0.5.0 — 2026-04-24
 
 Processes + GPU overhaul, elevation robustness, and a scan-index
