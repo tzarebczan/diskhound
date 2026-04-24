@@ -94,6 +94,12 @@ export function createNativeScannerSession(
   if (input.baselineIndex) {
     args.push("--baseline-index", input.baselineIndex);
   }
+  // Folder-tree sidecar — Rust emits a pre-built parent→children map
+  // directly, so Node skips the 5-minute streaming build + 4 GB worker
+  // heap on drive-scale scans.
+  if (input.folderTreeOutput) {
+    args.push("--folder-tree-output", input.folderTreeOutput);
+  }
 
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {

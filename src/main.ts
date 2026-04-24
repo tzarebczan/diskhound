@@ -22,6 +22,7 @@ import {
   createIdleScanSnapshot,
   defaultScanOptions,
   normalizeAppSettings,
+  type AffinityRule,
   type AppSettings,
   type DirectoryHotspot,
   type FullDiffStatus,
@@ -58,6 +59,7 @@ import {
 import { computeDiff } from "./shared/scanDiff";
 import {
   deleteIndex,
+  folderTreeSidecarPath,
   indexFilePath,
   initScanIndex,
 } from "./shared/scanIndex";
@@ -72,6 +74,10 @@ import {
   runFullDiffWorker,
 } from "./shared/fullDiffWorkerRuntime";
 import {
+  resolveBundledFolderTreeWorkerPath,
+  runFolderTreeWorker,
+} from "./shared/folderTreeWorkerRuntime";
+import {
   deleteFullDiffCachesForScan,
   hasFullDiffCache,
   initFullDiffCacheStore,
@@ -82,11 +88,14 @@ import { createTreemapCache } from "./shared/treemapCache";
 import { initUsnCursorStore } from "./shared/usnCursorStore";
 import {
   captureCursorAfterScan,
+  checkUsnForAnyChanges,
   getCursorForRoot,
   runIncrementalScan,
 } from "./usnMonitor";
+import { setCursor, volumeForPath } from "./shared/usnCursorStore";
 import { resolveNativeScannerBinary } from "./nativeScanner";
 import { createNativeScannerSession, type NativeScannerSession } from "./nativeScanner";
+import * as elevationModule from "./elevation";
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
 const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
@@ -100,6 +109,7 @@ const projectRoot = Path.join(__dirname, "..");
 const rendererEntryFile = Path.join(projectRoot, "dist-renderer", "index.html");
 const scanWorkerEntry = Path.join(__dirname, "scan", "scanWorker.cjs");
 const fullDiffWorkerEntry = resolveBundledFullDiffWorkerPath(__dirname);
+const folderTreeWorkerEntry = resolveBundledFolderTreeWorkerPath(__dirname);
 
 type WorkerScanSession = {
   kind: "worker";
@@ -107,6 +117,7 @@ type WorkerScanSession = {
   trigger: "manual" | "scheduled";
   stop: () => Promise<void>;
   tempIndexPath?: string;
+  tempFolderTreePath?: string;
   rootPath: string;
 };
 
@@ -114,6 +125,10 @@ type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
   active: boolean;
   trigger: "manual" | "scheduled";
   tempIndexPath?: string;
+  /** Temp path the scanner emits its folder-tree sidecar to during the
+   *  run. Renamed to `folderTreeSidecarPath(historyId)` on success so
+   *  the Folders-tab loader can skip the multi-minute NDJSON re-parse. */
+  tempFolderTreePath?: string;
   /** The scan root this session is working on. Used as the activeScans
    *  Map key so concurrent scans on different drives stay isolated. */
   rootPath: string;
@@ -143,6 +158,16 @@ let isQuitting = false;
 app.commandLine.appendSwitch("enable-gpu-rasterization");
 app.commandLine.appendSwitch("enable-oop-rasterization");
 app.commandLine.appendSwitch("enable-zero-copy");
+
+// Disable Chromium's background throttling of timers / renderer / IPC.
+// Without these, alt-tabbing away from DiskHound while a long scan is
+// running freezes the scan-progress UI and stalls setInterval/IPC
+// delivery for seconds at a time (Chromium aggressively throttles
+// hidden or occluded windows). We want progress heartbeats and the
+// [memory] interval to keep ticking regardless of focus state.
+app.commandLine.appendSwitch("disable-renderer-backgrounding");
+app.commandLine.appendSwitch("disable-background-timer-throttling");
+app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 // Raise V8's old-generation heap ceiling for the main process from the
 // default ~4 GB to 8 GB. On big drives (1M+ directories) the post-scan
@@ -275,10 +300,166 @@ function describeMemoryUsage(): string {
   return `rss=${mb(mem.rss)} heapUsed=${mb(mem.heapUsed)} heapTotal=${mb(mem.heapTotal)} external=${mb(mem.external)} arrayBuffers=${mb(mem.arrayBuffers)}`;
 }
 
+// ─ Single-instance lock ────────────────────────────────────────────────────
+//
+// Only one DiskHound window should ever be up — double-click shortcut,
+// post-crash relaunch, file-manager "Open" etc. shouldn't spawn
+// duplicates that race to rebuild the folder-tree cache or corrupt the
+// shared index files.
+//
+// Three elevation-related scenarios have to ALL work without the user
+// ever seeing "nothing happened":
+//
+//   A. Normal duplicate launch (user double-clicks shortcut twice):
+//      second instance fails lock → focus existing → exit. Quick.
+//   B. Scheduled-task auto-relaunch: non-elevated parent triggers task,
+//      parent waits ~2.5 s to verify elevated sibling then quits. The
+//      elevated child hits whenReady before parent quits, so it needs
+//      to wait for the lock.
+//   C. User hits "Relaunch as admin" in Settings: parent invokes
+//      Start-Process -Verb RunAs, schedules its own quit in 500 ms.
+//      The elevated child starts BEFORE the parent quits and without
+//      any `--launched-by-task` flag — so the scenario-B special-case
+//      doesn't catch it, and the child dies silently. User sees
+//      nothing reopen.
+//
+// Original v0.4.1 only special-cased `--launched-by-task` for the
+// retry loop, which broke scenario C. The correct fix is to always
+// retry briefly on Windows — any user-initiated duplicate can tolerate
+// a 3 s "wait for predecessor to quit" before giving up and focusing
+// the existing window. Non-Windows platforms keep the strict behaviour.
+const SECOND_INSTANCE_FOCUS_EVENT = "second-instance";
+const singleInstanceLaunchedByTask = process.argv.includes("--launched-by-task");
+const singleInstanceRelaunchedAsAdmin = process.argv.includes("--relaunched-as-admin");
+const WINDOWS_LOCK_RETRY_MS = 5_000; // 20 × 250 ms polls
+const NORMAL_LOCK_RETRY_MS = 1_500; //  6 × 250 ms polls — covers brief races without blocking duplicate-launch UX
+
+function registerSecondInstanceHandler(): void {
+  app.on(SECOND_INSTANCE_FOCUS_EVENT, () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    if (!mainWindow.isVisible()) mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
+async function acquireSingleInstanceLockOrExit(): Promise<void> {
+  if (app.requestSingleInstanceLock()) {
+    registerSecondInstanceHandler();
+    return;
+  }
+
+  // Lock is held. How long are we willing to wait for it?
+  //   - Launched by the scheduled task or a relaunch-as-admin handoff:
+  //     5 s (parent is deliberately quitting, we WILL succeed).
+  //   - Any other Windows launch: 1.5 s — enough to survive a quick
+  //     double-click race without making duplicate-launch feel slow.
+  //   - Non-Windows: no retry, exit immediately.
+  const maxWaitMs =
+    process.platform !== "win32"
+      ? 0
+      : singleInstanceLaunchedByTask || singleInstanceRelaunchedAsAdmin
+        ? WINDOWS_LOCK_RETRY_MS
+        : NORMAL_LOCK_RETRY_MS;
+
+  const polls = Math.floor(maxWaitMs / 250);
+  for (let i = 0; i < polls; i++) {
+    await new Promise((r) => setTimeout(r, 250));
+    if (app.requestSingleInstanceLock()) {
+      writeStartupLog(
+        `single-instance lock acquired after ${(i + 1) * 250} ms retry (launchedByTask=${singleInstanceLaunchedByTask}, relaunchedAsAdmin=${singleInstanceRelaunchedAsAdmin})`,
+      );
+      registerSecondInstanceHandler();
+      return;
+    }
+  }
+
+  // Still held — assume a genuinely-concurrent instance. Electron has
+  // already signalled the primary with `second-instance`; our job is
+  // just to exit cleanly.
+  writeStartupLog(
+    `single-instance lock not acquired after ${maxWaitMs} ms — another DiskHound is already running (launchedByTask=${singleInstanceLaunchedByTask}, relaunchedAsAdmin=${singleInstanceRelaunchedAsAdmin}), exiting`,
+  );
+  app.quit();
+  process.exit(0);
+}
+
 void app.whenReady().then(async () => {
   writeStartupLog("whenReady fired");
+  await acquireSingleInstanceLockOrExit();
   if (process.platform === "win32") {
     app.setAppUserModelId("com.diskhound.app");
+
+    // Auto-relaunch via the registered Scheduled Task (if any). This
+    // is what makes "Always run as admin" actually always: normal
+    // shortcut click → this non-elevated instance detects the task,
+    // fires it, quits. The task launches a new elevated instance
+    // with NO UAC prompt because Windows honors the saved HighestAvailable
+    // RunLevel credential. Guarded by process.argv to avoid a loop
+    // (the elevated task invocation passes `--launched-by-task` so we
+    // know not to relaunch AGAIN).
+    const launchedByTask = process.argv.includes("--launched-by-task");
+    const relaunchedAsAdmin = process.argv.includes("--relaunched-as-admin");
+    writeStartupLog(
+      `elevation-probe: argv flags launchedByTask=${launchedByTask} relaunchedAsAdmin=${relaunchedAsAdmin} pid=${process.pid}`,
+    );
+    if (!launchedByTask) {
+      try {
+        const [elevated, taskRegistered] = await Promise.all([
+          elevationModule.isElevated(),
+          elevationModule.hasScheduledTask(),
+        ]);
+        writeStartupLog(
+          `elevation-probe: isElevated=${elevated} hasScheduledTask=${taskRegistered}`,
+        );
+        if (!elevated && taskRegistered) {
+          writeStartupLog("auto-relaunch via scheduled task (not elevated, task registered)");
+          // Always re-register the task on startup before we run it.
+          // This catches the "reinstalled to a new path" failure mode
+          // where the registered task points at a stale exe location.
+          // Re-registering requires UAC. Since the user is being
+          // prompted anyway (first run after install), we skip the
+          // silent re-register here and just run the existing task;
+          // if that fails with "cannot find file" we'll surface the
+          // error in the Settings UI where the user can re-register.
+          const result = await elevationModule.runScheduledTaskNow();
+          writeStartupLog(
+            `scheduled-task run result: ok=${result.ok} exitCode=${result.exitCode ?? "?"} stdout=${JSON.stringify(result.stdout ?? "")} stderr=${JSON.stringify(result.stderr ?? "")}`,
+          );
+          if (result.ok) {
+            // Wait briefly, then verify a second DiskHound.exe actually
+            // spun up before we quit. If the task failed to elevate
+            // (e.g. user account can't elevate, task credential stale)
+            // the elevated instance never starts and quitting here
+            // leaves the user with no app at all. Revert to normal
+            // startup if we can't confirm the relaunch.
+            await new Promise((r) => setTimeout(r, 2500));
+            const elevatedInstanceRunning = await elevationModule
+              .countDiskHoundProcesses()
+              .catch(() => 0);
+            if (elevatedInstanceRunning > 1) {
+              writeStartupLog(
+                `elevated sibling detected (${elevatedInstanceRunning} DiskHound.exe processes) — quitting this non-elevated instance`,
+              );
+              app.quit();
+              return;
+            }
+            writeStartupLog(
+              `scheduled task triggered but no elevated sibling appeared after 2.5s (found=${elevatedInstanceRunning}) — continuing non-elevated`,
+            );
+          } else {
+            writeStartupLog(
+              `scheduled task run failed: ${result.message ?? "unknown error"} (exit=${result.exitCode ?? "?"}) — continuing non-elevated`,
+            );
+          }
+        }
+      } catch (err) {
+        writeStartupLog(
+          `scheduled-task auto-relaunch probe failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        // Non-fatal — fall through to normal non-elevated startup.
+      }
+    }
   }
 
   const scanStore = await createScanSnapshotStore(app.getPath("userData"));
@@ -354,6 +535,23 @@ void app.whenReady().then(async () => {
         // Persist history before notifying the renderer so immediate diff
         // lookups can see the just-finished scan.
         const historyId = await saveScanToHistory(message.snapshot);
+
+        // Rename the temp folder-tree sidecar to match the history ID
+        // so the Folders-tab loader can find it by scanId. Done first
+        // because it's cheap and independent of the NDJSON rename —
+        // if this fails the legacy streaming fallback still works.
+        if (historyId && session.tempFolderTreePath) {
+          try {
+            await FS.rename(
+              session.tempFolderTreePath,
+              folderTreeSidecarPath(historyId),
+            );
+          } catch {
+            // Sidecar didn't land (scanner skipped it, write failed,
+            // etc.). The legacy streaming worker path will handle the
+            // Folders tab — slower but correct.
+          }
+        }
 
         // Rename the temp index file to match the history entry ID
         if (historyId && session.tempIndexPath) {
@@ -537,6 +735,9 @@ void app.whenReady().then(async () => {
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
     }
+    if (session.tempFolderTreePath) {
+      try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
+    }
 
     // If the native scanner failed to launch (ENOENT, EACCES), silently
     // fall back to the JS worker so the user still gets a scan.
@@ -639,7 +840,11 @@ void app.whenReady().then(async () => {
     trigger: "manual" | "scheduled",
   ): { session: ActiveScanSession; startingSnapshot: ScanSnapshot } => {
     const nativeStartingSnapshot = buildRunningSnapshot(rootPath, scanOptions, "native-sidecar");
-    const tempIndexPath = indexFilePath(`pending-${randomUUID()}`);
+    const pendingScanId = `pending-${randomUUID()}`;
+    const tempIndexPath = indexFilePath(pendingScanId);
+    // Sidecar's temp path shares the pending UUID so we can rename
+    // both atomically on scan-complete to match the final history ID.
+    const tempFolderTreePath = folderTreeSidecarPath(pendingScanId);
     const baselineIndex = resolveBaselineIndexFor(rootPath);
 
     // Buffer for messages that arrive before the session is fully wired
@@ -649,7 +854,13 @@ void app.whenReady().then(async () => {
 
     const nativeResult = createNativeScannerSession(
       projectRoot,
-      { rootPath, options: scanOptions, indexOutput: tempIndexPath, baselineIndex },
+      {
+        rootPath,
+        options: scanOptions,
+        indexOutput: tempIndexPath,
+        baselineIndex,
+        folderTreeOutput: tempFolderTreePath,
+      },
       {
         onMessage: (message) => {
           if (!sessionRef) {
@@ -674,13 +885,31 @@ void app.whenReady().then(async () => {
           if (line.includes("[diskhound-native-scanner]")) {
             writeCrashLog("scanner", line);
           }
+          // Self-healing baseline rejection — surface a toast so the
+          // user understands why an incremental scan just decided to
+          // do a full walk. Without this the scan "feels slow again"
+          // with no explanation; the toast makes it clear this is a
+          // one-time recovery event and next scan will be fast again.
+          if (line.includes("baseline REJECTED as truncated")) {
+            sendToast(
+              "info",
+              "Rebuilding scan index",
+              "Previous index was incomplete — running a full walk once to rebuild it. Future rescans will be fast again.",
+            );
+          }
         },
       },
     );
 
     if (nativeResult) {
       // Wire up the session with active=true BEFORE flushing buffered messages
-      sessionRef = Object.assign(nativeResult, { active: true, trigger, tempIndexPath, rootPath }) as ActiveScanSession;
+      sessionRef = Object.assign(nativeResult, {
+        active: true,
+        trigger,
+        tempIndexPath,
+        tempFolderTreePath,
+        rootPath,
+      }) as ActiveScanSession;
 
       // Flush any messages that arrived during construction
       for (const msg of earlyMessages) {
@@ -729,6 +958,9 @@ void app.whenReady().then(async () => {
     if (session.tempIndexPath) {
       try { await FS.unlink(session.tempIndexPath); } catch { /* already gone */ }
     }
+    if (session.tempFolderTreePath) {
+      try { await FS.unlink(session.tempFolderTreePath); } catch { /* already gone */ }
+    }
   };
 
   const sendCancelledSnapshot = async (rootPath: string) => {
@@ -762,6 +994,75 @@ void app.whenReady().then(async () => {
     // scans: starting C: while D: is scanning no longer kills D:.
     await cancelActiveScan(rootPath);
 
+    // USN-journal fast-path: if a cursor was captured after a prior
+    // scan of this volume AND the journal records no changes since
+    // then, reuse the last snapshot entirely. Typical latency ~100 ms
+    // on NTFS (vs ~60 s for a full MFT scan). Falls through to the
+    // regular scan if:
+    //   - no cursor persisted (first scan of this volume)
+    //   - journal was recreated (journalId mismatch)
+    //   - scanner binary spawn fails (non-NTFS, missing elevation,
+    //     or the rare case where the volume's journal is disabled)
+    //   - any record has been written to the journal since the cursor
+    const scannerBinary = resolveNativeScannerBinary(projectRoot);
+    if (scannerBinary && trigger !== "scheduled") {
+      try {
+        const probe = await checkUsnForAnyChanges(scannerBinary, rootPath);
+        if (probe && !probe.changed) {
+          const latest = await nativeApi_getLatestSnapshotForRoot_impl(rootPath);
+          if (latest) {
+            writeCrashLog(
+              "usn-fast-path",
+              `${rootPath}: no journal changes since last scan — reusing snapshot (files=${latest.filesVisited}, bytes=${latest.bytesSeen})`,
+            );
+            // Update the cursor to the probe's new cursor so the NEXT
+            // rescan's fast-path-vs-full decision compares against the
+            // moment of THIS rescan, not the original scan.
+            if (
+              typeof probe.newCursor === "number"
+              && typeof probe.newJournalId === "number"
+            ) {
+              const volume = volumeForPath(rootPath);
+              if (volume) {
+                await setCursor({
+                  volume,
+                  cursor: probe.newCursor,
+                  journalId: probe.newJournalId,
+                  capturedAt: Date.now(),
+                  rootPath,
+                });
+              }
+            }
+            // Synthesize a Done snapshot reusing last scan's data,
+            // stamped with fresh timestamps so the UI's "last scanned
+            // X ago" counter resets. Don't create a new history entry
+            // — nothing changed, so the existing one still represents
+            // the drive's current state.
+            const now = Date.now();
+            const fastPathSnapshot: ScanSnapshot = {
+              ...latest,
+              status: "done",
+              startedAt: now,
+              finishedAt: now,
+              elapsedMs: 1,
+              lastUpdatedAt: now,
+              scanPhase: "complete",
+            };
+            await broadcastSnapshot(fastPathSnapshot);
+            return fastPathSnapshot;
+          }
+        }
+      } catch (err) {
+        // Any fast-path failure is non-fatal; fall through to full
+        // scan. The log line helps us distinguish cursor-invalid
+        // cases from plain "no prior scan" ones when diagnosing.
+        writeCrashLog(
+          "usn-fast-path-error",
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+      }
+    }
+
     const { session, startingSnapshot } = createPreferredScanSession(
       rootPath,
       resolvedScanOptions,
@@ -771,6 +1072,18 @@ void app.whenReady().then(async () => {
     retuneMemoryDiagCadence();
     await broadcastSnapshot(startingSnapshot);
     return startingSnapshot;
+  };
+
+  // Inline helper that mirrors the "get latest snapshot for root" IPC
+  // handler below — used by the fast-path branch above to load the
+  // last scan's data when we decide nothing has changed.
+  const nativeApi_getLatestSnapshotForRoot_impl = async (
+    rootPath: string,
+  ): Promise<ScanSnapshot | null> => {
+    const history = getScanHistory(rootPath);
+    const latest = history[0];
+    if (!latest) return null;
+    return await loadHistoricalSnapshot(latest.id);
   };
 
   const pathAction = async (message: string, task: () => Promise<void>): Promise<PathActionResult> => {
@@ -792,6 +1105,63 @@ void app.whenReady().then(async () => {
       buttonLabel: "Scan folder",
     });
     return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+
+  // Elevation + fast-scan admin UX. Renderer reads `isElevated` on
+  // boot to decide whether to show the "Run as admin for faster
+  // scans" banner; Settings → Performance calls `relaunchAsAdmin`
+  // directly. `hasScheduledTask` tells the UI whether the
+  // "always elevated" opt-in was already taken so it can suppress
+  // the banner after the user has committed.
+  ipcMain.handle("diskhound:get-elevation-status", async () => {
+    const [elevated, taskRegistered] = await Promise.all([
+      elevationModule.isElevated(),
+      elevationModule.hasScheduledTask(),
+    ]);
+    return { elevated, scheduledTaskRegistered: taskRegistered };
+  });
+  ipcMain.handle("diskhound:relaunch-as-admin", async () => {
+    try {
+      const launched = await elevationModule.relaunchAsAdmin(app.getPath("exe"));
+      if (launched) {
+        // Only quit if UAC was accepted + the new elevated instance
+        // actually started. On UAC cancel, keep the current window
+        // alive so the user isn't left with a closed app. Give the
+        // new instance a brief moment to reserve its window focus
+        // before we exit the old one.
+        setTimeout(() => app.quit(), 500);
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        message: "UAC was cancelled or no elevated process was started. Still running non-elevated.",
+      };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle("diskhound:register-scheduled-task", async () => {
+    const ok = await elevationModule.registerScheduledTask(app.getPath("exe"));
+    return { ok };
+  });
+  ipcMain.handle("diskhound:unregister-scheduled-task", async () => {
+    const ok = await elevationModule.unregisterScheduledTask();
+    return { ok };
+  });
+  ipcMain.handle("diskhound:run-scheduled-task", async () => {
+    const result = await elevationModule.runScheduledTaskNow();
+    if (result.ok) {
+      // Give the elevated task a moment to come up before we quit,
+      // so the user sees the new (elevated) window in the same visual
+      // gesture as closing this non-elevated one.
+      setTimeout(() => app.quit(), 500);
+    } else {
+      writeCrashLog(
+        "run-scheduled-task",
+        `schtasks /run failed: exit=${result.exitCode ?? "?"} stderr=${result.stderr ?? ""} stdout=${result.stdout ?? ""}`,
+      );
+    }
+    return { ok: result.ok, message: result.message };
   });
 
   ipcMain.handle("diskhound:get-current-snapshot", () => scanStore.get());
@@ -844,6 +1214,19 @@ void app.whenReady().then(async () => {
   // refresh requests so we don't stack PowerShell invocations.
   let memoryCache: SystemMemorySnapshot | null = null;
   let memorySamplePromise: Promise<SystemMemorySnapshot> | null = null;
+  // Same pattern for GPU sampling. Get-Counter is the slow one — we
+  // dedupe concurrent refreshes and cache between them so the UI tab
+  // switch is instant.
+  let gpuCache: import("./shared/contracts").GpuSnapshot | null = null;
+  let gpuSamplePromise: Promise<import("./shared/contracts").GpuSnapshot> | null = null;
+  // Throttle affinity-rule enforcement to one pass per 4 s regardless
+  // of how often the memory sample refreshes. Affinity reads + writes
+  // shell out to PowerShell, which isn't free; 4 s is fast enough to
+  // catch a newly-launched process within a few ticks yet slow enough
+  // that the shell overhead stays a rounding error of the system load.
+  const AFFINITY_ENFORCE_INTERVAL_MS = 4000;
+  let lastAffinityEnforcementAt = 0;
+  let affinityEnforcementInFlight = false;
 
   const refreshMemorySample = (): Promise<SystemMemorySnapshot> => {
     if (memorySamplePromise) return memorySamplePromise;
@@ -851,6 +1234,11 @@ void app.whenReady().then(async () => {
       .then((snap) => {
         memoryCache = snap;
         memorySamplePromise = null;
+        // Fire-and-forget: enforce affinity rules against the fresh
+        // process sample. Throttled internally — spawning the
+        // enforcement pass here is cheap because it returns
+        // immediately when not due.
+        void maybeEnforceAffinityRules(snap).catch(() => { /* non-fatal */ });
         return snap;
       })
       .catch((err) => {
@@ -858,6 +1246,55 @@ void app.whenReady().then(async () => {
         throw err;
       });
     return memorySamplePromise;
+  };
+
+  const maybeEnforceAffinityRules = async (snap: SystemMemorySnapshot) => {
+    if (process.platform !== "win32") return;
+    if (affinityEnforcementInFlight) return;
+    const now = Date.now();
+    if (now - lastAffinityEnforcementAt < AFFINITY_ENFORCE_INTERVAL_MS) return;
+    const settings = settingsStore?.get();
+    if (!settings || settings.affinityRules.length === 0) return;
+
+    affinityEnforcementInFlight = true;
+    try {
+      const { enforceAffinityRules } = await import("./affinityRuleEngine");
+      const results = await enforceAffinityRules(settings.affinityRules, snap.processes);
+      lastAffinityEnforcementAt = Date.now();
+      if (results.length === 0) return;
+
+      // Persist the updated counters. We only update rules that were
+      // actually applied this tick; unchanged rules keep their prior
+      // values. Rule order preserved via index lookup.
+      const byId = new Map<string, typeof results[number]>();
+      for (const r of results) byId.set(r.ruleId, r);
+      const nowMs = Date.now();
+      const nextRules = settings.affinityRules.map((rule) => {
+        const hit = byId.get(rule.id);
+        if (!hit || !hit.ok) return rule;
+        return {
+          ...rule,
+          lastAppliedAt: nowMs,
+          appliedCount: rule.appliedCount + 1,
+        };
+      });
+      await settingsStore?.set({ ...settings, affinityRules: nextRules });
+      for (const r of results) {
+        if (r.ok) {
+          writeCrashLog(
+            "affinity-rule-applied",
+            `rule=${r.ruleId} pid=${r.pid} name=${r.processName} prevMask=${r.previousMask} newMask=${r.newMask}`,
+          );
+        } else if (r.error) {
+          writeCrashLog(
+            "affinity-rule-error",
+            `rule=${r.ruleId} pid=${r.pid} name=${r.processName}: ${r.error}`,
+          );
+        }
+      }
+    } finally {
+      affinityEnforcementInFlight = false;
+    }
   };
 
   ipcMain.handle("diskhound:get-memory-snapshot", () => refreshMemorySample());
@@ -868,6 +1305,29 @@ void app.whenReady().then(async () => {
   ipcMain.handle("diskhound:get-cached-memory-snapshot", () => {
     if (!memoryCache) return null;
     return { ...memoryCache, isStale: true };
+  });
+
+  // GPU sample — separate cadence from memory so the GPU tab can be
+  // opened/closed without forcing a memory resample, and vice versa.
+  // The sampler's PowerShell invocation is expensive (~500-1500 ms on
+  // cold start), so deduping concurrent requests matters.
+  const refreshGpuSample = async () => {
+    if (gpuSamplePromise) return gpuSamplePromise;
+    const { sampleGpu } = await import("./shared/gpuSampler");
+    gpuSamplePromise = sampleGpu()
+      .then((snap) => {
+        gpuCache = snap;
+        return snap;
+      })
+      .finally(() => {
+        gpuSamplePromise = null;
+      });
+    return gpuSamplePromise;
+  };
+  ipcMain.handle("diskhound:get-gpu-snapshot", () => refreshGpuSample());
+  ipcMain.handle("diskhound:get-cached-gpu-snapshot", () => {
+    if (!gpuCache) return null;
+    return gpuCache;
   });
 
   // Per-path icon cache for executables — unlike get-file-icon (which keys
@@ -901,6 +1361,132 @@ void app.whenReady().then(async () => {
       return {
         ok: false,
         message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
+
+  // ── CPU affinity ───────────────────────────────────────────
+  //
+  // Get and set the CPU affinity mask for a process. Uses Windows'
+  // Win32 API via PowerShell: `Get-Process -Id $pid | Select
+  // -ExpandProperty ProcessorAffinity` for read, and assignment to
+  // the same property for write. We report the system's logical
+  // processor count alongside so the UI can render the correct
+  // number of checkboxes.
+  //
+  // Requires admin if the target process was started by a different
+  // user (or is a protected process). For user's own processes on
+  // their own account, no elevation needed.
+  ipcMain.handle("diskhound:get-cpu-affinity", async (_event, pid: number): Promise<{
+    ok: boolean;
+    affinityMask?: number;
+    cpuCount: number;
+    message?: string;
+  }> => {
+    const cpuCount = require("node:os").cpus().length;
+    if (process.platform !== "win32") {
+      return { ok: false, cpuCount, message: "CPU affinity is Windows-only" };
+    }
+    try {
+      const { spawn } = require("node:child_process");
+      const result = await new Promise<string>((resolve, reject) => {
+        const child = spawn(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            `(Get-Process -Id ${pid} -ErrorAction Stop).ProcessorAffinity.ToInt64()`,
+          ],
+          { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+        );
+        let stdoutBuf = "";
+        let stderrBuf = "";
+        child.stdout?.on("data", (c: Buffer) => { stdoutBuf += String(c); });
+        child.stderr?.on("data", (c: Buffer) => { stderrBuf += String(c); });
+        child.on("exit", (code: number | null) => {
+          if (code === 0) resolve(stdoutBuf.trim());
+          else reject(new Error(stderrBuf.trim() || `exit ${code}`));
+        });
+      });
+      const mask = Number(result);
+      if (!Number.isFinite(mask)) {
+        return { ok: false, cpuCount, message: `Couldn't parse affinity mask: ${result}` };
+      }
+      return { ok: true, affinityMask: mask, cpuCount };
+    } catch (err) {
+      return {
+        ok: false,
+        cpuCount,
+        message: err instanceof Error ? err.message : String(err),
+      };
+    }
+  });
+
+  // ── Persistent affinity rules ───────────────────────────────
+  //
+  // Rules live in AppSettings so they persist across restarts.
+  // Read/write goes through settingsStore — the same normalization
+  // pass that validates `general.theme` / `monitoring.*` also strips
+  // malformed rule entries, so we never crash on a tampered file.
+  ipcMain.handle("diskhound:get-affinity-rules", () => {
+    const settings = settingsStore?.get();
+    return settings?.affinityRules ?? [];
+  });
+  ipcMain.handle("diskhound:upsert-affinity-rule", async (_event, rule: AffinityRule) => {
+    const settings = settingsStore?.get();
+    if (!settings) return { ok: false, message: "Settings unavailable" };
+    const next = settings.affinityRules.slice();
+    const idx = next.findIndex((r) => r.id === rule.id);
+    if (idx >= 0) next[idx] = rule;
+    else next.push(rule);
+    await settingsStore?.set({ ...settings, affinityRules: next });
+    return { ok: true };
+  });
+  ipcMain.handle("diskhound:delete-affinity-rule", async (_event, id: string) => {
+    const settings = settingsStore?.get();
+    if (!settings) return { ok: false, message: "Settings unavailable" };
+    const next = settings.affinityRules.filter((r) => r.id !== id);
+    await settingsStore?.set({ ...settings, affinityRules: next });
+    return { ok: true };
+  });
+
+  ipcMain.handle("diskhound:set-cpu-affinity", async (_event, pid: number, mask: number): Promise<PathActionResult> => {
+    if (process.platform !== "win32") {
+      return { ok: false, message: "CPU affinity is Windows-only" };
+    }
+    if (!Number.isInteger(mask) || mask <= 0) {
+      return { ok: false, message: "Affinity mask must be a positive integer" };
+    }
+    try {
+      const { spawn } = require("node:child_process");
+      await new Promise<void>((resolve, reject) => {
+        const child = spawn(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            // Assigning IntPtr-typed ProcessorAffinity from an int
+            // requires explicit cast. `[IntPtr]${mask}` is how
+            // PowerShell constructs a pointer-sized int for the
+            // setter call.
+            `$p = Get-Process -Id ${pid} -ErrorAction Stop; $p.ProcessorAffinity = [IntPtr]${mask}`,
+          ],
+          { stdio: ["ignore", "ignore", "pipe"], windowsHide: true },
+        );
+        let stderrBuf = "";
+        child.stderr?.on("data", (c: Buffer) => { stderrBuf += String(c); });
+        child.on("exit", (code: number | null) => {
+          if (code === 0) resolve();
+          else reject(new Error(stderrBuf.trim() || `exit ${code}`));
+        });
+      });
+      return { ok: true, message: `Affinity set on PID ${pid}` };
+    } catch (err) {
+      return {
+        ok: false,
+        message: err instanceof Error ? err.message : String(err),
       };
     }
   });
@@ -1026,6 +1612,85 @@ void app.whenReady().then(async () => {
     return easyMove(sourcePath, destinationDir);
   });
 
+  /**
+   * Elevated EasyMove: for files the user can't stat/move as a normal
+   * user (Windows-protected paths). The renderer shows a confirm
+   * dialog then calls this; we spawn a single UAC-elevated PowerShell
+   * that does the move + link creation, then record the move in the
+   * store. One UAC prompt per invocation.
+   */
+  ipcMain.handle(
+    "diskhound:easy-move-elevated",
+    async (_event, sourcePath: string, destinationDir: string) => {
+      const baseName = Path.basename(sourcePath);
+      const destinationPath = Path.join(destinationDir, baseName);
+
+      // Probe the source to decide file vs dir — lstat works even on
+      // Windows-protected paths for directory detection via the mode
+      // bits. Fall back to a filename heuristic if lstat itself fails.
+      let isDirectory = false;
+      try {
+        const stat = await FS.lstat(sourcePath);
+        isDirectory = stat.isDirectory();
+      } catch {
+        // Heuristic: treat as file if it has an extension, dir otherwise.
+        isDirectory = !/\.[^\\/]+$/.test(baseName);
+      }
+
+      // Destination already present? Abort — overwriting via an
+      // elevated move is a footgun. Surface a clear message.
+      if (FS_SYNC.existsSync(destinationPath)) {
+        return {
+          ok: false,
+          message: `Destination already exists: ${destinationPath}`,
+        };
+      }
+
+      // Ensure destination directory exists (non-elevated mkdir is fine
+      // as long as the destination is user-writeable, which it must be
+      // for the user to have chosen it).
+      try {
+        await FS.mkdir(destinationDir, { recursive: true });
+      } catch {
+        /* best effort — elevated PS will fail cleanly if dir is bad */
+      }
+
+      const res = await elevationModule.runElevatedEasyMove(
+        sourcePath,
+        destinationPath,
+        isDirectory,
+      );
+      if (!res.ok) {
+        return {
+          ok: false,
+          message: res.cancelled
+            ? "Cancelled — move not performed."
+            : `Elevated move failed: ${res.message ?? "unknown error"}`,
+        };
+      }
+
+      // Stat the destination to record the size. We stat the DESTINATION
+      // because the source is now a symlink/junction; stat'ing it would
+      // de-reference and return the dest's stats anyway, but being
+      // explicit avoids a circular surprise on non-deref'ing platforms.
+      let size = 0;
+      try {
+        const stat = await FS.stat(destinationPath);
+        size = stat.size;
+      } catch {
+        /* size=0 is harmless; UI uses size for the Easy Move list metric only */
+      }
+
+      const { recordElevatedEasyMove } = await import("./shared/easyMoveStore");
+      return recordElevatedEasyMove({
+        sourcePath,
+        destinationPath,
+        size,
+        isDirectory,
+      });
+    },
+  );
+
   ipcMain.handle("diskhound:easy-move-back", async (_event, recordId: string) => {
     return easyMoveBack(recordId);
   });
@@ -1128,6 +1793,40 @@ void app.whenReady().then(async () => {
       if (diskCached !== null) {
         writeFullDiffMemoryCache(cacheKey, diskCached);
         return diskCached;
+      }
+
+      // Fast path: if the snapshot aggregates match exactly (bytes,
+      // files, dirs), the per-file diff is guaranteed empty. Short-
+      // circuit so we don't spawn the 4 GB worker just to prove that
+      // — on a 7.27M-file C:\ scan the worker otherwise OOMs even
+      // when nothing changed (building two full path→size maps to
+      // compare them is what costs the heap, not emitting deltas).
+      const [baseSnap, currSnap] = await Promise.all([
+        loadHistoricalSnapshotCached(baselineId),
+        loadHistoricalSnapshotCached(currentId),
+      ]);
+      if (
+        baseSnap && currSnap &&
+        baseSnap.bytesSeen === currSnap.bytesSeen &&
+        baseSnap.filesVisited === currSnap.filesVisited &&
+        baseSnap.directoriesVisited === currSnap.directoriesVisited
+      ) {
+        const emptyResult: FullDiffResult = {
+          baselineId,
+          currentId,
+          totalChanges: 0,
+          totalAdded: 0,
+          totalRemoved: 0,
+          totalGrew: 0,
+          totalShrank: 0,
+          totalBytesAdded: 0,
+          totalBytesRemoved: 0,
+          changes: [],
+          truncated: false,
+        };
+        writeFullDiffMemoryCache(cacheKey, emptyResult);
+        await writeFullDiffCache(emptyResult, normalizedLimit);
+        return emptyResult;
       }
 
       const input = {
@@ -1371,11 +2070,9 @@ void app.whenReady().then(async () => {
   // Because the sidecar filename is keyed by the scan's UUID, a fresh
   // scan writes its own sidecar and the old one gets garbage-collected
   // when the corresponding history entry rolls off.
-  const FOLDER_TREE_SIDECAR_SUFFIX = ".folder-tree.ndjson.gz";
-  const folderTreeSidecarPath = (scanId: string): string => {
-    const idx = indexFilePath(scanId);
-    return idx.replace(/\.ndjson\.gz$/i, FOLDER_TREE_SIDECAR_SUFFIX);
-  };
+  // folderTreeSidecarPath is imported from ./shared/scanIndex so the
+  // Rust scanner (which we pass the path to via --folder-tree-output)
+  // and the Node reader here agree on exactly one location per scan.
 
   async function writeFolderTreeSidecar(scanId: string, tree: FolderTree): Promise<void> {
     if (tree.size === 0) return; // nothing to persist
@@ -1415,9 +2112,17 @@ void app.whenReady().then(async () => {
 
   async function readFolderTreeSidecar(scanId: string): Promise<FolderTree | null> {
     const filePath = folderTreeSidecarPath(scanId);
-    if (!FS_SYNC.existsSync(filePath)) return null;
+    if (!FS_SYNC.existsSync(filePath)) {
+      writeCrashLog(
+        "folder-tree-sidecar-read",
+        `scanId=${scanId} file missing at ${filePath} — will rebuild from index`,
+      );
+      return null;
+    }
 
     const tree: FolderTree = new Map();
+    let linesRead = 0;
+    let parseFailures = 0;
     try {
       const gunzip = createGunzip();
       const src = createReadStream(filePath);
@@ -1425,12 +2130,13 @@ void app.whenReady().then(async () => {
       const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
       for await (const line of rl) {
         if (!line) continue;
+        linesRead++;
         let rec: {
           k?: string;
           d?: [string, number, number][];
           f?: [string, number, number][];
         };
-        try { rec = JSON.parse(line); } catch { continue; }
+        try { rec = JSON.parse(line); } catch { parseFailures++; continue; }
         if (typeof rec.k !== "string") continue;
         const dirs = Array.isArray(rec.d)
           ? rec.d
@@ -1444,11 +2150,21 @@ void app.whenReady().then(async () => {
           : [];
         tree.set(rec.k, { dirs, files });
       }
+      // Log success/failure ratio so we can tell if a sidecar was
+      // present-but-corrupt (rare, but hard to diagnose without
+      // explicit instrumentation). Before this, a sidecar that
+      // parsed to 0 entries would silently fall through to the
+      // worker-based rebuild, which OOM'd on big drives and made
+      // the Folders tab unusable after app restart.
+      writeCrashLog(
+        "folder-tree-sidecar-read",
+        `scanId=${scanId} lines=${linesRead} parseFailures=${parseFailures} treeSize=${tree.size}`,
+      );
       return tree;
     } catch (err) {
       writeCrashLog(
         "folder-tree-sidecar-read",
-        err instanceof Error ? (err.stack ?? err.message) : String(err),
+        `scanId=${scanId} linesRead=${linesRead} error=${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
       );
       return null;
     }
@@ -1511,6 +2227,7 @@ void app.whenReady().then(async () => {
       // best-effort (see writeFolderTreeSidecar), so a missing or
       // corrupt file just falls through to the full rebuild path.
       const started = Date.now();
+      const sidecarFilePresent = FS_SYNC.existsSync(folderTreeSidecarPath(id));
       const fromDisk = await readFolderTreeSidecar(id);
       if (fromDisk && fromDisk.size > 0) {
         writeCrashLog(
@@ -1519,6 +2236,23 @@ void app.whenReady().then(async () => {
         );
         insertFolderTree(id, fromDisk);
         return fromDisk;
+      }
+      // Sidecar exists but parsed to an empty Map — don't rebuild via
+      // the worker. The worker reads the SAME scan's NDJSON index;
+      // on drives big enough to need the sidecar fast-path, that
+      // rebuild OOMs the worker (observed in crash.log:
+      // "[folder-tree-prewarm-boot] Error: Folder tree worker out of
+      // memory, 8 GB heap"). Returning an empty tree keeps the
+      // Folders tab responsive (shows an empty state) and a
+      // subsequent scan will produce a fresh, readable sidecar.
+      if (sidecarFilePresent) {
+        writeCrashLog(
+          "folder-tree-sidecar-empty-skip-rebuild",
+          `scanId=${id} sidecar parsed to 0 entries — skipping worker rebuild to avoid OOM. Run a fresh scan to regenerate.`,
+        );
+        const empty: FolderTree = new Map();
+        insertFolderTree(id, empty);
+        return empty;
       }
       const tree = await buildFolderTree(indexFilePath(id));
       insertFolderTree(id, tree);
@@ -1626,135 +2360,35 @@ void app.whenReady().then(async () => {
 
   /**
    * Build a full parent → children map by streaming the index once.
-   * For each file record, we walk up the path and credit every ancestor
-   * with cumulative size + fileCount. Only direct-child folders are
-   * stored per level (one Map entry per unique folder), and top-N files
-   * per folder are tracked via a small sort-on-insert list capped at
-   * FILES_PER_FOLDER.
+   *
+   * The actual streaming + aggregation happens inside a dedicated Node
+   * worker thread (src/scan/folderTreeWorker.ts) so the ~5-minute build
+   * on a drive-scale scan (7M+ files) no longer blocks the main
+   * thread's event loop. Before this was worker-offloaded, the per-line
+   * JSON.parse + Map churn saturated the event loop hard enough that
+   * setInterval heartbeats ([memory] logs) stopped firing and IPC
+   * handlers stalled behind the microtask flood — the user saw the app
+   * freeze for several minutes right after scan-complete with no log
+   * output.
+   *
+   * The worker returns a serialized [key, node] array over postMessage;
+   * we wrap it back into a FolderTree Map on receipt. Tree shape is
+   * unchanged so every downstream consumer (IPC handlers, sidecar
+   * writer, cache eviction) keeps working without edits.
    */
-  const FILES_PER_FOLDER = 200;
-  const DIRS_PER_FOLDER = 500;
   async function buildFolderTree(indexPathStr: string): Promise<FolderTree> {
-    // All Node built-ins + normPath are already imported at module top.
-    // The prior implementation re-imported them inside the function
-    // body (the `await import(...)` alone added a microtask hop every
-    // folder-tree build for no benefit).
-    type DirTotals = Map<string, { size: number; fileCount: number }>;
-    // parent path → direct child dirs + their rolled-up totals
-    const childDirTotalsByParent = new Map<string, DirTotals>();
-    // parent path → top-N files at that level (unsorted during stream;
-    // sorted at return). Compact shape to keep 1M-dir cache under
-    // control — derived strings (name, parentPath, extension) are
-    // reconstructed when the IPC handler hands the records out.
-    const filesByParent = new Map<string, CompactFolderFile[]>();
-
-    // Consistent key shape: normalized (platform-aware case) + no trailing
-    // separator. Node's Path.dirname is inconsistent about trailing slashes
-    // at drive roots ("D:\\foo" → "D:\\", vs "D:\\foo\\bar" → "D:\\foo"),
-    // so we strip trailing separators everywhere we touch the tree Map.
-    // Without this, the drive-root folder came up blank because the build
-    // stored "d:\\" and the IPC looked up "d:" — the user saw "empty
-    // folder" even though the drive had 119 files + 21 dirs.
-    const toKey = (p: string): string => normPath(p).replace(/[\\/]+$/, "");
-
-    const gunzip = createGunzip();
-    const source = createReadStream(indexPathStr);
-    source.pipe(gunzip);
-    const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-
-    for await (const line of rl) {
-      if (!line) continue;
-      let rec: { p?: string; s?: number; t?: string; m?: number };
-      try { rec = JSON.parse(line); } catch { continue; }
-      if (!rec || typeof rec.p !== "string") continue;
-      if (rec.t === "d") continue;
-      const size = rec.s;
-      if (typeof size !== "number") continue;
-
-      const filePathNorm = toKey(rec.p);
-
-      // Walk up each ancestor. For the DIRECT parent we record a file;
-      // for every higher ancestor we credit size/count toward the child
-      // that points at this file's direct parent subtree.
-      //
-      // Cap each folder's file list at FILES_PER_FOLDER * 2 during
-      // streaming (sort+truncate when we overflow). Without this a
-      // drive with a "hot" folder holding millions of files — e.g.
-      // node_modules cache, Windows Installer cache — would balloon
-      // the main-process heap to 1 GB+ and crash the app. The prior
-      // implementation only truncated at the END, after the full
-      // stream had been held in memory.
-      let current = toKey(Path.dirname(filePathNorm));
-      let prevChild = filePathNorm;
-      const directParent = toKey(Path.dirname(filePathNorm));
-      while (true) {
-        const parent = current;
-        // File's direct parent: record it in filesByParent
-        if (prevChild === filePathNorm && parent === directParent) {
-          let list = filesByParent.get(parent);
-          if (!list) {
-            list = [];
-            filesByParent.set(parent, list);
-          }
-          // Store just the filename — the parent path is the Map key
-          // already, so repeating it per file record was pure duplication
-          // and on this drive-scale tree was the single biggest heap
-          // consumer.
-          list.push({
-            name: Path.basename(filePathNorm),
-            size,
-            modifiedAt: typeof rec.m === "number" ? rec.m : 0,
-          });
-          // Bounded-heap trim: once we've accumulated >2× the cap,
-          // sort + keep only the top-N by size. Amortized O(1) per
-          // insert thanks to the large grace factor; prevents any
-          // one folder from dominating process heap.
-          if (list.length > FILES_PER_FOLDER * 2) {
-            list.sort((a, b) => b.size - a.size);
-            list.length = FILES_PER_FOLDER;
-          }
-        } else if (prevChild !== filePathNorm) {
-          // Higher ancestor: credit its direct child (prevChild) with size/count
-          let totals = childDirTotalsByParent.get(parent);
-          if (!totals) {
-            totals = new Map();
-            childDirTotalsByParent.set(parent, totals);
-          }
-          const cur = totals.get(prevChild);
-          if (cur) {
-            cur.size += size;
-            cur.fileCount += 1;
-          } else {
-            totals.set(prevChild, { size, fileCount: 1 });
-          }
-        }
-
-        const grandparent = toKey(Path.dirname(parent));
-        // Stop at drive root (parent === itself at the top of Windows paths)
-        if (grandparent === parent || grandparent === "") break;
-        prevChild = parent;
-        current = grandparent;
-      }
-    }
-
-    // Finalize: sort + truncate per level, then merge into the tree map.
+    // This is the FALLBACK path — ensureFolderTree above calls
+    // readFolderTreeSidecar first, so we only get here when the
+    // scanner didn't emit a sidecar OR the sidecar was deleted. The
+    // worker streams the NDJSON index from scratch; ~5-15 s on a
+    // drive-scale scan.
+    const serialized = await runFolderTreeWorker(
+      { indexPath: indexPathStr },
+      { workerPath: folderTreeWorkerEntry },
+    );
     const tree: FolderTree = new Map();
-    const allKeys = new Set<string>();
-    for (const k of childDirTotalsByParent.keys()) allKeys.add(k);
-    for (const k of filesByParent.keys()) allKeys.add(k);
-    for (const parent of allKeys) {
-      const dirTotals = childDirTotalsByParent.get(parent);
-      const dirs = dirTotals
-        ? Array.from(dirTotals.entries())
-            .map(([path, t]) => ({ path, size: t.size, fileCount: t.fileCount }))
-            .sort((a, b) => b.size - a.size)
-            .slice(0, DIRS_PER_FOLDER)
-        : [];
-      const rawFiles = filesByParent.get(parent) ?? [];
-      const files = rawFiles
-        .sort((a, b) => b.size - a.size)
-        .slice(0, FILES_PER_FOLDER);
-      tree.set(parent, { dirs, files });
+    for (const [key, node] of serialized) {
+      tree.set(key, node);
     }
     return tree;
   }

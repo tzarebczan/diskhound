@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { ExtensionBucket, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount, formatElapsed, humanAge } from "../lib/format";
@@ -84,6 +84,12 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   const displayElapsedMs = snapshot.status === "running" && snapshot.startedAt !== null
     ? liveNow - snapshot.startedAt
     : snapshot.elapsedMs;
+  // Use the caller-supplied scanPercent directly — App.tsx's
+  // scanProgressFraction already switches to a files-based fraction
+  // during the indexing phase, so the header PROGRESS metric, the
+  // drive pill, and the scan stripe at the top of the window all track
+  // the same linear value instead of diverging (98% vs 69% etc).
+  const headerProgressPct = scanPercent;
   const [treemapMode, setTreemapMode] = useState<TreemapMode>(getInitialTreemapMode);
   const [treemapLayout, setTreemapLayout] = useState<TreemapLayout>(getInitialTreemapLayout);
   const [extSidebarCollapsed, setExtSidebarCollapsed] = useState<boolean>(getInitialExtSidebarCollapsed);
@@ -113,9 +119,38 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
     return () => { cancelled = true; };
   }, [snapshot.status, snapshot.rootPath, snapshot.largestFiles.length]);
 
+  // Preserve the last non-empty largestFiles across lite progress
+  // snapshots. The scanner emits lite snapshots (empty top-N arrays)
+  // during the indexing phase to avoid stdout pipe backpressure — but
+  // once the first full snapshot lands at ~5000 emitted files, we
+  // have a stable top-N and the user wants to keep seeing it on
+  // subsequent tile renders instead of watching it blink to empty on
+  // every lite tick. Reset on scan-start so old tiles don't carry
+  // over into a fresh scan of a different drive.
+  const lastRunningLargestFilesRef = useRef<ScanFileRecord[]>([]);
+  const lastRunningSnapshotKeyRef = useRef<string | null>(null);
+  const runningSnapshotKey = `${snapshot.rootPath ?? ""}::${snapshot.startedAt ?? 0}`;
+  if (snapshot.status === "running") {
+    if (lastRunningSnapshotKeyRef.current !== runningSnapshotKey) {
+      lastRunningSnapshotKeyRef.current = runningSnapshotKey;
+      lastRunningLargestFilesRef.current = [];
+    }
+    if (snapshot.largestFiles.length > 0) {
+      lastRunningLargestFilesRef.current = snapshot.largestFiles;
+    }
+  } else {
+    lastRunningSnapshotKeyRef.current = null;
+  }
+  const effectiveLargestFiles =
+    snapshot.status === "running"
+      && snapshot.largestFiles.length === 0
+      && lastRunningLargestFilesRef.current.length > 0
+        ? lastRunningLargestFilesRef.current
+        : snapshot.largestFiles;
+
   // Prefer the dense file list; fall back to the snapshot's top-N while a
   // scan is running or if the index isn't available.
-  const sourceFiles = denseFiles ?? snapshot.largestFiles;
+  const sourceFiles = denseFiles ?? effectiveLargestFiles;
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -169,12 +204,12 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
         {/* Progress metric — only rendered during live scans when we
          * have a real ratio. Shows both the number AND a thin fill
          * bar so users have a visual sense of pace at a glance. */}
-        {snapshot.status === "running" && typeof scanPercent === "number" && (
+        {snapshot.status === "running" && typeof headerProgressPct === "number" && (
           <div className="metric metric-progress">
-            <span className="metric-value accent">{scanPercent}%</span>
+            <span className="metric-value accent">{headerProgressPct}%</span>
             <span className="metric-label">progress</span>
             <div className="metric-progress-track" aria-hidden="true">
-              <div className="metric-progress-fill" style={{ width: `${scanPercent}%` }} />
+              <div className="metric-progress-fill" style={{ width: `${headerProgressPct}%` }} />
             </div>
           </div>
         )}
@@ -322,27 +357,93 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
                     //      the rescan baseline-load phase on a big index
                     //   3. filesVisited > 0: actively walking
                     const hasFiles = snapshot.filesVisited > 0;
-                    const longLoad = !hasFiles && displayElapsedMs > 3000;
-                    const title = hasFiles
-                      ? `Scanning ${snapshot.rootPath}…`
-                      : longLoad
-                        ? `Preparing from previous scan of ${snapshot.rootPath}…`
-                        : `Starting scan of ${snapshot.rootPath}…`;
-                    const sub = hasFiles
-                      ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed${
-                          typeof scanPercent === "number" ? ` · ${scanPercent}%` : ""
-                        }`
-                      : longLoad
-                        ? `Reading the prior scan's index so unchanged folders can be inherited instead of re-walked (${formatElapsed(displayElapsedMs)} elapsed).`
-                        : `Enumerating the root — largest files appear as soon as the first few are seen (${formatElapsed(displayElapsedMs)} elapsed)`;
+                    const phase = snapshot.scanPhase;
+                    const expected = snapshot.expectedTotalFiles;
+                    // Phase-aware title. During "finalizing" we know the
+                    // heavy work is done — tell the user that directly
+                    // rather than leaving them on "Scanning..." while
+                    // folder-tree / index cleanup wraps up.
+                    // Single title for the whole running-scan lifecycle.
+                    // Earlier we swapped between "Starting" / "Reading
+                    // metadata" / "Scanning" / "Finalizing" — each
+                    // transition was a visible text flash that users
+                    // read as a glitch. Phase-specific detail now goes
+                    // in the subtitle (which has a persistent elapsed
+                    // counter so the flash is absorbed), keeping the
+                    // title stable from scan-start to completion.
+                    const title = `Scanning ${snapshot.rootPath}…`;
+                    // Pre-file-count copy. During reading_metadata the
+                    // scanner is bulk-reading the NTFS MFT to discover
+                    // every record on the volume — no file paths have
+                    // been reconstructed yet, so telling the user
+                    // "first files should appear in a few seconds"
+                    // was misleading. Explain what's happening.
+                    // Tiered copy so we don't lie when the actual wait
+                    // exceeds the initial estimate. On a 7M-file HDD
+                    // the walker can spend 10+ minutes in "reading
+                    // metadata" before the first file path is
+                    // emitted. Saying "a few seconds" at the 2m mark
+                    // makes it look broken.
+                    const preScanCopy =
+                      phase === "reading_metadata"
+                        ? displayElapsedMs < 20_000
+                          ? "Reading the volume's filesystem metadata — paths will be reconstructed in a moment"
+                          : displayElapsedMs < 90_000
+                            ? "Reading the volume's filesystem metadata — this can take 30-60 seconds on drives with millions of files"
+                            : "Still reading filesystem metadata — on multi-million-file drives or HDDs this can take several minutes. Leave it running."
+                        : displayElapsedMs < 30_000
+                          ? "Getting ready — first files should appear in a few seconds"
+                          : displayElapsedMs < 120_000
+                            ? "Getting ready — could take a couple of minutes on large drives"
+                            : "Scanning a very large drive — this is normal on drives with millions of files. Tiles will stream in as they're processed.";
+                    // During the indexing phase the scanner pre-sorts
+                    // records biggest-first so bytes saturate the
+                    // progress bar at ~98% long before the millions of
+                    // small files finish streaming. When we have an
+                    // expected file count, show a secondary files-based
+                    // fraction that actually moves the whole time.
+                    let filesFraction: string | null = null;
+                    if (
+                      phase === "indexing"
+                      && typeof expected === "number"
+                      && expected > 0
+                    ) {
+                      filesFraction = `${formatCount(snapshot.filesVisited)} / ${formatCount(expected)} files indexed`;
+                    }
+                    const sub =
+                      phase === "finalizing"
+                        ? `Building folder tree and flushing index — almost done (${formatElapsed(displayElapsedMs)} elapsed).`
+                        : filesFraction !== null
+                          ? `${filesFraction} · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed`
+                          : hasFiles
+                            ? `${formatCount(snapshot.filesVisited)} files · ${formatBytes(snapshot.bytesSeen)} · ${formatElapsed(displayElapsedMs)} elapsed${
+                                typeof scanPercent === "number" ? ` · ${scanPercent}%` : ""
+                              }`
+                            : `${preScanCopy} (${formatElapsed(displayElapsedMs)} elapsed).`;
+                    // Override the byte-based progress bar with a
+                    // files-based fraction during indexing so it keeps
+                    // advancing linearly instead of plateauing at 98%.
+                    // During finalizing we explicitly DROP the
+                    // numeric bar (indeterminate feel) — the fixed
+                    // percent was confusing users since it looked
+                    // stuck at 98% while the sidecar-write + index
+                    // finalize does its last 30-60s of work.
+                    const displayPercent =
+                      phase === "finalizing"
+                        ? null
+                        : phase === "indexing"
+                            && typeof expected === "number"
+                            && expected > 0
+                          ? Math.min(99, Math.round((snapshot.filesVisited / expected) * 100))
+                          : scanPercent;
                     return (
                       <>
                         <div style={{ fontSize: 13, color: "var(--text)" }}>{title}</div>
-                        {typeof scanPercent === "number" && (
+                        {typeof displayPercent === "number" && (
                           <div className="scanning-empty-progress" aria-hidden="true">
                             <div
                               className="scanning-empty-progress-fill"
-                              style={{ width: `${scanPercent}%` }}
+                              style={{ width: `${displayPercent}%` }}
                             />
                           </div>
                         )}

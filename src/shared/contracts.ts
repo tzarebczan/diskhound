@@ -30,6 +30,13 @@ export interface ScanOptions {
   // IPC contract signature stays stable for future per-scan toggles.
 }
 
+export type ScanPhase =
+  | "starting"
+  | "reading_metadata"
+  | "indexing"
+  | "finalizing"
+  | "complete";
+
 export interface ScanSnapshot {
   status: ScanStatus;
   engine: ScanEngine;
@@ -47,6 +54,15 @@ export interface ScanSnapshot {
   topExtensions: ExtensionBucket[];
   errorMessage: string | null;
   lastUpdatedAt: number;
+  /** Coarse phase within a running scan; used by the UI to pick the
+   *  right status text and progress-bar denominator. Optional because
+   *  older snapshots (walker path, pre-0.3.15) don't populate it. */
+  scanPhase?: ScanPhase;
+  /** Total file count the scanner expects to emit, set once the MFT
+   *  fast path has counted records. Lets the UI draw a files-based
+   *  progress bar during the `indexing` phase where byte-based progress
+   *  stalls at ~98% because records are pre-sorted biggest-first. */
+  expectedTotalFiles?: number | null;
 }
 
 export interface PathActionResult {
@@ -78,6 +94,14 @@ export interface ScanStartInput {
    * full walk automatically.
    */
   baselineIndex?: string;
+  /**
+   * Optional sidecar output path. When set the scanner writes a
+   * pre-built folder-tree JSON.gz alongside the NDJSON index. Node
+   * loads this file directly on Folders-tab open instead of
+   * re-streaming the index through a worker — drops 5+ min load +
+   * 4-8 GB of worker memory down to a sub-second JSON.parse.
+   */
+  folderTreeOutput?: string;
 }
 
 export type WorkerToMainMessage =
@@ -96,6 +120,45 @@ export interface AppSettings {
   notifications: NotificationSettings;
   cleanup: CleanupSettings;
   recentScans: RecentScan[];
+  /** Persistent CPU-affinity rules. Every process-monitor sample
+   *  checks running processes against these rules and re-applies the
+   *  mask if the process has drifted off-rule (either the OS restarted
+   *  it with default affinity, or the user's set-affinity action was
+   *  overridden by another tool). Matches Process Lasso's "CPU
+   *  Affinity Rules" tab semantics. */
+  affinityRules: AffinityRule[];
+}
+
+export interface AffinityRule {
+  /** Stable UUID — used as the React key and for IPC identity. */
+  id: string;
+  /** Human-readable label, defaults to the exe basename. */
+  name: string;
+  /** Disable without deleting — useful for "pause" during debugging. */
+  enabled: boolean;
+  /** "exe_name" matches on the basename only (e.g. `chrome.exe`, case-
+   *  insensitive). "exe_path" matches the full path (case-insensitive,
+   *  substring match so a user can pin by project directory). */
+  matchType: "exe_name" | "exe_path";
+  /** The pattern — exact basename for `exe_name`, substring for
+   *  `exe_path`. Stored lowercased at save time so match-time checks
+   *  don't need to re-case. */
+  matchPattern: string;
+  /** Bitmask of allowed logical CPUs. Bit N means CPU N is enabled.
+   *  JavaScript number precision is 53-bit; sufficient for up to 53
+   *  logical CPUs which comfortably covers all currently-shipping
+   *  consumer + most server hardware. */
+  affinityMask: number;
+  /** Wall-clock ms at rule creation. Drives "created 3d ago" UI
+   *  and lets the user sort oldest/newest. */
+  createdAt: number;
+  /** Wall-clock ms of the last successful `SetProcessAffinityMask`
+   *  application via this rule. Null if the rule has never fired. */
+  lastAppliedAt: number | null;
+  /** Monotonic counter of successful applications across the rule's
+   *  lifetime. Useful signal ("this rule fires 200×/day → maybe the
+   *  process is fighting us"). */
+  appliedCount: number;
 }
 
 export interface RecentScan {
@@ -274,6 +337,15 @@ export interface EasyMoveResult {
   ok: boolean;
   message: string;
   record?: EasyMoveRecord;
+  /**
+   * Set when the move failed because the source path requires admin
+   * rights to stat / move (Windows-protected paths like
+   * \Windows\LiveKernelReports, \Windows\System32 debug dumps, etc.).
+   * Renderer detects this and offers a "Retry with admin" prompt; if
+   * accepted it calls `easyMoveElevated` which spawns a single
+   * UAC-elevated PowerShell that performs the move + link creation.
+   */
+  requiresElevation?: boolean;
 }
 
 // ── Scan Diff Types ────────────────────────────────────────
@@ -440,6 +512,88 @@ export interface SystemMemorySnapshot {
 
 export type KillSignal = "soft" | "hard";
 
+// ── GPU ─────────────────────────────────────────────────────
+//
+// GPU stats are collected per-adapter and per-process from Windows
+// performance counters (\GPU Engine\*, \GPU Adapter Memory\*,
+// \GPU Process Memory\*) plus Win32_VideoController via
+// Get-CimInstance. Sampled on the same cadence as memory; a single
+// PowerShell invocation returns all three counter families at once.
+//
+// Engine types we aggregate (from the NVIDIA/AMD/Intel WDDM 2.0
+// scheduler): "3D" (shader + rasterization), "Compute", "VideoDecode",
+// "VideoEncode", "Copy". Each shows up as separate GPU Engine
+// counter instances; we sum per-PID for "utilisation".
+
+/** A physical or virtual GPU as reported by Windows. */
+export interface GpuAdapter {
+  /** Stable identifier used to correlate per-process counters with
+   *  adapters. Parsed from the GPU Adapter Memory counter's LUID
+   *  substring ("luid_0x00000000_0x00064B70"). */
+  id: string;
+  /** Vendor-friendly name from Win32_VideoController (e.g. "NVIDIA GeForce RTX 4070"). */
+  name: string;
+  /** Driver version string, when available. */
+  driverVersion: string | null;
+  /** Total dedicated (VRAM) capacity advertised by the adapter.
+   *  Null if we couldn't read it (older drivers, integrated GPUs
+   *  sharing system memory, etc.). */
+  dedicatedBytesTotal: number | null;
+  /** Currently-used dedicated (VRAM) bytes across all processes on
+   *  this adapter — sum of \GPU Adapter Memory\Dedicated Usage. */
+  dedicatedBytesUsed: number;
+  /** Currently-used shared-system memory bytes across all processes. */
+  sharedBytesUsed: number;
+  /** Engine-utilisation summary: per engine type, the share of that
+   *  engine's time spent running work. 0-100. Engines with no
+   *  scheduled work don't appear in this map. */
+  enginePercent: Record<string, number>;
+  /** Overall utilisation — usually the max across all engine types,
+   *  since "how busy is the GPU" is dominated by whichever pipeline
+   *  is saturated. */
+  utilizationPercent: number;
+}
+
+/** Per-process GPU usage for a single Windows process. */
+export interface GpuProcessInfo {
+  pid: number;
+  /** Process name as pulled from the matching Get-Process entry, so
+   *  the GPU tab and Processes tab agree on labels. */
+  name: string;
+  /** Full path to the executable, when resolvable. Used for icons. */
+  exePath: string | null;
+  /** Adapter this process is using. Null when the process uses
+   *  multiple adapters or we couldn't correlate (rare). */
+  adapterId: string | null;
+  /** Dedicated VRAM bytes this process has allocated on the GPU. */
+  dedicatedBytes: number;
+  /** Shared system memory the GPU driver is using on this process's behalf. */
+  sharedBytes: number;
+  /** Per-engine utilisation percent (0-100 per engine). Only
+   *  engines actually used by the process appear. */
+  enginePercent: Record<string, number>;
+  /** Headline GPU utilisation — max across engine types for this
+   *  process. Sorted-by default. */
+  utilizationPercent: number;
+}
+
+/** Full GPU sample: adapters + processes. Matches the memory-snapshot
+ *  shape so MemoryView's existing cadence and cache machinery can be
+ *  reused for GPU without a whole second poll loop. */
+export interface GpuSnapshot {
+  adapters: GpuAdapter[];
+  processes: GpuProcessInfo[];
+  sampledAt: number;
+  /** Elapsed ms the sample took — useful UX feedback when GPU
+   *  sampling is slow (some systems take 800-1500ms for Get-Counter). */
+  sampleElapsedMs: number;
+  /** True on machines with no WDDM-capable adapter (rare: older
+   *  integrated-only + no WDDM 2.0 driver). Lets the UI show a
+   *  "GPU stats not available on this machine" empty state. */
+  unavailable?: boolean;
+  errorMessage?: string;
+}
+
 // ── Auto-Update Types ──────────────────────────────────────
 
 export type UpdatePhase = "idle" | "checking" | "available" | "downloading" | "downloaded" | "up-to-date" | "error";
@@ -543,7 +697,33 @@ export interface DiskhoundNativeApi {
   /** Returns the last sampled snapshot without triggering a fresh sample —
    *  use for instant paint on tab switch. Returns null on cold boot. */
   getCachedMemorySnapshot: () => Promise<SystemMemorySnapshot | null>;
+  /** Sample per-process GPU usage + adapter stats from Windows perf
+   *  counters. Takes ~500-1500 ms via a single PowerShell command
+   *  (Get-Counter is the bottleneck). Safe to call on non-Windows —
+   *  returns `unavailable: true` so the UI can render an empty state. */
+  getGpuSnapshot: () => Promise<GpuSnapshot>;
+  /** Last sampled GPU snapshot without triggering a refresh. */
+  getCachedGpuSnapshot: () => Promise<GpuSnapshot | null>;
   killProcess: (pid: number, signal: KillSignal) => Promise<PathActionResult>;
+  /** Read the current CPU affinity mask for a process. Bit N set means
+   *  the process is allowed to run on logical processor N. cpuCount
+   *  returned alongside so the UI can render the right number of
+   *  checkboxes. */
+  getCpuAffinity: (pid: number) => Promise<{
+    ok: boolean;
+    affinityMask?: number;
+    cpuCount: number;
+    message?: string;
+  }>;
+  /** Set the affinity mask. Requires the process to be owned by the
+   *  current user (or the app to be elevated). */
+  setCpuAffinity: (pid: number, mask: number) => Promise<PathActionResult>;
+  /** Enumerate persistent affinity rules (stored in settings). */
+  getAffinityRules: () => Promise<AffinityRule[]>;
+  /** Create or update a rule (matched by `id`). */
+  upsertAffinityRule: (rule: AffinityRule) => Promise<{ ok: boolean; message?: string }>;
+  /** Delete a rule by id. */
+  deleteAffinityRule: (id: string) => Promise<{ ok: boolean; message?: string }>;
   /** Icon for a specific executable, keyed by full path (unlike
    *  getFileIcon which keys by extension — each .exe typically has its
    *  own unique icon). */
@@ -568,11 +748,35 @@ export interface DiskhoundNativeApi {
   /** Schedule info for the Changes tab — last scan, next scan, interval, etc. */
   getScanScheduleInfo: () => Promise<ScanScheduleInfo>;
 
+  // Elevation / fast-scan admin
+  /** Is the current process running elevated, and is the "always elevated"
+   *  scheduled task already registered? Drives the first-run admin banner
+   *  and Settings → Performance section. */
+  getElevationStatus: () => Promise<{ elevated: boolean; scheduledTaskRegistered: boolean }>;
+  /** Spawn a UAC-elevated replacement instance and quit the current one.
+   *  Resolves once PowerShell has handed off to ShellExecute (before UAC
+   *  actually prompts) — the app will call app.quit() shortly after. */
+  relaunchAsAdmin: () => Promise<{ ok: boolean; message?: string }>;
+  /** One-time opt-in: register a Scheduled Task with HighestAvailable
+   *  RunLevel so future launches through `runScheduledTask` skip UAC. */
+  registerScheduledTask: () => Promise<{ ok: boolean }>;
+  unregisterScheduledTask: () => Promise<{ ok: boolean }>;
+  /** Launch DiskHound elevated via the previously-registered scheduled
+   *  task — zero UAC prompts. Quits the current process on success.
+   *  On failure returns a `message` carrying schtasks's own error text
+   *  (e.g. "The system cannot find the file specified" when the task
+   *  points at a stale exe path after a reinstall). */
+  runScheduledTask: () => Promise<{ ok: boolean; message?: string }>;
+
   // Cleanup analysis
   analyzeCleanup: (rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => Promise<CleanupAnalysis>;
 
   // Easy Move
   easyMove: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;
+  /** Like `easyMove` but runs the actual filesystem ops under a
+   *  UAC-elevated PowerShell. Triggers ONE UAC prompt per invocation.
+   *  Used by the renderer when `easyMove` returns `requiresElevation`. */
+  easyMoveElevated: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;
   easyMoveBack: (recordId: string) => Promise<PathActionResult>;
   getEasyMoves: () => Promise<EasyMoveRecord[]>;
   pickMoveDestination: () => Promise<string | null>;
@@ -695,6 +899,7 @@ export function defaultSettings(): AppSettings {
       safeDeleteToTrash: true,
     },
     recentScans: [],
+    affinityRules: [],
   };
 }
 
@@ -747,6 +952,11 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     notifications: { ...defaults.notifications, ...(input?.notifications ?? {}) },
     cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
     recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
+    affinityRules: Array.isArray(input?.affinityRules)
+      ? input!.affinityRules
+          .map((r) => normalizeAffinityRule(r))
+          .filter((r): r is AffinityRule => r !== null)
+      : defaults.affinityRules,
   };
 
   const minimizeToTray = Boolean(merged.general.minimizeToTray);
@@ -836,6 +1046,42 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         filesFound: Math.max(0, Math.round(scan.filesFound)),
         bytesFound: Math.max(0, Math.round(scan.bytesFound)),
       })),
+    affinityRules: merged.affinityRules,
+  };
+}
+
+/**
+ * Best-effort coercion from an unknown input (loaded JSON) to a
+ * well-formed AffinityRule. Returns null for entries missing required
+ * fields — the outer `.filter` drops those. Defensive rather than
+ * throwing so a corrupt settings file doesn't brick the app.
+ */
+function normalizeAffinityRule(input: unknown): AffinityRule | null {
+  if (!input || typeof input !== "object") return null;
+  const r = input as Partial<AffinityRule>;
+  if (typeof r.id !== "string" || r.id.length === 0) return null;
+  if (typeof r.matchPattern !== "string" || r.matchPattern.length === 0) return null;
+  const matchType = r.matchType === "exe_path" ? "exe_path" : "exe_name";
+  const mask = typeof r.affinityMask === "number" && Number.isFinite(r.affinityMask)
+    ? Math.max(1, Math.floor(r.affinityMask))
+    : 0;
+  if (mask === 0) return null; // zero mask would halt the process
+  return {
+    id: r.id,
+    name: typeof r.name === "string" && r.name.length > 0 ? r.name : r.matchPattern,
+    enabled: r.enabled !== false, // default to enabled
+    matchType,
+    matchPattern: r.matchPattern.toLowerCase(),
+    affinityMask: mask,
+    createdAt: typeof r.createdAt === "number" && Number.isFinite(r.createdAt)
+      ? Math.round(r.createdAt)
+      : Date.now(),
+    lastAppliedAt: typeof r.lastAppliedAt === "number" && Number.isFinite(r.lastAppliedAt)
+      ? Math.round(r.lastAppliedAt)
+      : null,
+    appliedCount: typeof r.appliedCount === "number" && Number.isFinite(r.appliedCount)
+      ? Math.max(0, Math.round(r.appliedCount))
+      : 0,
   };
 }
 
@@ -857,5 +1103,7 @@ export function createIdleScanSnapshot(): ScanSnapshot {
     topExtensions: [],
     errorMessage: null,
     lastUpdatedAt: Date.now(),
+    scanPhase: "starting",
+    expectedTotalFiles: null,
   };
 }

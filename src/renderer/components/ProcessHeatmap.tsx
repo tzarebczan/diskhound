@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
+import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
+import { findMatchingRule } from "../lib/affinityMatch";
 import { ProcessIcon } from "./ProcessIcon";
 
 /**
@@ -246,6 +247,13 @@ interface Props {
   onKill: (p: ProcessInfo, hard: boolean) => void;
   /** Right-click on a row should open the same compact menu the treemap uses. */
   onOpenContextMenu: (p: ProcessInfo, x: number, y: number) => void;
+  /**
+   * Active affinity rules — used to badge rows whose process matches
+   * an existing rule with a small amber pin icon in the label column.
+   * Kept in sync with the rules tab via the same polling cadence
+   * MemoryView uses for the List + Treemap views.
+   */
+  affinityRules: AffinityRule[];
 }
 
 export function ProcessHeatmap({
@@ -257,6 +265,7 @@ export function ProcessHeatmap({
   cpuCount,
   onKill,
   onOpenContextMenu,
+  affinityRules,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -477,6 +486,7 @@ export function ProcessHeatmap({
               key={row.entry.pid}
               row={row}
               scaleLabel={cpuScale}
+              matchedRule={findMatchingRule(affinityRules, row.entry.lastInfo)}
               onKill={onKill}
               onContextMenu={(p, x, y) => onOpenContextMenu(p, x, y)}
             />
@@ -515,10 +525,11 @@ export function ProcessHeatmap({
 function HeatmapRowLabel(props: {
   row: HeatmapRow;
   scaleLabel: "overall" | "active";
+  matchedRule: AffinityRule | null;
   onKill: (p: ProcessInfo, hard: boolean) => void;
   onContextMenu: (p: ProcessInfo, x: number, y: number) => void;
 }) {
-  const { row, scaleLabel, onContextMenu } = props;
+  const { row, scaleLabel, matchedRule, onContextMenu } = props;
   const entry = row.entry;
   const isGhost = entry.missingStreak > 0;
   // row.avg/max/last are pre-scaled by computeRow() — no double-scaling here.
@@ -527,7 +538,9 @@ function HeatmapRowLabel(props: {
   return (
     <div
       className={`process-heatmap-label ${isGhost ? "ghost" : ""}`}
-      title={`${entry.name} · PID ${entry.pid} (${scaleHint})\navg ${avg.toFixed(1)}% · max ${max.toFixed(1)}% · last ${last.toFixed(1)}%`}
+      title={`${entry.name} · PID ${entry.pid} (${scaleHint})\navg ${avg.toFixed(1)}% · max ${max.toFixed(1)}% · last ${last.toFixed(1)}%${
+        matchedRule ? `\npinned by rule: ${matchedRule.name || matchedRule.matchPattern}` : ""
+      }`}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -541,6 +554,20 @@ function HeatmapRowLabel(props: {
       />
       <ProcessIcon exePath={entry.exePath} className="process-heatmap-icon" />
       <span className="process-heatmap-name">{entry.name}</span>
+      {matchedRule && (
+        <span
+          className="process-heatmap-pin"
+          aria-label="Affinity rule active"
+          title={`Pinned by rule: ${matchedRule.name || matchedRule.matchPattern}`}
+        >
+          <svg width="9" height="9" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+            <rect x="0.5" y="0.5" width="3.5" height="3.5" />
+            <rect x="6"   y="0.5" width="3.5" height="3.5" />
+            <rect x="0.5" y="6"   width="3.5" height="3.5" />
+            <rect x="6"   y="6"   width="3.5" height="3.5" fill="currentColor" />
+          </svg>
+        </span>
+      )}
       {row.hasRecentSpike && (
         <span className="process-heatmap-spike" title="Recent CPU spike">▲</span>
       )}

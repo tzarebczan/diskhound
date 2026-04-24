@@ -54,5 +54,6 @@ function mergeSettings(defaults: AppSettings, partial: Partial<AppSettings>): Ap
     notifications: { ...defaults.notifications, ...partial.notifications },
     cleanup: { ...defaults.cleanup, ...partial.cleanup },
     recentScans: partial.recentScans ?? defaults.recentScans,
+    affinityRules: partial.affinityRules ?? defaults.affinityRules,
   };
 }

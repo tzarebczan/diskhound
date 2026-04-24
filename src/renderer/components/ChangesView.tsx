@@ -497,11 +497,36 @@ export function ChangesView({ rootPath, snapshot }: Props) {
           />
 
           <div className="changes-history-list">
-            {history.map((h, i) => {
-              const isLatest = i === 0;
-              const isSelected = h.id === selectedBaseline;
-              const prevEntry = history[i + 1];
-              const sizeDelta = prevEntry ? h.bytesSeen - prevEntry.bytesSeen : 0;
+            {(() => {
+              // Hide interior duplicates: if a scan has the same bytes +
+              // file count + dir count as the newer neighbor, it carries
+              // no diff information for the user. We keep the newest
+              // (COMPARING AGAINST header), the oldest (for historical
+              // context), and any scan that actually differs from the one
+              // above it. This collapses runs of "nothing changed since
+              // last hour" rescans which otherwise clutter the sidebar
+              // with identical-looking entries that produce empty diffs
+              // when clicked.
+              const visible = history.filter((h, i) => {
+                if (i === 0) return true;
+                if (i === history.length - 1) return true;
+                const newer = history[i - 1];
+                const sameAggregates =
+                  newer
+                  && h.bytesSeen === newer.bytesSeen
+                  && h.filesVisited === newer.filesVisited
+                  && h.directoriesVisited === newer.directoriesVisited;
+                return !sameAggregates;
+              });
+              const hiddenCount = history.length - visible.length;
+              return (
+                <>
+                  {visible.map((h) => {
+                    const origIndex = history.indexOf(h);
+                    const isLatest = origIndex === 0;
+                    const isSelected = h.id === selectedBaseline;
+                    const prevEntry = history[origIndex + 1];
+                    const sizeDelta = prevEntry ? h.bytesSeen - prevEntry.bytesSeen : 0;
 
               // The latest scan is the "current" side of the diff — not clickable,
               // render as a static header that clearly differs from the list items.
@@ -548,6 +573,14 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 </button>
               );
             })}
+                  {hiddenCount > 0 && (
+                    <div className="changes-history-hidden-note">
+                      {hiddenCount} unchanged scan{hiddenCount === 1 ? "" : "s"} hidden
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
 

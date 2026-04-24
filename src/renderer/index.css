@@ -345,6 +345,414 @@ button, input, select, textarea { font: inherit; }
 }
 .update-banner-dismiss:hover { background: var(--bg-row-hover); color: var(--text); }
 
+/* Admin banner — piggybacks update-banner's layout conventions but
+ * in amber (the app's accent) instead of blue, so users read "perf
+ * win available" rather than "critical update." Positioned above
+ * the update banner (if both show) by using `bottom: 88px`. */
+.admin-banner {
+  position: fixed;
+  bottom: 88px;
+  right: 14px;
+  z-index: 149;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius-md);
+  background: rgba(14, 14, 22, 0.96);
+  border: 1px solid rgba(245,158,11,0.35);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  backdrop-filter: blur(10px);
+  font-size: 12px;
+  color: var(--text);
+  max-width: 460px;
+  animation: update-banner-in 0.25s ease-out;
+}
+:root.light .admin-banner {
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.12);
+}
+.admin-banner-icon {
+  font-size: 14px;
+  color: var(--amber);
+}
+.admin-banner-text { flex: 1; color: var(--text-secondary); }
+.admin-banner-text strong { color: var(--amber); font-weight: 600; }
+.admin-banner-btn {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  background: var(--amber);
+  color: #1a1a22;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 0.12s;
+  white-space: nowrap;
+}
+.admin-banner-btn:hover { opacity: 0.9; }
+.admin-banner-btn-secondary {
+  height: 26px;
+  padding: 0 12px;
+  border: 1px solid var(--amber);
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--amber);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.12s;
+  white-space: nowrap;
+}
+.admin-banner-btn-secondary:hover { background: rgba(245, 158, 11, 0.25); }
+.admin-banner-dismiss {
+  width: 22px;
+  height: 22px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+.admin-banner-dismiss:hover { background: var(--bg-row-hover); color: var(--text); }
+
+/* Settings → Performance section.
+ * Small status pill (dot + label) + inline action buttons. Intentionally
+ * minimal — we're not adding toggles since there are only two meaningful
+ * commitments: "elevated this session" and "elevated forever". Both are
+ * expressed as one-shot actions. */
+.perf-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-row);
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 12px;
+}
+.perf-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.perf-status-ok { border-left: 2px solid var(--green); }
+.perf-status-ok .perf-status-dot { background: var(--green); }
+.perf-status-warn { border-left: 2px solid var(--amber); }
+.perf-status-warn .perf-status-dot { background: var(--amber); }
+
+.perf-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+/* CPU affinity picker modal. Modeled after other overlay dialogs;
+ * grid of numbered cells represents one bit of the affinity mask
+ * each. Click toggles; "All cores" / "Even cores" presets shortcut
+ * the common selections. Submitting OR-s the selected bits into a
+ * u64 mask passed to Win32 SetProcessAffinityMask. */
+.cpu-affinity-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: cpu-affinity-in 0.15s ease-out;
+}
+@keyframes cpu-affinity-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.cpu-affinity-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  padding: 20px 22px;
+  min-width: 360px;
+  max-width: 520px;
+  font-family: var(--font-mono);
+}
+.cpu-affinity-header {
+  margin-bottom: 14px;
+}
+.cpu-affinity-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.cpu-affinity-sub {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 3px;
+}
+.cpu-affinity-loading,
+.cpu-affinity-error {
+  font-size: 12px;
+  color: var(--text-secondary);
+  padding: 16px 0;
+}
+.cpu-affinity-error { color: var(--red); }
+.cpu-affinity-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(44px, 1fr));
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.cpu-affinity-cell {
+  height: 36px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.1s;
+}
+.cpu-affinity-cell.on {
+  background: var(--amber-glow);
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.cpu-affinity-cell.off:hover {
+  background: var(--bg-row-hover);
+  color: var(--text);
+}
+.cpu-affinity-presets {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.cpu-affinity-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Affinity rules management view. Table-like density to feel
+ * comfortable for power users managing dozens of rules. */
+.affinity-rules-view {
+  padding: 12px 14px 18px;
+  font-family: var(--font-mono);
+}
+.affinity-rules-empty {
+  padding: 60px 20px;
+  text-align: center;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+}
+.affinity-rules-empty-title {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 10px;
+}
+.affinity-rules-empty-body {
+  font-size: 11px;
+  line-height: 1.6;
+  max-width: 480px;
+  margin: 0 auto;
+}
+.affinity-rules-empty-body strong {
+  color: var(--amber);
+  font-weight: 600;
+}
+.affinity-rules-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.affinity-rules-summary {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.affinity-rules-summary strong {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+}
+.affinity-rules-dim { color: var(--text-muted); }
+
+.affinity-rules-table {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.affinity-rules-table-head,
+.affinity-rules-row {
+  display: grid;
+  grid-template-columns: 24px 1fr 1.4fr 1fr 110px 140px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  font-size: 11px;
+}
+.affinity-rules-table-head {
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  font-size: 10px;
+  font-weight: 600;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding-bottom: 6px;
+}
+.affinity-rules-row {
+  background: var(--bg-row);
+  border-radius: var(--radius-sm);
+  transition: background 0.1s;
+}
+.affinity-rules-row:hover { background: var(--bg-row-hover); }
+.affinity-rules-row.disabled {
+  opacity: 0.55;
+}
+.affinity-rules-col-enabled,
+.affinity-rules-col-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.affinity-rules-col-actions { justify-content: flex-end; }
+.affinity-rules-col-name {
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.affinity-rules-col-pattern {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+}
+.affinity-rules-pattern {
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.affinity-rules-badge {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  flex-shrink: 0;
+}
+.affinity-rules-badge.match-exe_name {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--blue);
+}
+.affinity-rules-badge.match-exe_path {
+  background: rgba(168, 85, 247, 0.15);
+  color: #c084fc;
+}
+.affinity-rules-col-mask {
+  display: flex;
+  align-items: center;
+}
+.affinity-rules-mask {
+  display: flex;
+  gap: 2px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.affinity-rules-mask.all-cores {
+  padding: 1px 8px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--amber);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+}
+.affinity-rules-bit {
+  width: 8px;
+  height: 8px;
+  border-radius: 1px;
+  display: inline-block;
+}
+.affinity-rules-bit.on { background: var(--amber); }
+.affinity-rules-bit.off { background: rgba(255, 255, 255, 0.1); }
+.affinity-rules-mask-overflow {
+  font-size: 9.5px;
+  color: var(--text-muted);
+  margin-left: 3px;
+}
+.affinity-rules-col-applied {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.affinity-rules-count {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.affinity-rules-applied-time {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+/* Rule editor modal — wider than the one-off affinity picker to fit
+ * the match-type toggle + pattern input. */
+.affinity-rule-editor {
+  min-width: 480px;
+  max-width: 640px;
+}
+.affinity-rule-field {
+  margin-bottom: 14px;
+}
+.affinity-rule-field > label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+.affinity-rule-match-toggle {
+  display: flex;
+  gap: 1px;
+  background: var(--bg-row);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+}
+.affinity-rule-match-btn {
+  flex: 1;
+  height: 26px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.1s;
+}
+.affinity-rule-match-btn.active {
+  background: var(--amber-glow);
+  color: var(--amber);
+}
+.affinity-rule-match-btn:hover:not(.active) {
+  color: var(--text);
+}
+
 .scan-stripe {
   position: fixed;
   top: 0; left: 0; right: 0;
@@ -1433,21 +1841,30 @@ button, input, select, textarea { font: inherit; }
   color: var(--text);
   pointer-events: none;
   backdrop-filter: blur(8px);
-  max-width: 320px;
-  white-space: nowrap;
+  max-width: 360px;
+  /* Allow long filenames (npm cache hashes, git object SHAs) to wrap
+   * within the tooltip box instead of spilling out the right side.
+   * overflow-wrap: anywhere kicks in for continuous non-space strings
+   * like hash filenames; word-break as a belt-and-suspenders for
+   * older webview paths. Without this, 64-char hash filenames break
+   * out of the dark tooltip background entirely. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .treemap-tooltip-size {
   color: var(--amber);
   font-weight: 600;
 }
-.treemap-tooltip-name { color: var(--text-secondary); margin-left: 6px; }
+.treemap-tooltip-name {
+  color: var(--text-secondary);
+  margin-left: 6px;
+  overflow-wrap: anywhere;
+}
 .treemap-tooltip-path {
   font-size: 10px;
   color: var(--text-muted);
   margin-top: 3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
   max-width: 360px;
 }
 .treemap-tooltip-meta {
@@ -2114,7 +2531,7 @@ button, input, select, textarea { font: inherit; }
 /* Column header row — sits above the folder list, purely labels. */
 .folder-list-header {
   display: grid;
-  grid-template-columns: 26px 1fr 180px 64px 90px 70px 110px;
+  grid-template-columns: 26px 1fr 180px 64px 90px 70px 180px;
   align-items: center;
   gap: 10px;
   padding: 8px 16px;
@@ -2141,7 +2558,13 @@ button, input, select, textarea { font: inherit; }
 /* Directory row */
 .folder-row {
   display: grid;
-  grid-template-columns: 26px 1fr 180px 64px 90px 70px 110px;
+  /* icon | name | bar | % | size | fileCount | actions
+   * Actions widened from 110 → 180 px so three hover-revealed
+   * buttons (Move / Reveal / Open, ~55 px each + gaps = ~175 px)
+   * no longer overflow leftward into the file-count column. With
+   * flex + justify-content: flex-end the buttons were right-anchored
+   * and spilled backward over "1,760" etc. at narrow widths. */
+  grid-template-columns: 26px 1fr 180px 64px 90px 70px 180px;
   align-items: center;
   gap: 10px;
   padding: 9px 16px;
@@ -3670,6 +4093,28 @@ button, input, select, textarea { font: inherit; }
 .process-ctx-item.process-ctx-danger:hover {
   background: rgba(239, 68, 68, 0.12);
 }
+/* "Edit affinity rule…" — amber-tinted to signal the rule already exists,
+   pairs with the row-level pin icon so the user sees the through-line
+   from the badged row to the actionable edit button. */
+.process-ctx-item.process-ctx-highlight {
+  color: var(--amber);
+  position: relative;
+}
+.process-ctx-item.process-ctx-highlight:hover {
+  background: rgba(245, 158, 11, 0.12);
+}
+.process-ctx-chip {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 2px;
+  background: rgba(245, 158, 11, 0.18);
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
 .process-ctx-divider {
   height: 1px;
   background: var(--border);
@@ -3805,6 +4250,25 @@ button, input, select, textarea { font: inherit; }
   font-size: 9px;
   flex-shrink: 0;
   animation: process-heatmap-spike-pulse 1.1s ease-in-out infinite;
+}
+/* Affinity-rule indicator on the heatmap row label — same amber grid
+   icon as List view, sized down to fit the 22px row height. Slightly
+   dimmed by default, brightens on row hover so it reads as "just
+   there" when scanning the heatmap but pops when the user engages. */
+.process-heatmap-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 11px;
+  height: 11px;
+  color: var(--amber);
+  opacity: 0.8;
+  flex-shrink: 0;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.process-heatmap-label:hover .process-heatmap-pin {
+  opacity: 1;
+  transform: scale(1.1);
 }
 @keyframes process-heatmap-spike-pulse {
   0%, 100% { opacity: 0.5; }
@@ -4074,6 +4538,29 @@ button, input, select, textarea { font: inherit; }
   letter-spacing: 0.04em;
   font-weight: 600;
   flex-shrink: 0;
+}
+/* Row-level affinity pin indicator — amber 4-square grid icon shown
+   beside a process name when an active rule is pinning it. Matches
+   the icon in the context menu's "Edit affinity rule…" entry so the
+   user instantly maps "badged row → that rule". */
+.memory-row-affinity-pin {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--amber);
+  opacity: 0.85;
+  flex-shrink: 0;
+  margin-left: 2px;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.memory-row-affinity-pin:hover {
+  opacity: 1;
+  transform: scale(1.08);
+}
+.memory-row:hover .memory-row-affinity-pin {
+  opacity: 1;
 }
 .memory-row-actions {
   display: flex;
@@ -4783,6 +5270,17 @@ button, input, select, textarea { font: inherit; }
 .changes-history-item:hover:not(:disabled) { background: var(--bg-row-hover); }
 .changes-history-item.selected { background: var(--amber-glow); border-left: 2px solid var(--amber); }
 .changes-history-item:disabled { cursor: default; }
+
+.changes-history-hidden-note {
+  padding: 8px 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  opacity: 0.7;
+  text-transform: uppercase;
+  border-bottom: 1px solid rgba(255,255,255,0.02);
+}
 
 .changes-history-current {
   display: flex;
@@ -5717,3 +6215,306 @@ button, input, select, textarea { font: inherit; }
   .cleanup-grid { grid-template-columns: 1fr; }
   .picker-card { max-width: 100%; padding: 20px; }
 }
+
+/* ── GPU tab ────────────────────────────────────────────────────────── */
+.gpu-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 16px;
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.gpu-view-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  gap: 8px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: center;
+  padding: 48px 16px;
+}
+.gpu-view-empty-icon {
+  font-size: 40px;
+  opacity: 0.35;
+  color: var(--amber);
+}
+.gpu-view-empty-sub {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  max-width: 440px;
+  line-height: 1.5;
+}
+.gpu-view-empty-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(245, 158, 11, 0.2);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: gpu-spin 0.9s linear infinite;
+}
+@keyframes gpu-spin {
+  to { transform: rotate(360deg); }
+}
+.gpu-view-footer {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  text-align: right;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+.gpu-view-footer-error { color: var(--red); margin-left: 8px; }
+
+/* Adapter overview */
+.gpu-overview {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+  flex-shrink: 0;
+}
+.gpu-adapter-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.gpu-adapter-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: linear-gradient(to bottom, var(--amber) 0%, transparent 100%);
+  opacity: 0.6;
+}
+.gpu-adapter-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.gpu-adapter-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gpu-adapter-driver {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  flex-shrink: 0;
+}
+.gpu-adapter-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.gpu-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.gpu-stat-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+.gpu-stat-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+.gpu-stat-value {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+.gpu-stat-value.low  { color: var(--text); }
+.gpu-stat-value.mid  { color: #f5c97a; }
+.gpu-stat-value.high { color: var(--amber); }
+.gpu-stat-value-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+.gpu-stat-bar {
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(148,163,184,0.12);
+  overflow: hidden;
+}
+.gpu-stat-bar-fill {
+  height: 100%;
+  background: var(--amber);
+  opacity: 0.85;
+  transition: width 0.4s ease;
+}
+.gpu-stat-bar-fill.low  { background: rgba(148,163,184,0.7); }
+.gpu-stat-bar-fill.mid  { background: #f5c97a; }
+.gpu-stat-bar-fill.high { background: var(--amber); }
+
+/* Engine chips */
+.gpu-adapter-engines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--border-subtle);
+}
+.gpu-engine-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  background: rgba(148,163,184,0.1);
+  border: 1px solid rgba(148,163,184,0.18);
+}
+.gpu-engine-chip.compact { font-size: 9px; padding: 1px 5px; }
+.gpu-engine-chip-label {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.gpu-engine-chip-value { color: var(--text); font-weight: 600; }
+.gpu-engine-chip.warm {
+  background: rgba(245, 158, 11, 0.12);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+.gpu-engine-chip.warm .gpu-engine-chip-label,
+.gpu-engine-chip.warm .gpu-engine-chip-value { color: var(--amber); }
+.gpu-engine-chip.hot {
+  background: rgba(239, 68, 68, 0.14);
+  border-color: rgba(239, 68, 68, 0.38);
+}
+.gpu-engine-chip.hot .gpu-engine-chip-label,
+.gpu-engine-chip.hot .gpu-engine-chip-value { color: var(--red); }
+
+/* Process table */
+.gpu-process-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.gpu-process-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+}
+.gpu-process-count { color: var(--text-tertiary); }
+.gpu-process-header .filter-input { max-width: 260px; flex-shrink: 0; }
+
+.gpu-process-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  background: var(--bg-panel);
+}
+
+.gpu-process-col-header,
+.gpu-process-row {
+  display: grid;
+  grid-template-columns: 24px 1.6fr 80px 80px 80px 1.4fr 60px;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 12px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.gpu-process-col-header {
+  position: sticky;
+  top: 0;
+  background: var(--bg-panel);
+  z-index: 1;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding: 8px 12px;
+}
+.gpu-process-row {
+  border-bottom: 1px solid rgba(148,163,184,0.05);
+}
+.gpu-process-row:hover { background: var(--bg-row-hover); }
+.gpu-process-col-icon { width: 18px; height: 18px; }
+.gpu-process-icon-img { width: 18px; height: 18px; }
+.gpu-process-col-name {
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gpu-process-col-util {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.gpu-process-util-value {
+  font-weight: 600;
+  font-size: 11px;
+}
+.gpu-process-util-value.low  { color: var(--text-muted); }
+.gpu-process-util-value.mid  { color: #f5c97a; }
+.gpu-process-util-value.high { color: var(--amber); }
+.gpu-process-util-bar {
+  height: 3px;
+  background: rgba(148,163,184,0.1);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.gpu-process-util-bar-fill {
+  height: 100%;
+  transition: width 0.4s ease;
+  opacity: 0.85;
+}
+.gpu-process-util-bar-fill.low  { background: rgba(148,163,184,0.65); }
+.gpu-process-util-bar-fill.mid  { background: #f5c97a; }
+.gpu-process-util-bar-fill.high { background: var(--amber); }
+.gpu-process-col-mem,
+.gpu-process-col-shared {
+  color: var(--text-muted);
+  font-size: 10.5px;
+}
+.gpu-process-col-engines {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  align-items: center;
+}
+.gpu-process-col-pid {
+  color: var(--text-tertiary);
+  text-align: right;
+  font-size: 10px;
+}
+

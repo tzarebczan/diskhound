@@ -19,6 +19,13 @@ import { normPath } from "./pathUtils";
 
 const INDEX_DIR = "scan-indexes";
 const INDEX_SUFFIX = ".ndjson.gz";
+/// Companion sidecar suffix. The Rust scanner writes (or Node builds
+/// and persists) a pre-rolled-up folder tree here alongside the
+/// NDJSON index. Format: one NDJSON line per parent directory — see
+/// main.ts readFolderTreeSidecar/writeFolderTreeSidecar for the
+/// canonical schema. Shared here so any code that needs to clean up
+/// an index (and its sidecar) has the suffix in one place.
+const FOLDER_TREE_SIDECAR_SUFFIX = ".folder-tree.ndjson.gz";
 
 let indexDir = "";
 
@@ -31,6 +38,10 @@ export function initScanIndex(dataDir: string): void {
 
 export function indexFilePath(id: string): string {
   return Path.join(indexDir, `${id}${INDEX_SUFFIX}`);
+}
+
+export function folderTreeSidecarPath(id: string): string {
+  return Path.join(indexDir, `${id}${FOLDER_TREE_SIDECAR_SUFFIX}`);
 }
 
 /**
@@ -398,6 +409,11 @@ export async function deleteIndex(id: string): Promise<void> {
   try {
     await FSP.unlink(indexFilePath(id));
   } catch { /* already gone */ }
+  // Also drop the sidecar — no point keeping a folder-tree cache for
+  // a scan whose index was just deleted.
+  try {
+    await FSP.unlink(folderTreeSidecarPath(id));
+  } catch { /* sidecar optional / already gone */ }
 }
 
 // ── Snapshot reconstruction from index ─────────────────────────────────────

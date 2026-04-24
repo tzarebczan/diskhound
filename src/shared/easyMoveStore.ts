@@ -177,11 +177,86 @@ export async function easyMove(
 
     return { ok: true, message: `Moved and linked: ${baseName}`, record };
   } catch (error) {
+    // Windows-protected paths (anything under \Windows\LiveKernelReports,
+    // some of \Windows\System32, System Volume Information, etc.) throw
+    // EPERM / EACCES on plain `stat` for non-admin users — before we
+    // ever get to the rename. The raw "EPERM: operation not permitted,
+    // stat 'C:\\Windows\\...'" is technically accurate but reads as a
+    // bug; translate to something actionable. Moving these files also
+    // typically FAILS even when elevated because the OS has them open
+    // or ACL-locks them, so we also warn about that.
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code === "EPERM" || code === "EACCES" || code === "EBUSY") {
+      const name = Path.basename(sourcePath);
+      // Probe the current elevation state so we give the user a
+      // message that actually applies. Historically we surfaced this
+      // as "needs admin" unconditionally, but:
+      //   - Users running elevated hit this error too (WSL-locked
+      //     VHDX, Defender scan in flight, OneDrive mid-sync, etc.).
+      //     Telling them to "retry with admin" is confusing.
+      //   - EBUSY / sharing-violation is the most common cause,
+      //     NOT permission. An elevated retry wouldn't help.
+      // We only offer the UAC retry when non-elevated AND the code is
+      // a permission-flavoured one; otherwise we give a "file is
+      // locked" message with actionable suggestions.
+      const { isElevated } = await import("../elevation");
+      const elevated = await isElevated();
+      if (!elevated && (code === "EPERM" || code === "EACCES")) {
+        return {
+          ok: false,
+          requiresElevation: true,
+          message: `${name} may require admin rights. Retry with admin to attempt the move.`,
+        };
+      }
+      return {
+        ok: false,
+        message:
+          `Couldn't access ${name} (${code}). Another process is likely holding the file open — common culprits: ` +
+          `WSL (for .vhdx), Hyper-V, Windows Defender, OneDrive sync, or an antivirus scan. ` +
+          `Close the app using it or wait a moment and try again.`,
+      };
+    }
     return {
       ok: false,
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Record an EasyMove that was performed out-of-process (by the
+ * UAC-elevated PowerShell sibling spawned from main.ts). The actual
+ * filesystem move + link creation already happened; we just need to
+ * persist the record so the user can undo it later from the Easy Move
+ * tab. Returns the same `EasyMoveResult` shape as `easyMove` for
+ * caller parity.
+ *
+ * `isDirectory` and `size` are passed in from main.ts, which stat'd
+ * the DESTINATION path after the elevated move succeeded (source is
+ * now a symlink/junction, so stat'ing it would deref).
+ */
+export function recordElevatedEasyMove(params: {
+  sourcePath: string;
+  destinationPath: string;
+  size: number;
+  isDirectory: boolean;
+}): EasyMoveResult {
+  const record: EasyMoveRecord = {
+    id: randomUUID(),
+    originalPath: params.sourcePath,
+    movedToPath: params.destinationPath,
+    symlinkPath: params.sourcePath,
+    size: params.size,
+    movedAt: Date.now(),
+    isDirectory: params.isDirectory,
+  };
+  records.push(record);
+  persist();
+  return {
+    ok: true,
+    message: `Moved and linked: ${Path.basename(params.sourcePath)}`,
+    record,
+  };
 }
 
 /**

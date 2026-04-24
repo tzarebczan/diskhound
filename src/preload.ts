@@ -30,6 +30,11 @@ const api: DiskhoundNativeApi = {
   // Process / memory viewer
   getMemorySnapshot: () => ipcRenderer.invoke("diskhound:get-memory-snapshot"),
   killProcess: (pid, signal) => ipcRenderer.invoke("diskhound:kill-process", pid, signal),
+  getCpuAffinity: (pid) => ipcRenderer.invoke("diskhound:get-cpu-affinity", pid),
+  setCpuAffinity: (pid, mask) => ipcRenderer.invoke("diskhound:set-cpu-affinity", pid, mask),
+  getAffinityRules: () => ipcRenderer.invoke("diskhound:get-affinity-rules"),
+  upsertAffinityRule: (rule) => ipcRenderer.invoke("diskhound:upsert-affinity-rule", rule),
+  deleteAffinityRule: (id) => ipcRenderer.invoke("diskhound:delete-affinity-rule", id),
 
   // Path actions
   revealPath: (targetPath) => ipcRenderer.invoke("diskhound:reveal-path", targetPath),
@@ -48,7 +53,16 @@ const api: DiskhoundNativeApi = {
   getDiskSpace: () => ipcRenderer.invoke("diskhound:get-disk-space"),
   getDiskDeltaHistory: () => ipcRenderer.invoke("diskhound:get-disk-delta-history"),
   getScanScheduleInfo: () => ipcRenderer.invoke("diskhound:get-scan-schedule-info"),
+
+  // Elevation / fast-scan admin
+  getElevationStatus: () => ipcRenderer.invoke("diskhound:get-elevation-status"),
+  relaunchAsAdmin: () => ipcRenderer.invoke("diskhound:relaunch-as-admin"),
+  registerScheduledTask: () => ipcRenderer.invoke("diskhound:register-scheduled-task"),
+  unregisterScheduledTask: () => ipcRenderer.invoke("diskhound:unregister-scheduled-task"),
+  runScheduledTask: () => ipcRenderer.invoke("diskhound:run-scheduled-task"),
   getCachedMemorySnapshot: () => ipcRenderer.invoke("diskhound:get-cached-memory-snapshot"),
+  getGpuSnapshot: () => ipcRenderer.invoke("diskhound:get-gpu-snapshot"),
+  getCachedGpuSnapshot: () => ipcRenderer.invoke("diskhound:get-cached-gpu-snapshot"),
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis
@@ -91,6 +105,7 @@ const api: DiskhoundNativeApi = {
 
   // Easy Move
   easyMove: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move", sourcePath, destinationDir),
+  easyMoveElevated: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move-elevated", sourcePath, destinationDir),
   easyMoveBack: (recordId) => ipcRenderer.invoke("diskhound:easy-move-back", recordId),
   getEasyMoves: () => ipcRenderer.invoke("diskhound:get-easy-moves"),
   pickMoveDestination: () => ipcRenderer.invoke("diskhound:pick-move-destination"),

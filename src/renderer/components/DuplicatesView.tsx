@@ -6,7 +6,7 @@ import type {
   DuplicateScanProgress,
   ScanSnapshot,
 } from "../../shared/contracts";
-import { formatBytes, humanAge } from "../lib/format";
+import { formatBytes, formatElapsed, humanAge } from "../lib/format";
 import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
@@ -423,7 +423,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             <div className="duplicates-empty-hint">
               {dismissed.size > 0
                 ? `${dismissed.size} group${dismissed.size !== 1 ? "s" : ""} resolved.`
-                : `Scanned ${analysis.filesWalked.toLocaleString()} files in ${(analysis.elapsedMs / 1000).toFixed(1)}s.`}
+                : `Scanned ${analysis.filesWalked.toLocaleString()} files in ${formatElapsed(analysis.elapsedMs)}.`}
             </div>
           </div>
         )}

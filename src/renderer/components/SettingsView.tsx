@@ -142,6 +142,9 @@ export function SettingsView() {
        * logic). One less knob to tune; the app reopens to the last-
        * scanned root automatically on launch. */}
 
+      {/* ── Performance / Elevation ── */}
+      <PerformanceSection />
+
       {/* ── Monitoring ── */}
       <div className="settings-section">
         <div className="settings-section-title">Drive Monitoring</div>
@@ -245,6 +248,167 @@ export function SettingsView() {
           value={settings.cleanup.safeDeleteToTrash}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, safeDeleteToTrash: v } })} />
       </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Fast-scan (MFT) elevation controls. Three states:
+ *
+ *   1. Not elevated, no scheduled task registered → show "Enable fast
+ *      scans" primary CTA (relaunch-as-admin) + secondary
+ *      "Always run as admin" (scheduled task, one UAC prompt now,
+ *      zero UAC prompts forever after).
+ *
+ *   2. Elevated, no scheduled task → show success status + offer the
+ *      "always elevated" opt-in. (User is elevated this session;
+ *      scheduled task makes it permanent.)
+ *
+ *   3. Scheduled task registered → show success + "Disable" button.
+ *      Whether we're currently elevated in THIS process doesn't
+ *      matter UX-wise at this point — user has committed.
+ */
+function PerformanceSection() {
+  const [status, setStatus] = useState<
+    { elevated: boolean; scheduledTaskRegistered: boolean } | null
+  >(null);
+  const [busy, setBusy] = useState<"relaunch" | "register" | "unregister" | "run" | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void nativeApi.getElevationStatus().then((s) => {
+      if (!cancelled) setStatus(s);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (!status) return null;
+
+  const relaunch = async () => {
+    setBusy("relaunch");
+    const result = await nativeApi.relaunchAsAdmin();
+    setBusy(null);
+    if (!result.ok) toast("error", result.message ?? "Couldn't relaunch as admin");
+  };
+  const registerTask = async () => {
+    setBusy("register");
+    const result = await nativeApi.registerScheduledTask();
+    setBusy(null);
+    if (result.ok) {
+      toast("success", "Fast scans enabled", "Future launches will skip the UAC prompt.");
+      setStatus({ ...status, scheduledTaskRegistered: true });
+    } else {
+      toast("error", "Couldn't register scheduled task", "UAC may have been cancelled.");
+    }
+  };
+  const unregisterTask = async () => {
+    setBusy("unregister");
+    const result = await nativeApi.unregisterScheduledTask();
+    setBusy(null);
+    if (result.ok) {
+      toast("success", "Fast-scan auto-elevation disabled");
+      setStatus({ ...status, scheduledTaskRegistered: false });
+    } else {
+      toast("error", "Couldn't unregister scheduled task");
+    }
+  };
+  const runTaskNow = async () => {
+    setBusy("run");
+    const result = await nativeApi.runScheduledTask();
+    setBusy(null);
+    if (!result.ok) {
+      // Surface the actual schtasks error instead of a generic toast.
+      // Common cases we now communicate clearly:
+      //   - "The system cannot find the file specified": task points
+      //     at a stale exe path (app reinstalled to a different
+      //     location). Tell the user to re-register.
+      //   - "Access is denied": pre-0.4.4 task was created with
+      //     Principal=Administrators group SID and the invoking user
+      //     (even if in that group) can't run it. Disable+Enable
+      //     re-registers with the current user's SID, fixing this.
+      //   - Blank / exit 1: schtasks itself crashed; offer the
+      //     "Unregister + re-register" recovery path.
+      const lower = result.message?.toLowerCase() ?? "";
+      const looksLikeStalePath =
+        lower.includes("cannot find the file") ||
+        lower.includes("cannot find the path");
+      const looksLikeOldPrincipal = lower.includes("access is denied") || lower.includes("access denied");
+      const needsReRegister = looksLikeStalePath || looksLikeOldPrincipal;
+      toast(
+        "error",
+        "Couldn't launch via scheduled task",
+        needsReRegister
+          ? `${result.message} — try "Disable" then "Enable" to re-register the task.`
+          : result.message,
+      );
+    }
+  };
+
+  const statusLabel = status.scheduledTaskRegistered
+    ? "Fast scans enabled (auto-elevated on launch)"
+    : status.elevated
+      ? "Running elevated — MFT fast-scan path active"
+      : "Using compatibility walker (10-20× slower)";
+  const statusKind: "ok" | "warn" = status.scheduledTaskRegistered || status.elevated ? "ok" : "warn";
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">Performance</div>
+      <div className="settings-section-note">
+        On NTFS drives (typical Windows system drives), DiskHound can read
+        the Master File Table directly for 10-20× faster scans — but this
+        requires admin. Without admin, scans use the compatibility walker:
+        correct but slower.
+      </div>
+      <div className={`perf-status perf-status-${statusKind}`}>
+        <span className="perf-status-dot" />
+        <span>{statusLabel}</span>
+      </div>
+
+      <div className="perf-actions">
+        {!status.elevated && !status.scheduledTaskRegistered && (
+          <button
+            className="action-btn primary"
+            disabled={busy !== null}
+            onClick={relaunch}
+          >
+            {busy === "relaunch" ? "Relaunching…" : "Relaunch as admin (this session)"}
+          </button>
+        )}
+
+        {!status.scheduledTaskRegistered && (
+          <button
+            className="action-btn"
+            disabled={busy !== null}
+            onClick={registerTask}
+            title="Creates a Scheduled Task so future launches run elevated without a UAC prompt"
+          >
+            {busy === "register" ? "Registering…" : "Always run as admin (no more UAC prompts)"}
+          </button>
+        )}
+
+        {status.scheduledTaskRegistered && !status.elevated && (
+          <button
+            className="action-btn primary"
+            disabled={busy !== null}
+            onClick={runTaskNow}
+            title="Launches DiskHound elevated via the registered scheduled task"
+          >
+            {busy === "run" ? "Launching…" : "Relaunch elevated now"}
+          </button>
+        )}
+
+        {status.scheduledTaskRegistered && (
+          <button
+            className="action-btn warn"
+            disabled={busy !== null}
+            onClick={unregisterTask}
+            title="Removes the Scheduled Task. Future launches will require UAC again."
+          >
+            {busy === "unregister" ? "Removing…" : "Disable auto-elevation"}
+          </button>
+        )}
       </div>
     </div>
   );

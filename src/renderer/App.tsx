@@ -140,6 +140,37 @@ export function App() {
   const [themePreference, setThemePreference] = useState<GeneralSettings["theme"]>("dark");
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false);
+  // Elevation status feeds the "Run as admin for faster scans" banner.
+  // Null means we haven't probed yet; `elevated=true` AND
+  // `scheduledTaskRegistered=true` independently suppress the banner
+  // (the latter covers users who opted into the "always elevated"
+  // scheduled-task path).
+  const [elevationStatus, setElevationStatus] = useState<
+    { elevated: boolean; scheduledTaskRegistered: boolean } | null
+  >(null);
+  const [adminBannerDismissed, setAdminBannerDismissed] = useState(() => {
+    // Respect the one-time dismissal across sessions via localStorage.
+    // Users who explicitly close the banner don't want to see it
+    // every launch; they can still enable fast scans from Settings.
+    try {
+      return window.localStorage.getItem("diskhound.adminBannerDismissed") === "1";
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    let cancelled = false;
+    void nativeApi.getElevationStatus().then((status) => {
+      if (!cancelled) setElevationStatus(status);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  const dismissAdminBanner = () => {
+    setAdminBannerDismissed(true);
+    try {
+      window.localStorage.setItem("diskhound.adminBannerDismissed", "1");
+    } catch { /* no-op */ }
+  };
   const isSearchableView = SEARCHABLE_VIEWS.includes(view);
 
   /**
@@ -158,9 +189,33 @@ export function App() {
    */
   const scanProgressFraction = useCallback(
     (snap: ScanSnapshot): number | null => {
-      if (snap.status !== "running" || !snap.rootPath || snap.bytesSeen <= 0) {
+      if (snap.status !== "running" || !snap.rootPath) {
         return null;
       }
+      // Finalizing phase: scanner has stopped walking, is now writing
+      // the folder-tree sidecar + flushing the index. Return null so
+      // the drive pill / stripe go indeterminate instead of sitting at
+      // the misleading "98%" the previous run ended on.
+      if (snap.scanPhase === "finalizing") {
+        return null;
+      }
+      // During the indexing phase the scanner pre-sorts records
+      // biggest-first, so bytes saturate the progress near 100% while
+      // millions of small files are still streaming. Prefer a
+      // files-based fraction here so the drive pill, scan stripe, and
+      // header PROGRESS metric all track the same linear thing. Falls
+      // back to bytes-based when expected file count isn't known (walker
+      // path or pre-indexing phases).
+      if (
+        snap.scanPhase === "indexing"
+        && typeof snap.expectedTotalFiles === "number"
+        && snap.expectedTotalFiles > 0
+      ) {
+        const frac = snap.filesVisited / snap.expectedTotalFiles;
+        if (!Number.isFinite(frac)) return null;
+        return Math.min(0.99, Math.max(0, frac));
+      }
+      if (snap.bytesSeen <= 0) return null;
       const drive = drives.find((d) =>
         snap.rootPath!.toLowerCase().startsWith(d.drive.toLowerCase()),
       );
@@ -504,7 +559,20 @@ export function App() {
       return;
     }
     setShowPicker(false);
-    const s = await nativeApi.startScan(path.trim(), scanOptions);
+    // Synthesize a running-status placeholder immediately so the UI
+    // doesn't flash the "No scan data for X\" idle CTA while the native
+    // scanner spawns (takes ~100-500ms to return its first snapshot).
+    // The real running snapshot from startScan will replace this as
+    // soon as it arrives.
+    const trimmed = path.trim();
+    syncSnapshot({
+      ...createIdleScanSnapshot(),
+      status: "running",
+      rootPath: trimmed,
+      startedAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+    });
+    const s = await nativeApi.startScan(trimmed, scanOptions);
     syncSnapshot(s);
   };
 
@@ -539,15 +607,32 @@ export function App() {
     // relaid-out underneath the user.
     if (activeScanKeys.has(key)) return;
 
+    // Drop a synthetic "running" placeholder SYNCHRONOUSLY before any
+    // await. Without this, the render pass between setCurrentRoot and
+    // doScan's own placeholder flashes the "No scan data for X\" empty
+    // state for a few ms — visible as UI jank on every drive click.
+    // The placeholder immediately puts the UI in Scanning mode; the
+    // real first snapshot from the scanner replaces it ~100-300 ms later.
+    syncSnapshot({
+      ...createIdleScanSnapshot(),
+      status: "running",
+      rootPath: normalized,
+      startedAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+    });
+
     // Otherwise, try to restore the latest saved snapshot from history.
     const latest = await nativeApi.getLatestSnapshotForRoot(normalized);
     if (latest) {
       storeSnapshot(latest);
+      return;
     }
-    // If neither fresh nor historical data exists, the derived snapshot
-    // is the idle-with-rootPath stub set up in the snapshot useMemo,
-    // which gives downstream views a proper empty state targeting this
-    // drive rather than the old generic "no scan yet" UI.
+    // No historical data either — this drive has never been scanned.
+    // Auto-kick a scan instead of landing the user on a dead-end empty
+    // state with a "hit Rescan in the header" instruction. The
+    // anti-auto-scan comment above applies only to *switching between*
+    // already-scanned drives, not to first-ever selection.
+    await doScan(normalized);
   };
 
   const handleScanFolder = (folderPath: string) => {
@@ -589,13 +674,21 @@ export function App() {
 
   const statusLabel = useMemo(() => {
     switch (snapshot.status) {
-      case "running": return "Scanning";
+      case "running":
+        // Differentiate the last 30-60s of a scan — the scanner has
+        // stopped walking and is writing the folder-tree sidecar +
+        // flushing the gzipped index. Without this the top-bar label
+        // said "Scanning" for a full minute after the progress bar
+        // hit 100%, which looked stuck to the user.
+        if (snapshot.scanPhase === "finalizing") return "Finalizing";
+        if (snapshot.scanPhase === "reading_metadata") return "Reading metadata";
+        return "Scanning";
       case "done": return "Complete";
       case "cancelled": return "Stopped";
       case "error": return "Error";
       default: return "Ready";
     }
-  }, [snapshot.status]);
+  }, [snapshot.status, snapshot.scanPhase]);
 
   return (
     <ToastProvider>
@@ -617,6 +710,73 @@ export function App() {
             />
           )}
         </div>
+
+        {/* Admin banner — shown once to users who aren't running
+         *  elevated. MFT fast-scans require admin, and non-elevated
+         *  users fall back to the 10-20× slower FindFirstFile walker
+         *  without ever knowing the fast path existed. Dismissed
+         *  permanently via localStorage once the user engages (or
+         *  explicitly dismisses). */}
+        {elevationStatus
+          && !elevationStatus.elevated
+          && !elevationStatus.scheduledTaskRegistered
+          && !adminBannerDismissed
+          && (
+            <div className="admin-banner">
+              <span className="admin-banner-icon">⚡</span>
+              <span className="admin-banner-text">
+                Run scans <strong>10-20× faster</strong> on NTFS drives with admin rights.
+              </span>
+              <button
+                className="admin-banner-btn-secondary"
+                onClick={async () => {
+                  // Permanent opt-in: one UAC prompt now to register the
+                  // Scheduled Task; future launches via shortcut auto-
+                  // elevate with no further prompts.
+                  const result = await nativeApi.registerScheduledTask();
+                  if (result.ok) {
+                    toast(
+                      "success",
+                      "Fast scans enabled",
+                      "Future launches will auto-elevate with no UAC prompt.",
+                    );
+                    dismissAdminBanner();
+                    // Relaunch via the newly-registered task so the user
+                    // starts getting the speedup immediately.
+                    await nativeApi.runScheduledTask();
+                  } else {
+                    toast(
+                      "error",
+                      "Couldn't enable fast scans",
+                      "UAC was likely cancelled. Try again from Settings → Performance.",
+                    );
+                  }
+                }}
+                title="One UAC prompt now → zero UAC prompts forever"
+              >
+                Always (recommended)
+              </button>
+              <button
+                className="admin-banner-btn"
+                onClick={async () => {
+                  const result = await nativeApi.relaunchAsAdmin();
+                  if (!result.ok) {
+                    toast("error", result.message ?? "Couldn't relaunch as admin");
+                  }
+                }}
+                title="Elevate this session only — UAC prompts again next launch"
+              >
+                Just this time
+              </button>
+              <button
+                className="admin-banner-dismiss"
+                onClick={dismissAdminBanner}
+                title="Dismiss (re-enable in Settings → Performance)"
+              >
+                &times;
+              </button>
+            </div>
+          )}
 
         {/* Update banner — shows when an update is downloaded and ready */}
         {updateStatus?.phase === "downloaded" && (

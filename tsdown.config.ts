@@ -16,6 +16,11 @@ export default defineConfig([
   },
   {
     ...shared,
-    entry: ["src/preload.ts", "src/scan/scanWorker.ts", "src/scan/fullDiffWorker.ts"],
+    entry: [
+      "src/preload.ts",
+      "src/scan/scanWorker.ts",
+      "src/scan/fullDiffWorker.ts",
+      "src/scan/folderTreeWorker.ts",
+    ],
   },
 ]);

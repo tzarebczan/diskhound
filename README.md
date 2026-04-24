@@ -27,15 +27,17 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 
 ## Features
 
-- 🦀 **Native Rust scanner** — uses Win32 `FindFirstFileExW` on Windows and `jwalk` on macOS/Linux. Scans 100K+ files in seconds.
+- 🦀 **Native Rust scanner** — reads the NTFS Master File Table directly on Windows drives (with admin), dropping cold scans on a 7 M-file drive from ~20 minutes to **under 90 seconds**. Falls back cleanly to `FindFirstFileExW` without admin, or `jwalk` on macOS/Linux.
 - 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Two layouts: "Size" (largest-first, globally ordered) and "Tree" (WinDirStat-style — files cluster inside their parent directory's rectangle, with subtle depth-modulated folder outlines). Right-click any rectangle for reveal/open/trash/move actions.
 - ⚡ **Incremental monitoring** — after the first full scan, DiskHound tracks disk changes via the NTFS USN journal (Windows) and an mtime-based smart rescan (cross-platform). Repeat scans on a mostly-idle drive are 10–50× faster than a full walk — typical hourly checks complete in seconds, populating the Changes tab automatically.
 - 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index. History entries show an icon indicating whether they came from a fast delta scan or a full walk.
 - 🔍 **Duplicate detection** — SHA-256 content hashing with two-pass optimization (4KB prefix rejection, then full hash). Concurrent I/O. "Keep newest" / "Keep oldest" bulk actions.
-- 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click.
+- 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click. Offers a one-UAC-prompt elevated retry for protected Windows paths.
 - 📁 **Folder explorer** — drill into directories with breadcrumb navigation and proportional size bars.
 - 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
-- ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. List and treemap views; multi-instance processes (Chrome, Electron apps, etc.) collapse into a single parent row showing totals. Kill processes with soft/hard signals.
+- ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, processes on Y, amber intensity = CPU share), and Affinity Rules (Process-Lasso-style pin-persistent CPU masks by exe name or path). Kill processes with soft/hard signals.
+- 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode / Copy engine chips) + process table with engine-chip drill-down. Filters out phantom Microsoft Basic Display Adapter entries.
+- 🔐 **One-UAC fast-scan mode** — Settings → Performance → "Always run as admin" registers a Scheduled Task bound to the current user's SID, so the normal shortcut auto-elevates with **zero UAC prompts** on every subsequent launch.
 - 🌓 **Dark & light themes** — with system preference detection. Toggle from the status bar.
 - ⌨️ **Keyboard navigation** — arrow keys in the file list, Enter to open, Delete to trash, Ctrl+F to search.
 - 🔄 **Auto-update** — via `electron-updater` with GitHub Releases. UAC elevation supported for system-wide installs.

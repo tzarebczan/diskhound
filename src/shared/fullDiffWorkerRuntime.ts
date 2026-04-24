@@ -364,9 +364,14 @@ export async function runFullDiffWorker(
   // touched, so the cost in the common "small diff" case is zero.
   // V8 will still abort if the OS actually runs out, but on a modern
   // Windows box with ~16+ GB RAM this gives us comfortable headroom.
+  // 8 GB old-gen ceiling — matches the folder-tree worker bump.
+  // On 8M-file drives the full-diff worker builds two path→size maps
+  // plus a merged delta array, working set ~5-6 GB; 4 GB OOMed
+  // repeatedly. Reserved pages don't commit until touched, so small
+  // diffs still pay zero extra cost.
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      maxOldGenerationSizeMb: 4096,
+      maxOldGenerationSizeMb: 8192,
       maxYoungGenerationSizeMb: 256,
     },
   });
@@ -422,7 +427,7 @@ export async function runFullDiffWorker(
         // the crash log line reads as a diagnosis rather than a
         // generic "exited with code 1."
         const detail = code === 1
-          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 4 GB heap — consider a smaller diff pair.`
+          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 8 GB heap — consider a smaller diff pair.`
           : `Full diff worker exited with code ${code}`;
         settle(() => reject(new Error(detail)));
       }

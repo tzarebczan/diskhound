@@ -226,6 +226,66 @@ export function getCursorForRoot(rootPath: string): VolumeCursor | null {
   return getCursor(volumeForPath(rootPath));
 }
 
+/**
+ * Quick "are there any changes since last scan" probe used by the
+ * rescan fast-path. Spawns the Rust scanner in `journal` mode against
+ * the volume's saved cursor; if zero records have been emitted since
+ * then, the volume is unchanged and the caller can skip the full scan
+ * entirely.
+ *
+ * Returns:
+ *   - { changed: false, newCursor } — safe to reuse last snapshot
+ *   - { changed: true, ... }        — rescan required
+ *   - null                          — no baseline cursor / non-NTFS /
+ *                                     spawn failure; caller falls back
+ *                                     to full scan
+ */
+export interface UsnChangeProbe {
+  changed: boolean;
+  recordCount: number;
+  newCursor?: number;
+  newJournalId?: number;
+  reason?: string;
+}
+
+export async function checkUsnForAnyChanges(
+  scannerPath: string,
+  rootPath: string,
+): Promise<UsnChangeProbe | null> {
+  const cursor = getCursorForRoot(rootPath);
+  if (!cursor) return null;
+
+  const volume = volumeForPath(rootPath);
+  if (!volume) return null;
+  const driveLetter = volume[0];
+  if (!driveLetter) return null;
+
+  const journal = await spawnJournal(scannerPath, driveLetter, cursor.cursor);
+  if (!journal) {
+    return { changed: true, recordCount: 0, reason: "journal-spawn-failed" };
+  }
+
+  // Journal ID mismatch = journal was disabled+re-enabled or reformatted
+  // between scans; our saved cursor is meaningless against the new
+  // journal. Force a full rescan.
+  if (journal.cursorEnd.journalId !== cursor.journalId) {
+    return {
+      changed: true,
+      recordCount: journal.records.length,
+      reason: "journal-id-mismatch",
+      newCursor: journal.cursorEnd.cursor,
+      newJournalId: journal.cursorEnd.journalId,
+    };
+  }
+
+  return {
+    changed: journal.cursorEnd.recordsEmitted > 0,
+    recordCount: journal.cursorEnd.recordsEmitted,
+    newCursor: journal.cursorEnd.cursor,
+    newJournalId: journal.cursorEnd.journalId,
+  };
+}
+
 /** Convenience for the main-process post-scan capture path. */
 export async function captureCursorAfterScan(
   scannerPath: string,

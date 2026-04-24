@@ -46,9 +46,32 @@ export function usePathActions() {
     clearBusy(sourcePath);
     if (result?.ok) {
       toast("success", "Moved & linked", result.message);
-    } else {
-      toast("error", "Easy Move failed", result?.message ?? "Unknown error");
+      return;
     }
+    // Permission-denied path — offer a UAC-elevated retry. Most users
+    // hit this on Windows-protected files (\Windows\LiveKernelReports
+    // dumps, etc.); one UAC prompt is worth it rather than making them
+    // relaunch the whole app as admin.
+    if (result?.requiresElevation) {
+      const ok = window.confirm(
+        `${result.message}\n\n` +
+        `Retry with admin rights? Windows will show a UAC prompt.`,
+      );
+      if (!ok) {
+        toast("info", "Move cancelled");
+        return;
+      }
+      markBusy(sourcePath);
+      const elevated = await nativeApi.easyMoveElevated(sourcePath, dest);
+      clearBusy(sourcePath);
+      if (elevated?.ok) {
+        toast("success", "Moved & linked (admin)", elevated.message);
+      } else {
+        toast("error", "Elevated move failed", elevated?.message ?? "Unknown error");
+      }
+      return;
+    }
+    toast("error", "Easy Move failed", result?.message ?? "Unknown error");
   }, [markBusy, clearBusy]);
 
   /**
@@ -64,12 +87,19 @@ export function usePathActions() {
     const moved: string[] = [];
     const failures: { path: string; message: string }[] = [];
 
+    // Batch-level elevation strategy: try each file non-elevated; if
+    // any comes back with `requiresElevation`, collect them and prompt
+    // ONCE at the end rather than per-file. Saves the user from 10×
+    // UAC prompts when cleaning out a folder full of protected files.
+    const pendingElevated: string[] = [];
     for (const path of sourcePaths) {
       markBusy(path);
       try {
         const result = await nativeApi.easyMove(path, dest);
         if (result?.ok) {
           moved.push(path);
+        } else if (result?.requiresElevation) {
+          pendingElevated.push(path);
         } else {
           failures.push({ path, message: result?.message ?? "Unknown error" });
         }
@@ -77,6 +107,35 @@ export function usePathActions() {
         failures.push({ path, message: err instanceof Error ? err.message : String(err) });
       } finally {
         clearBusy(path);
+      }
+    }
+    if (pendingElevated.length > 0) {
+      const ok = window.confirm(
+        `${pendingElevated.length} file${pendingElevated.length === 1 ? "" : "s"} ` +
+        `need admin rights. Windows will show one UAC prompt per file.\n\nContinue?`,
+      );
+      if (ok) {
+        for (const path of pendingElevated) {
+          markBusy(path);
+          try {
+            const elevated = await nativeApi.easyMoveElevated(path, dest);
+            if (elevated?.ok) {
+              moved.push(path);
+            } else {
+              failures.push({
+                path,
+                message: elevated?.message ?? "Elevated move failed",
+              });
+            }
+          } catch (err) {
+            failures.push({
+              path,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          } finally {
+            clearBusy(path);
+          }
+        }
       }
     }
 

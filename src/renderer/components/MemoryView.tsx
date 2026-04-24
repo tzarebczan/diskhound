@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
+import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
+import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
 import { nativeApi } from "../nativeApi";
+import { GpuView } from "./GpuView";
 import {
   ProcessHeatmap,
   updateProcessHistory,
@@ -13,7 +15,7 @@ import { toast } from "./Toasts";
 
 type SortField = "memory" | "cpu" | "name" | "pid";
 type SortDir = "asc" | "desc";
-type ViewMode = "list" | "treemap" | "heatmap";
+type ViewMode = "list" | "treemap" | "heatmap" | "gpu" | "rules";
 /**
  * CPU percent display mode:
  * - "overall": each process shown as its share of 100% total system CPU.
@@ -48,6 +50,8 @@ function getInitialViewMode(): ViewMode {
   const stored = window.localStorage.getItem(VIEW_MODE_KEY);
   if (stored === "treemap") return "treemap";
   if (stored === "heatmap") return "heatmap";
+  if (stored === "gpu") return "gpu";
+  if (stored === "rules") return "rules";
   return "list";
 }
 
@@ -71,6 +75,19 @@ export function MemoryView() {
   const [refreshMs, setRefreshMs] = useState<number>(getInitialRefreshMs);
   const [cpuScale, setCpuScale] = useState<CpuScale>(getInitialCpuScale);
   const [lastSampleMs, setLastSampleMs] = useState<number | null>(null);
+  // Active affinity rules, poll-refreshed at a lower cadence than the
+  // memory snapshot. ProcessRow uses this to badge rows whose exe name
+  // matches a rule, and the context menu uses it to decide between
+  // "Pin rule…" and "Edit rule…".
+  const [affinityRules, setAffinityRules] = useState<AffinityRule[]>([]);
+  useEffect(() => {
+    const refresh = () => {
+      void nativeApi.getAffinityRules().then((rules) => setAffinityRules(rules));
+    };
+    refresh();
+    const id = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(id);
+  }, []);
   const timerRef = useRef<number | null>(null);
 
   // Shared context menu used by both ProcessTreemap and ProcessHeatmap —
@@ -392,6 +409,39 @@ export function MemoryView() {
             </svg>
             CPU Heatmap
           </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === "gpu"}
+            className={`memory-view-tab ${viewMode === "gpu" ? "active" : ""}`}
+            onClick={() => setViewMode("gpu")}
+            title="GPU — per-process GPU utilisation + VRAM, adapter overview"
+          >
+            {/* Stylised "GPU module" — a rounded rectangle card with
+                radiating heat lines, to distinguish from the Heatmap
+                icon and signal "hardware device" rather than "graph". */}
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="1.5" y="4" width="11" height="6" rx="1" />
+              <circle cx="5" cy="7" r="1.2" />
+              <path d="M4 1.5V3.5M7 1.5V3.5M10 1.5V3.5M4 10.5V12.5M7 10.5V12.5M10 10.5V12.5" opacity="0.6" />
+            </svg>
+            GPU
+          </button>
+          <button
+            role="tab"
+            aria-selected={viewMode === "rules"}
+            className={`memory-view-tab ${viewMode === "rules" ? "active" : ""}`}
+            onClick={() => setViewMode("rules")}
+            title="CPU affinity rules — pin processes to specific cores persistently"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="1.5" y="1.5" width="4" height="4" />
+              <rect x="8.5" y="1.5" width="4" height="4" />
+              <rect x="1.5" y="8.5" width="4" height="4" />
+              <rect x="8.5" y="8.5" width="4" height="4" />
+              <path d="M5.5 3.5H8.5M5.5 10.5H8.5M3.5 5.5V8.5M10.5 5.5V8.5" opacity="0.5" />
+            </svg>
+            Affinity Rules
+          </button>
         </div>
         <input
           className="filter-input"
@@ -456,6 +506,10 @@ export function MemoryView() {
           onToggleSort={toggleSort}
           killingPid={killingPid}
           onKill={kill}
+          affinityRules={affinityRules}
+          onRuleChanged={() => {
+            void nativeApi.getAffinityRules().then(setAffinityRules);
+          }}
         />
       )}
       {viewMode === "treemap" && (
@@ -463,6 +517,10 @@ export function MemoryView() {
           processes={visibleProcesses}
           totalBytes={snapshot.totalBytes}
           onKill={kill}
+          affinityRules={affinityRules}
+          onRuleChanged={() => {
+            void nativeApi.getAffinityRules().then(setAffinityRules);
+          }}
         />
       )}
       {viewMode === "heatmap" && (
@@ -474,9 +532,14 @@ export function MemoryView() {
           filter={filter}
           cpuScale={cpuScale}
           cpuCount={snapshot.cpuCount}
+          affinityRules={affinityRules}
           onKill={kill}
           onOpenContextMenu={openViewContextMenu}
         />
+      )}
+      {viewMode === "gpu" && <GpuView refreshMs={refreshMs} />}
+      {viewMode === "rules" && (
+        <AffinityRulesView cpuCount={snapshot.cpuCount} />
       )}
 
       {/* Shared context menu — heatmap opens it via callback; rendered at
@@ -487,8 +550,12 @@ export function MemoryView() {
           x={viewContextMenu.x}
           y={viewContextMenu.y}
           proc={viewContextMenu.process}
+          matchedRule={findMatchingRule(affinityRules, viewContextMenu.process)}
           onClose={closeViewContextMenu}
           onKill={kill}
+          onRuleChanged={() => {
+            void nativeApi.getAffinityRules().then(setAffinityRules);
+          }}
         />
       )}
 
@@ -561,8 +628,10 @@ function ProcessList(props: {
   onToggleSort: (f: SortField) => void;
   killingPid: number | null;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  affinityRules: AffinityRule[];
+  onRuleChanged: () => void;
 }) {
-  const { processes, total, totalBytes, filter, sortField, sortDir, onToggleSort, killingPid, onKill } = props;
+  const { processes, total, totalBytes, filter, sortField, sortDir, onToggleSort, killingPid, onKill, affinityRules, onRuleChanged } = props;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const groups = useMemo(
@@ -613,6 +682,7 @@ function ProcessList(props: {
                   totalBytes={totalBytes}
                   isBusy={killingPid === p.pid}
                   onKill={onKill}
+                  affinityRule={findMatchingRule(affinityRules, p)}
                 />
               );
             }
@@ -626,6 +696,8 @@ function ProcessList(props: {
                 onToggle={() => toggleGroup(g.name)}
                 killingPid={killingPid}
                 onKill={onKill}
+                affinityRules={affinityRules}
+                onRuleChanged={onRuleChanged}
               />
             );
           })
@@ -643,8 +715,14 @@ function ProcessGroupRows(props: {
   onToggle: () => void;
   killingPid: number | null;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  affinityRules: AffinityRule[];
+  onRuleChanged: () => void;
 }) {
-  const { group, maxMem, totalBytes, isExpanded, onToggle, killingPid, onKill } = props;
+  const { group, maxMem, totalBytes, isExpanded, onToggle, killingPid, onKill, affinityRules } = props;
+  // Group-level rule match — if every member of this family matches the
+  // same rule, we badge the group header too. Callers hitting Expand will
+  // see per-child badges (which may differ in rare multi-pattern setups).
+  const groupRule = findMatchingRule(affinityRules, group.processes[0]!);
   const memPct = maxMem > 0 ? (group.totalMemory / maxMem) * 100 : 0;
   const totalPct = totalBytes > 0 ? (group.totalMemory / totalBytes) * 100 : 0;
   const memClass = totalPct > 5 ? "high" : totalPct > 1 ? "mid" : "low";
@@ -683,6 +761,7 @@ function ProcessGroupRows(props: {
         <div className="memory-row-name memory-row-name-group">
           <ProcessIcon exePath={group.exePath} className="memory-row-icon-img memory-row-icon-inline" />
           {group.name}
+          {groupRule && <AffinityRulePinIcon rule={groupRule} />}
           {group.isSystem && <span className="memory-row-system-badge" title="System processes">sys</span>}
         </div>
         <div className="memory-row-actions" />
@@ -695,6 +774,7 @@ function ProcessGroupRows(props: {
           totalBytes={totalBytes}
           isBusy={killingPid === p.pid}
           onKill={onKill}
+          affinityRule={findMatchingRule(affinityRules, p)}
           isChild
         />
       ))}
@@ -708,9 +788,10 @@ function ProcessRow(props: {
   totalBytes: number;
   isBusy: boolean;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  affinityRule?: AffinityRule | null;
   isChild?: boolean;
 }) {
-  const { proc, maxMem, totalBytes, isBusy, onKill, isChild } = props;
+  const { proc, maxMem, totalBytes, isBusy, onKill, affinityRule, isChild } = props;
   const memPct = maxMem > 0 ? (proc.memoryBytes / maxMem) * 100 : 0;
   const totalPct = totalBytes > 0 ? (proc.memoryBytes / totalBytes) * 100 : 0;
   const memClass = totalPct > 5 ? "high" : totalPct > 1 ? "mid" : "low";
@@ -746,6 +827,7 @@ function ProcessRow(props: {
       <div className="memory-row-name">
         {isChild && <span className="memory-row-child-prefix">{"\u2514"}</span>}
         {proc.name}
+        {affinityRule && <AffinityRulePinIcon rule={affinityRule} />}
         {!proc.userOwned && <span className="memory-row-system-badge" title="System process">sys</span>}
       </div>
       <div className="memory-row-actions">
@@ -753,6 +835,41 @@ function ProcessRow(props: {
         <button className="action-btn danger" disabled={isBusy} onClick={() => onKill(proc, true)} title="Force terminate (SIGKILL/taskkill /F)">Kill</button>
       </div>
     </div>
+  );
+}
+
+/**
+ * Small amber grid-pin icon rendered beside a process name when an
+ * affinity rule is actively pinning it. Tooltip describes the rule
+ * so users don't need to open the Rules tab to understand why their
+ * process is constrained.
+ *
+ * Click-through is intentional — the icon itself doesn't handle click.
+ * Right-click on the row opens the context menu which will offer
+ * "Edit affinity rule…" (see ProcessContextMenu).
+ */
+function AffinityRulePinIcon({ rule }: { rule: AffinityRule }) {
+  // Count set bits in the mask to summarise "pinned to N cores".
+  let bits = 0;
+  let mask = rule.affinityMask >>> 0;
+  while (mask) {
+    bits += mask & 1;
+    mask >>>= 1;
+  }
+  const tooltip =
+    `Affinity rule: ${rule.name || rule.matchPattern}\n` +
+    `${rule.matchType === "exe_name" ? "Matches exe name" : "Matches path"}: ${rule.matchPattern}\n` +
+    `Pinned to ${bits} core${bits === 1 ? "" : "s"}` +
+    (rule.appliedCount > 0 ? ` · applied ${rule.appliedCount}×` : "");
+  return (
+    <span className="memory-row-affinity-pin" title={tooltip} aria-label="Affinity rule active">
+      <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2">
+        <rect x="0.5" y="0.5" width="3.5" height="3.5" />
+        <rect x="6"   y="0.5" width="3.5" height="3.5" />
+        <rect x="0.5" y="6"   width="3.5" height="3.5" />
+        <rect x="6"   y="6"   width="3.5" height="3.5" fill="currentColor" />
+      </svg>
+    </span>
   );
 }
 
@@ -1015,8 +1132,10 @@ function ProcessTreemap(props: {
   processes: ProcessInfo[];
   totalBytes: number;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  affinityRules: AffinityRule[];
+  onRuleChanged: () => void;
 }) {
-  const { processes, onKill } = props;
+  const { processes, onKill, affinityRules, onRuleChanged } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -1226,12 +1345,40 @@ function ProcessTreemap(props: {
           ctx.fillText(sizeLabel, labelX, labelY + fontSize + 2, maxLabelW);
         }
       }
+
+      // Affinity-rule marker — amber corner triangle in the top-right,
+      // sized so it's visible but doesn't compete with the label. Only
+      // drawn on tiles big enough to read (16×16 minimum) so the user
+      // isn't confused by a lone amber pixel on a sliver. The triangle
+      // shape is intentionally distinct from any other treemap marker.
+      if (r.w >= 16 && r.h >= 16) {
+        const matchedRule = findMatchingRule(affinityRules, r.process);
+        if (matchedRule) {
+          const size = Math.min(14, Math.max(7, Math.floor(Math.min(r.w, r.h) * 0.11)));
+          // dark underlay for contrast against light tile colors
+          ctx.fillStyle = "rgba(0,0,0,0.55)";
+          ctx.beginPath();
+          ctx.moveTo(r.x + r.w - size - 2, r.y + 1);
+          ctx.lineTo(r.x + r.w - 1,         r.y + 1);
+          ctx.lineTo(r.x + r.w - 1,         r.y + size + 2);
+          ctx.closePath();
+          ctx.fill();
+          // amber foreground — the recognizable rule colour
+          ctx.fillStyle = "rgba(245, 158, 11, 0.96)";
+          ctx.beginPath();
+          ctx.moveTo(r.x + r.w - size - 1, r.y + 2);
+          ctx.lineTo(r.x + r.w - 2,         r.y + 2);
+          ctx.lineTo(r.x + r.w - 2,         r.y + size + 1);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
     }
     // Read the module counter for observability; the state-backed
     // `appearanceTick` in the deps below is what actually drives
     // repaints when icons resolve.
     void appearanceVersion;
-  }, [processes, dims, appearanceTick]);
+  }, [processes, dims, appearanceTick, affinityRules]);
 
   const hitTest = useCallback((e: MouseEvent): ProcessInfo | null => {
     const canvas = canvasRef.current;
@@ -1317,8 +1464,10 @@ function ProcessTreemap(props: {
           x={contextMenu.x}
           y={contextMenu.y}
           proc={contextMenu.process}
+          matchedRule={findMatchingRule(affinityRules, contextMenu.process)}
           onClose={() => setContextMenu(null)}
           onKill={onKill}
+          onRuleChanged={onRuleChanged}
         />
       )}
       {/* Overflow strip — renders only when the machine has more than
@@ -1356,12 +1505,22 @@ function ProcessContextMenu(props: {
   x: number;
   y: number;
   proc: ProcessInfo;
+  matchedRule: AffinityRule | null;
   onClose: () => void;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  onRuleChanged: () => void;
 }) {
-  const { x, y, proc, onClose, onKill } = props;
+  const { x, y, proc, matchedRule, onClose, onKill, onRuleChanged } = props;
   const menuRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x, y });
+  const [affinityOpen, setAffinityOpen] = useState(false);
+  const [pinRuleOpen, setPinRuleOpen] = useState(false);
+  // When a rule already exists for this process, clicking "Edit
+  // affinity rule…" opens the full editor pre-populated with the
+  // existing rule. Separate from pinRuleOpen because editing uses a
+  // different data source (the existing rule object, not a
+  // freshly-computed mask).
+  const [editRuleOpen, setEditRuleOpen] = useState(false);
 
   useEffect(() => {
     const el = menuRef.current;
@@ -1427,6 +1586,47 @@ function ProcessContextMenu(props: {
         </>
       )}
       <button
+        className="process-ctx-item"
+        role="menuitem"
+        onClick={() => setAffinityOpen(true)}
+      >
+        <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+          <rect x="2" y="2" width="4" height="4" />
+          <rect x="8" y="2" width="4" height="4" />
+          <rect x="2" y="8" width="4" height="4" />
+          <rect x="8" y="8" width="4" height="4" />
+        </svg>
+        Set CPU affinity… (once)
+      </button>
+      {matchedRule ? (
+        <button
+          className="process-ctx-item process-ctx-highlight"
+          role="menuitem"
+          onClick={() => setEditRuleOpen(true)}
+          title={`Rule already exists: ${matchedRule.name || matchedRule.matchPattern}. Click to edit.`}
+        >
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <path d="M2 10L2 12L4 12L11 5L9 3L2 10Z" />
+            <path d="M8.5 3.5L10.5 5.5" />
+          </svg>
+          Edit affinity rule…
+        </button>
+      ) : (
+        <button
+          className="process-ctx-item"
+          role="menuitem"
+          onClick={() => setPinRuleOpen(true)}
+          title="Create a persistent rule that re-applies this affinity every time the process starts"
+        >
+          <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+            <path d="M7 2L7 9M7 9L4 6M7 9L10 6" />
+            <circle cx="7" cy="11.5" r="1" />
+          </svg>
+          Pin CPU affinity rule…
+        </button>
+      )}
+      <div className="process-ctx-divider" />
+      <button
         className="process-ctx-item process-ctx-warn"
         role="menuitem"
         onClick={() => act(() => onKill(proc, false))}
@@ -1447,6 +1647,301 @@ function ProcessContextMenu(props: {
         </svg>
         Force kill
       </button>
+      {affinityOpen && (
+        <CpuAffinityDialog
+          proc={proc}
+          onClose={() => {
+            setAffinityOpen(false);
+            onClose();
+          }}
+        />
+      )}
+      {pinRuleOpen && <PinAffinityRuleDialog
+        proc={proc}
+        onClose={() => {
+          setPinRuleOpen(false);
+          onClose();
+        }}
+        onSaved={() => {
+          onRuleChanged();
+        }}
+      />}
+      {editRuleOpen && matchedRule && (
+        <EditAffinityRuleDialog
+          rule={matchedRule}
+          onClose={() => {
+            setEditRuleOpen(false);
+            onClose();
+          }}
+          onSaved={() => {
+            onRuleChanged();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Opens the AffinityRuleEditor seeded with an existing rule. Used from
+ * the context menu when the process already matches a rule — the "take
+ * me there" path that avoids creating a duplicate. Separate from
+ * PinAffinityRuleDialog because we don't need to re-read the process's
+ * current mask; the rule itself already has the intended mask.
+ */
+function EditAffinityRuleDialog({
+  rule,
+  onClose,
+  onSaved,
+}: {
+  rule: AffinityRule;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [cpuCount, setCpuCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // We need a cpu count for the editor's grid. Any PID works — use
+    // the editor's dummy call just to read the count. If it fails we
+    // still render with a best-guess 32-bit count (rule mask is 32-bit
+    // anyway and Windows caps affinity groups at 64 CPUs).
+    void nativeApi
+      .getCpuAffinity(0)
+      .then((res) => {
+        if (cancelled) return;
+        setCpuCount(res.cpuCount || 32);
+      })
+      .catch(() => {
+        if (!cancelled) setCpuCount(32);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  if (cpuCount === null) {
+    return (
+      <div className="cpu-affinity-overlay" onClick={onClose}>
+        <div className="cpu-affinity-card" onClick={(e) => e.stopPropagation()}>
+          <div className="cpu-affinity-loading">Loading rule editor…</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <AffinityRuleEditor
+      rule={rule}
+      cpuCount={cpuCount}
+      onClose={onClose}
+      onSaved={() => {
+        toast("success", "Affinity rule updated", rule.matchPattern);
+        onSaved();
+        onClose();
+      }}
+    />
+  );
+}
+
+/**
+ * Thin wrapper that seeds an AffinityRuleEditor with a process's
+ * exe name + current affinity mask, and hands the os.cpus() count
+ * through. Invoked from the Processes right-click menu.
+ */
+function PinAffinityRuleDialog({
+  proc,
+  onClose,
+  onSaved,
+}: {
+  proc: ProcessInfo;
+  onClose: () => void;
+  onSaved?: () => void;
+}) {
+  const [rule, setRule] = useState<AffinityRule | null>(null);
+  const [cpuCount, setCpuCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Fetch current affinity + cpu count in parallel so the editor
+    // opens with "what this process is actually using right now" as
+    // the pre-selected mask. Saves the user the step of figuring
+    // out what to pin to.
+    void nativeApi.getCpuAffinity(proc.pid).then((res) => {
+      if (cancelled) return;
+      const count = res.cpuCount || 1;
+      const mask = res.ok && res.affinityMask !== undefined
+        ? res.affinityMask
+        : count >= 32 ? 0xFFFFFFFF : (1 << count) - 1;
+      const basename = proc.exePath
+        ? (proc.exePath.split(/[\\/]/).pop() || "").toLowerCase()
+        : proc.name.toLowerCase();
+      setCpuCount(count);
+      setRule({
+        id: typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `rule-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        name: proc.name,
+        enabled: true,
+        matchType: "exe_name",
+        matchPattern: basename,
+        affinityMask: mask,
+        createdAt: Date.now(),
+        lastAppliedAt: null,
+        appliedCount: 0,
+      });
+    });
+    return () => { cancelled = true; };
+  }, [proc.pid, proc.exePath, proc.name]);
+
+  if (!rule || cpuCount === null) {
+    return (
+      <div className="cpu-affinity-overlay" onClick={onClose}>
+        <div className="cpu-affinity-card" onClick={(e) => e.stopPropagation()}>
+          <div className="cpu-affinity-loading">Reading current affinity…</div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <AffinityRuleEditor
+      rule={rule}
+      cpuCount={cpuCount}
+      onClose={onClose}
+      onSaved={() => {
+        toast(
+          "success",
+          "Affinity rule created",
+          `${rule.matchPattern} will re-pin every time it launches.`,
+        );
+        onSaved?.();
+        onClose();
+      }}
+    />
+  );
+}
+
+/**
+ * Modal for editing a process's CPU affinity mask. Loads the current
+ * mask on mount, renders one checkbox per logical CPU, applies on
+ * Save. Cancel leaves the mask untouched. Zero-selection is rejected
+ * client-side (a zero affinity mask would make the process unable to
+ * run on anything).
+ */
+function CpuAffinityDialog({
+  proc,
+  onClose,
+}: {
+  proc: ProcessInfo;
+  onClose: () => void;
+}) {
+  const [state, setState] = useState<
+    | { phase: "loading" }
+    | { phase: "ready"; cpuCount: number; selected: boolean[] }
+    | { phase: "error"; message: string }
+  >({ phase: "loading" });
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void nativeApi.getCpuAffinity(proc.pid).then((res) => {
+      if (cancelled) return;
+      if (!res.ok || res.affinityMask === undefined) {
+        setState({ phase: "error", message: res.message ?? "Couldn't read affinity mask" });
+        return;
+      }
+      const selected = Array.from({ length: res.cpuCount }, (_, i) => (res.affinityMask! & (1 << i)) !== 0);
+      setState({ phase: "ready", cpuCount: res.cpuCount, selected });
+    });
+    return () => { cancelled = true; };
+  }, [proc.pid]);
+
+  const toggle = (i: number) => {
+    if (state.phase !== "ready") return;
+    const next = state.selected.slice();
+    next[i] = !next[i];
+    setState({ ...state, selected: next });
+  };
+  const selectAll = () => {
+    if (state.phase !== "ready") return;
+    setState({ ...state, selected: state.selected.map(() => true) });
+  };
+  const selectEven = () => {
+    if (state.phase !== "ready") return;
+    // Even-numbered cores often map to distinct physical cores on
+    // hyperthreaded CPUs — restricting to evens gives the process
+    // the wider of the pair and avoids sharing an L1 with an SMT
+    // sibling. Common tuning trick for perf-sensitive workloads.
+    setState({
+      ...state,
+      selected: state.selected.map((_, i) => i % 2 === 0),
+    });
+  };
+
+  const save = async () => {
+    if (state.phase !== "ready") return;
+    const mask = state.selected.reduce(
+      (acc, on, i) => (on ? acc | (1 << i) : acc),
+      0,
+    );
+    if (mask === 0) {
+      toast("error", "Select at least one CPU");
+      return;
+    }
+    setSaving(true);
+    const result = await nativeApi.setCpuAffinity(proc.pid, mask);
+    setSaving(false);
+    if (result.ok) {
+      toast("success", "Affinity updated", `PID ${proc.pid} now restricted to ${state.selected.filter(Boolean).length} CPU(s)`);
+      onClose();
+    } else {
+      toast("error", "Couldn't set affinity", result.message ?? "Check admin rights");
+    }
+  };
+
+  return (
+    <div className="cpu-affinity-overlay" onClick={onClose}>
+      <div className="cpu-affinity-card" onClick={(e) => e.stopPropagation()}>
+        <div className="cpu-affinity-header">
+          <div className="cpu-affinity-title">CPU Affinity</div>
+          <div className="cpu-affinity-sub">{proc.name} · PID {proc.pid}</div>
+        </div>
+        {state.phase === "loading" && (
+          <div className="cpu-affinity-loading">Reading current mask…</div>
+        )}
+        {state.phase === "error" && (
+          <div className="cpu-affinity-error">{state.message}</div>
+        )}
+        {state.phase === "ready" && (
+          <>
+            <div className="cpu-affinity-grid">
+              {state.selected.map((on, i) => (
+                <button
+                  key={i}
+                  className={`cpu-affinity-cell ${on ? "on" : "off"}`}
+                  onClick={() => toggle(i)}
+                  title={`CPU ${i}`}
+                >
+                  {i}
+                </button>
+              ))}
+            </div>
+            <div className="cpu-affinity-presets">
+              <button className="action-btn" onClick={selectAll}>All cores</button>
+              <button className="action-btn" onClick={selectEven}>Even cores only</button>
+            </div>
+          </>
+        )}
+        <div className="cpu-affinity-actions">
+          <button className="action-btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button
+            className="action-btn primary"
+            onClick={() => void save()}
+            disabled={saving || state.phase !== "ready"}
+          >
+            {saving ? "Saving…" : "Apply"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1591,6 +2086,398 @@ function RefreshIntervalChip(props: {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Affinity-rules management view. Lists all persistent rules, lets
+ * the user toggle/edit/delete. Rules are evaluated by the backend on
+ * every process-monitor tick (~4 s); this view is just a CRUD UI over
+ * the list.
+ *
+ * Layout mirrors Process Lasso's dense rules table: one row per rule
+ * with an enable checkbox, process name/pattern, CPU mask bits as a
+ * compact pill, applied counter, and per-row actions. Empty state
+ * points the user back at the Processes view and the right-click
+ * flow to add their first rule.
+ */
+function AffinityRulesView({ cpuCount }: { cpuCount: number }) {
+  const [rules, setRules] = useState<AffinityRule[] | null>(null);
+  const [editingRule, setEditingRule] = useState<AffinityRule | null>(null);
+
+  const reload = async () => {
+    const next = await nativeApi.getAffinityRules();
+    setRules(next);
+  };
+
+  useEffect(() => {
+    void reload();
+    // Light polling so "lastAppliedAt" / "appliedCount" update
+    // reactively as the engine fires rules in the background. 3 s is
+    // fast enough to feel live without hammering settings reads.
+    const id = window.setInterval(() => { void reload(); }, 3000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const toggleEnabled = async (rule: AffinityRule) => {
+    const next: AffinityRule = { ...rule, enabled: !rule.enabled };
+    await nativeApi.upsertAffinityRule(next);
+    await reload();
+  };
+  const deleteRule = async (rule: AffinityRule) => {
+    if (!window.confirm(`Delete affinity rule for "${rule.name}"?`)) return;
+    await nativeApi.deleteAffinityRule(rule.id);
+    await reload();
+    toast("success", "Rule deleted");
+  };
+
+  if (rules === null) {
+    return (
+      <div className="affinity-rules-empty">
+        <div>Loading rules…</div>
+      </div>
+    );
+  }
+
+  if (rules.length === 0) {
+    return (
+      <div className="affinity-rules-empty">
+        <div className="affinity-rules-empty-title">No affinity rules yet</div>
+        <div className="affinity-rules-empty-body">
+          Pin a process to specific CPU cores persistently: switch to the
+          <strong> List </strong> or <strong> CPU Heatmap </strong> tab,
+          right-click a process, and choose <strong>Pin CPU affinity…</strong>.
+          DiskHound will re-apply the mask every time that executable
+          launches.
+        </div>
+      </div>
+    );
+  }
+
+  const enabledCount = rules.filter((r) => r.enabled).length;
+  return (
+    <div className="affinity-rules-view">
+      <div className="affinity-rules-header">
+        <div className="affinity-rules-summary">
+          <strong>{rules.length}</strong> rule{rules.length === 1 ? "" : "s"}
+          {" · "}
+          <span className={enabledCount === 0 ? "affinity-rules-dim" : ""}>
+            {enabledCount} active
+          </span>
+        </div>
+        <button
+          className="action-btn"
+          onClick={() => setEditingRule(createEmptyRule(cpuCount))}
+        >
+          + Add rule
+        </button>
+      </div>
+      <div className="affinity-rules-table">
+        <div className="affinity-rules-table-head">
+          <span className="affinity-rules-col-enabled" />
+          <span className="affinity-rules-col-name">Process</span>
+          <span className="affinity-rules-col-pattern">Pattern</span>
+          <span className="affinity-rules-col-mask">Affinity</span>
+          <span className="affinity-rules-col-applied">Applied</span>
+          <span className="affinity-rules-col-actions" />
+        </div>
+        {rules.map((rule) => (
+          <AffinityRuleRow
+            key={rule.id}
+            rule={rule}
+            cpuCount={cpuCount}
+            onToggle={() => void toggleEnabled(rule)}
+            onEdit={() => setEditingRule(rule)}
+            onDelete={() => void deleteRule(rule)}
+          />
+        ))}
+      </div>
+
+      {editingRule && (
+        <AffinityRuleEditor
+          rule={editingRule}
+          cpuCount={cpuCount}
+          onClose={() => setEditingRule(null)}
+          onSaved={async () => {
+            setEditingRule(null);
+            await reload();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function AffinityRuleRow({
+  rule,
+  cpuCount,
+  onToggle,
+  onEdit,
+  onDelete,
+}: {
+  rule: AffinityRule;
+  cpuCount: number;
+  onToggle: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  return (
+    <div className={`affinity-rules-row ${rule.enabled ? "" : "disabled"}`}>
+      <span className="affinity-rules-col-enabled">
+        <input
+          type="checkbox"
+          checked={rule.enabled}
+          onChange={onToggle}
+          title={rule.enabled ? "Disable rule" : "Enable rule"}
+        />
+      </span>
+      <span className="affinity-rules-col-name" title={rule.name}>
+        {rule.name}
+      </span>
+      <span className="affinity-rules-col-pattern">
+        <span className={`affinity-rules-badge match-${rule.matchType}`}>
+          {rule.matchType === "exe_name" ? "exe" : "path"}
+        </span>
+        <span className="affinity-rules-pattern" title={rule.matchPattern}>
+          {rule.matchPattern}
+        </span>
+      </span>
+      <span className="affinity-rules-col-mask">
+        <AffinityMaskBits mask={rule.affinityMask} cpuCount={cpuCount} />
+      </span>
+      <span className="affinity-rules-col-applied">
+        <span className="affinity-rules-count">{rule.appliedCount}</span>
+        {rule.lastAppliedAt && (
+          <span className="affinity-rules-applied-time">
+            {formatRelativeTime(rule.lastAppliedAt)}
+          </span>
+        )}
+      </span>
+      <span className="affinity-rules-col-actions">
+        <button className="action-btn" onClick={onEdit} title="Edit rule">
+          Edit
+        </button>
+        <button className="action-btn danger" onClick={onDelete} title="Delete rule">
+          Delete
+        </button>
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Compact per-CPU bit visualization. Lit square = CPU allowed, empty
+ * square = CPU blocked. Much denser than a text mask and faster to
+ * read than a comma list at a glance. Caps at 32 dots to keep the row
+ * height bounded on Threadripper-class boxes (64 / 128 cores would
+ * wrap otherwise).
+ */
+function AffinityMaskBits({ mask, cpuCount }: { mask: number; cpuCount: number }) {
+  const n = Math.min(cpuCount, 32);
+  const bits: boolean[] = [];
+  for (let i = 0; i < n; i++) bits.push((mask & (1 << i)) !== 0);
+  const all = bits.every((b) => b);
+  if (all && cpuCount <= 32) {
+    return <span className="affinity-rules-mask all-cores">ALL</span>;
+  }
+  return (
+    <span className="affinity-rules-mask" title={`mask=0x${mask.toString(16)}`}>
+      {bits.map((on, i) => (
+        <span key={i} className={`affinity-rules-bit ${on ? "on" : "off"}`} />
+      ))}
+      {cpuCount > 32 && (
+        <span className="affinity-rules-mask-overflow">+{cpuCount - 32}</span>
+      )}
+    </span>
+  );
+}
+
+function formatRelativeTime(ts: number): string {
+  const delta = Date.now() - ts;
+  if (delta < 0) return "just now";
+  const seconds = Math.floor(delta / 1000);
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function createEmptyRule(cpuCount: number): AffinityRule {
+  // Default new rules to "all cores" so saving without touching the
+  // cells writes the same mask the process already has. Users then
+  // toggle off the cores they want to exclude.
+  const mask = cpuCount >= 32 ? 0xFFFFFFFF : (1 << cpuCount) - 1;
+  return {
+    id: typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `rule-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    name: "",
+    enabled: true,
+    matchType: "exe_name",
+    matchPattern: "",
+    affinityMask: mask,
+    createdAt: Date.now(),
+    lastAppliedAt: null,
+    appliedCount: 0,
+  };
+}
+
+/**
+ * Modal for creating or editing an affinity rule. Shared between the
+ * "+ Add rule" button in the rules view and the context-menu's
+ * "Pin affinity…" flow (which pre-populates from a selected process).
+ */
+function AffinityRuleEditor({
+  rule,
+  cpuCount,
+  onClose,
+  onSaved,
+}: {
+  rule: AffinityRule;
+  cpuCount: number;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [name, setName] = useState(rule.name);
+  const [matchType, setMatchType] = useState(rule.matchType);
+  const [matchPattern, setMatchPattern] = useState(rule.matchPattern);
+  const [selected, setSelected] = useState<boolean[]>(() => {
+    const n = cpuCount;
+    return Array.from({ length: n }, (_, i) => (rule.affinityMask & (1 << i)) !== 0);
+  });
+  const [saving, setSaving] = useState(false);
+
+  const toggle = (i: number) => {
+    const next = selected.slice();
+    next[i] = !next[i];
+    setSelected(next);
+  };
+  const selectAll = () => setSelected(selected.map(() => true));
+  const selectNone = () => setSelected(selected.map(() => false));
+  const selectEven = () => setSelected(selected.map((_, i) => i % 2 === 0));
+
+  const save = async () => {
+    const trimmedPattern = matchPattern.trim().toLowerCase();
+    if (!trimmedPattern) {
+      toast("error", "Pattern required", "Enter an exe name or path substring");
+      return;
+    }
+    const mask = selected.reduce((acc, on, i) => (on ? acc | (1 << i) : acc), 0);
+    if (mask === 0) {
+      toast("error", "Select at least one CPU");
+      return;
+    }
+    setSaving(true);
+    const next: AffinityRule = {
+      ...rule,
+      name: name.trim() || trimmedPattern,
+      matchType,
+      matchPattern: trimmedPattern,
+      affinityMask: mask,
+    };
+    const result = await nativeApi.upsertAffinityRule(next);
+    setSaving(false);
+    if (result.ok) {
+      toast("success", "Rule saved");
+      onSaved();
+    } else {
+      toast("error", "Couldn't save rule", result.message);
+    }
+  };
+
+  return (
+    <div className="cpu-affinity-overlay" onClick={onClose}>
+      <div className="cpu-affinity-card affinity-rule-editor" onClick={(e) => e.stopPropagation()}>
+        <div className="cpu-affinity-header">
+          <div className="cpu-affinity-title">
+            {rule.appliedCount === 0 && rule.lastAppliedAt === null && !rule.name
+              ? "New affinity rule"
+              : `Edit rule: ${rule.name || rule.matchPattern}`}
+          </div>
+          <div className="cpu-affinity-sub">
+            The rule re-applies every ~4 s against running processes.
+          </div>
+        </div>
+
+        <div className="affinity-rule-field">
+          <label>Match on</label>
+          <div className="affinity-rule-match-toggle">
+            <button
+              type="button"
+              className={`affinity-rule-match-btn ${matchType === "exe_name" ? "active" : ""}`}
+              onClick={() => setMatchType("exe_name")}
+            >
+              Executable name
+            </button>
+            <button
+              type="button"
+              className={`affinity-rule-match-btn ${matchType === "exe_path" ? "active" : ""}`}
+              onClick={() => setMatchType("exe_path")}
+            >
+              Path substring
+            </button>
+          </div>
+        </div>
+
+        <div className="affinity-rule-field">
+          <label>
+            {matchType === "exe_name" ? "Exe name (case-insensitive)" : "Path substring"}
+          </label>
+          <input
+            className="filter-input"
+            value={matchPattern}
+            onInput={(e) => setMatchPattern((e.target as HTMLInputElement).value)}
+            placeholder={matchType === "exe_name" ? "chrome.exe" : "\\node_modules\\"}
+            autoFocus
+          />
+        </div>
+
+        <div className="affinity-rule-field">
+          <label>Display name (optional)</label>
+          <input
+            className="filter-input"
+            value={name}
+            onInput={(e) => setName((e.target as HTMLInputElement).value)}
+            placeholder="Defaults to pattern"
+          />
+        </div>
+
+        <div className="affinity-rule-field">
+          <label>Allowed CPUs</label>
+          <div className="cpu-affinity-grid">
+            {selected.map((on, i) => (
+              <button
+                key={i}
+                className={`cpu-affinity-cell ${on ? "on" : "off"}`}
+                onClick={() => toggle(i)}
+                title={`CPU ${i}`}
+              >
+                {i}
+              </button>
+            ))}
+          </div>
+          <div className="cpu-affinity-presets">
+            <button className="action-btn" onClick={selectAll}>All</button>
+            <button className="action-btn" onClick={selectNone}>None</button>
+            <button className="action-btn" onClick={selectEven}>Even only</button>
+          </div>
+        </div>
+
+        <div className="cpu-affinity-actions">
+          <button className="action-btn" onClick={onClose} disabled={saving}>Cancel</button>
+          <button
+            className="action-btn primary"
+            onClick={() => void save()}
+            disabled={saving}
+          >
+            {saving ? "Saving…" : "Save rule"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

@@ -12,7 +12,13 @@ export function formatCount(count: number): string {
 
 export function formatElapsed(ms: number): string {
   if (ms < 1_000) return `${ms}ms`;
-  return `${(ms / 1_000).toFixed(1)}s`;
+  const totalSeconds = ms / 1_000;
+  if (totalSeconds < 60) return `${totalSeconds.toFixed(1)}s`;
+  const mins = Math.floor(totalSeconds / 60);
+  const secs = Math.round(totalSeconds - mins * 60);
+  // Handle seconds rounding up to 60.
+  if (secs === 60) return `${mins + 1}m 0s`;
+  return `${mins}m ${secs}s`;
 }
 
 export function relativePath(path: string, rootPath: string | null): string {
