@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.8 — 2026-04-24
+
+EasyMove progress coverage extended to the two phases that used to
+run silently:
+
+- **Robocopy phase**. When a move hits the `/b` fallback (elevated
+  moves of TrustedInstaller-owned files like a 12 GB Hyper-V VHDX),
+  robocopy doesn't expose a parseable progress stream. We now poll
+  the destination file's size every 750 ms during the robocopy run
+  and emit progress events — user sees a live counter instead of a
+  frozen toast.
+- **Link-creation phase**. `createPlatformLink` is fast for
+  symbolic links but can take 1–2 seconds for mklink + junctions.
+  We now emit `phase: "linking"` immediately before that step so
+  the toast title flips to "Linking X…" instead of showing the
+  copying state at 100% until success lands.
+- **`phase: "done"` on every exit path**. Progress toast now
+  dismisses cleanly on robocopy failure, non-elevated short-
+  circuit, link-failure rollback, and the outer error catch — no
+  lingering "Copying" toasts after a failed move.
+
 ## 0.5.7 — 2026-04-24
 
 Scan-status copy was contradicting itself on rescans of multi-million-

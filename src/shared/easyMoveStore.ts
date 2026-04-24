@@ -311,7 +311,40 @@ export async function easyMove(
       logCrash("easy-move", `entering robocopy branch, isElevated=${elevated}`);
       if (elevated) {
         logCrash("easy-move", `invoking robocopy src=${sourcePath} dest=${destPath}`);
+        // Progress polling for the robocopy path. robocopy doesn't
+        // expose a parseable byte-progress stream (and its built-in
+        // progress output is hostile to programmatic parsing), so
+        // we stat the DESTINATION file every ~750 ms and emit a
+        // progress event with its current size. On a 12 GB VHDX
+        // move this gives the user a visible "copying 3.2 GB / 12
+        // GB" counter instead of a frozen UI.
+        emitProgress({
+          sourcePath,
+          destinationPath: destPath,
+          bytesCopied: 0,
+          bytesTotal: size,
+          phase: "copying",
+        });
+        const pollTimer: NodeJS.Timeout | null = isDirectory
+          ? null // Directory moves are harder to poll; skip for now.
+          : setInterval(() => {
+              FSP.stat(destPath)
+                .then((s) => {
+                  emitProgress({
+                    sourcePath,
+                    destinationPath: destPath,
+                    bytesCopied: s.size,
+                    bytesTotal: size,
+                    phase: "copying",
+                  });
+                })
+                .catch(() => {
+                  /* dest doesn't exist yet — robocopy is still
+                     staging; ignore and try next tick */
+                });
+            }, 750);
         const roboResult = await robocopyMove(sourcePath, destPath, isDirectory);
+        if (pollTimer) clearInterval(pollTimer);
         logCrash(
           "easy-move",
           `robocopy result ok=${roboResult.ok} exit=${roboResult.exitCode ?? "?"} message=${(roboResult.message ?? "").slice(0, 200)}`,
@@ -325,6 +358,13 @@ export async function easyMove(
           // even to admins. Return a specific, actionable error and
           // skip the outer catch's generic "locked" message that lost
           // the robocopy diagnostic.
+          emitProgress({
+            sourcePath,
+            destinationPath: destPath,
+            bytesCopied: 0,
+            bytesTotal: size,
+            phase: "done",
+          });
           return {
             ok: false,
             message:
@@ -338,6 +378,13 @@ export async function easyMove(
       } else {
         // Non-elevated hitting a path we can't move — signal the
         // renderer to offer UAC retry. Short-circuit the outer catch.
+        emitProgress({
+          sourcePath,
+          destinationPath: destPath,
+          bytesCopied: 0,
+          bytesTotal: size,
+          phase: "done",
+        });
         return {
           ok: false,
           requiresElevation: true,
@@ -351,6 +398,21 @@ export async function easyMove(
       throw lastMoveError ?? new Error("Move failed for unknown reason");
     }
     logCrash("easy-move", `move phase complete, creating link at source`);
+
+    // Surface the linking step to the UI. Link creation for a
+    // symbolic link is usually ms-fast, but for junctions or
+    // platform-specific mklink cmd invocations it can take 1-2
+    // seconds — without a progress event the user just sees the
+    // "Moving X" toast freeze at 100% before the success toast
+    // arrives. Emit a linking event so the toast title flips to
+    // "Linking X…" and signals the app is still working.
+    emitProgress({
+      sourcePath,
+      destinationPath: destPath,
+      bytesCopied: size,
+      bytesTotal: size,
+      phase: "linking",
+    });
 
     // Create link at the original location
     try {
@@ -375,6 +437,16 @@ export async function easyMove(
           // Rollback also failed — file is stranded at destPath
         }
       }
+
+      // Dismiss the live progress toast on any link-failure path.
+      // The caller will show an error / stranded toast of its own.
+      emitProgress({
+        sourcePath,
+        destinationPath: destPath,
+        bytesCopied: size,
+        bytesTotal: size,
+        phase: "done",
+      });
 
       if (!rolledBack) {
         // Persist a recovery record so the user can find and recover the file
@@ -417,8 +489,31 @@ export async function easyMove(
     records.push(record);
     persist();
 
+    // Final "done" so the progress toast dismisses. Without this the
+    // toast lingers at the last linking/copying event until it gets
+    // replaced by the success toast — on fast same-drive renames
+    // it doesn't even appear, but on the slow paths the user could
+    // see a momentary mismatch. emitProgress is a noop when no
+    // hook was registered (unit tests), so this is safe.
+    emitProgress({
+      sourcePath,
+      destinationPath: destPath,
+      bytesCopied: size,
+      bytesTotal: size,
+      phase: "done",
+    });
+
     return { ok: true, message: `Moved and linked: ${baseName}`, record };
   } catch (error) {
+    // Also dismiss the progress toast on error paths — the outer
+    // catch emits an error toast of its own.
+    emitProgress({
+      sourcePath,
+      destinationPath: "",
+      bytesCopied: 0,
+      bytesTotal: 0,
+      phase: "done",
+    });
     logCrash(
       "easy-move",
       `outer catch error code=${(error as NodeJS.ErrnoException)?.code ?? "?"} msg=${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`,
