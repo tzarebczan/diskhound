@@ -357,7 +357,14 @@ export type EasyMoveStatus =
   | "link-missing"
   | "dest-missing"
   | "both-missing"
-  | "source-file";
+  | "source-file"
+  /** Verified neither end — one or both paths returned EACCES/EPERM.
+   *  Common for symlinks created into ACL-locked directories like
+   *  C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\, where the
+   *  parent is non-enumerable for non-elevated user shells. The
+   *  record is likely fine; re-run Verify from an elevated session
+   *  to confirm. */
+  | "inaccessible";
 
 export interface EasyMoveVerification {
   id: string;
@@ -694,6 +701,11 @@ export interface DuplicateScanProgress {
   source?: "index" | "walk";
   /** Minimum file size in bytes that was considered. Defaults to 1 MB. */
   minSizeBytes?: number;
+  /** Groups confirmed since the last progress emit. Lets the UI
+   *  append duplicate groups to its list as they're found instead
+   *  of waiting for the full scan. Each emit carries the SINCE-LAST-
+   *  TICK delta (not cumulative), so the renderer accumulates. */
+  newGroups?: DuplicateGroup[];
 }
 
 export interface DuplicateScanOptions {

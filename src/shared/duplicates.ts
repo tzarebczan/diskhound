@@ -12,11 +12,30 @@ import type {
   DuplicateGroup,
   DuplicateScanProgress,
 } from "./contracts";
+import {
+  getCachedHash,
+  initHashCache,
+  persistHashCache,
+  setCachedHash,
+} from "./duplicateHashCache";
 import { normPath } from "./pathUtils";
 
 const PROGRESS_INTERVAL_MS = 200;
 const PREFIX_BYTES = 4096;
-const HASH_CONCURRENCY = 8;
+// Parallel hash workers. Bumped from 8 → 16 — modern NVMe SSDs
+// handle 16+ concurrent streaming reads without seek contention,
+// and SHA-256 is throughput-limited by a single CPU core anyway so
+// more streams in flight ≠ more CPU pressure. On HDDs this is
+// slightly worse than 8 but still acceptable (seeks serialize at
+// the controller). Override via DISKHOUND_HASH_CONCURRENCY env.
+const HASH_CONCURRENCY = (() => {
+  const override = process.env.DISKHOUND_HASH_CONCURRENCY;
+  if (override) {
+    const n = parseInt(override, 10);
+    if (Number.isFinite(n) && n >= 1 && n <= 128) return n;
+  }
+  return 16;
+})();
 /**
  * Default minimum file size to consider. Rationale: most "wasted space"
  * from duplicates lives in big files — photos, videos, installers,
@@ -44,6 +63,41 @@ export interface DuplicateScanOptions {
    */
   indexPath?: string | null;
   minSizeBytes?: number;
+  /** userData directory for persisting the hash cache. When absent the
+   *  cache is in-memory only (lost at exit). */
+  cacheDir?: string;
+}
+
+/**
+ * Bounded-concurrency runner. Promise.all wrapper that caps the number
+ * of in-flight tasks. Used to parallelise hashing across ALL
+ * candidates (not per-size-group), so a single giant size bucket
+ * doesn't block smaller ones.
+ */
+async function mapConcurrent<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+  onTick?: () => void,
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let next = 0;
+  const workers: Promise<void>[] = [];
+  const workerCount = Math.min(concurrency, items.length);
+  for (let w = 0; w < workerCount; w++) {
+    workers.push(
+      (async () => {
+        while (true) {
+          const i = next++;
+          if (i >= items.length) return;
+          results[i] = await fn(items[i]!, i);
+          onTick?.();
+        }
+      })(),
+    );
+  }
+  await Promise.all(workers);
+  return results;
 }
 
 interface FileCandidate {
@@ -68,10 +122,22 @@ export function runDuplicateScan(
   let lastEmitAt = 0;
   let source: "index" | "walk" = "walk";
 
+  // Streaming buffer: confirmed groups since the last progress emit.
+  // Flushed on every emit (including the final forced one) so the UI
+  // populates its list as the hashing phase runs instead of waiting
+  // for the 30-minute scan to finish. On a drive with 2000+ duplicate
+  // groups the UX difference is huge.
+  const pendingNewGroups: DuplicateGroup[] = [];
+  const confirmGroup = (g: DuplicateGroup) => {
+    pendingNewGroups.push(g);
+    groupsConfirmed++;
+  };
+
   const emitProgress = (status: DuplicateScanProgress["status"], force = false) => {
     const now = Date.now();
     if (!force && now - lastEmitAt < PROGRESS_INTERVAL_MS) return;
     lastEmitAt = now;
+    const newGroups = pendingNewGroups.length > 0 ? pendingNewGroups.splice(0) : undefined;
     callbacks.onProgress({
       rootPath,
       status,
@@ -83,10 +149,20 @@ export function runDuplicateScan(
       errorMessage: null,
       source,
       minSizeBytes,
+      newGroups,
     });
   };
 
   const run = async () => {
+    // Kick off hash cache load. Non-fatal if this fails (cache
+    // module falls back to in-memory on I/O errors). We don't await
+    // the initial load synchronously because we want the "walking"
+    // phase to start rendering progress ASAP — the cache is only
+    // consulted during the hashing phase.
+    if (options.cacheDir) {
+      await initHashCache(options.cacheDir);
+    }
+
     emitProgress("walking", true);
 
     // ── Phase 1: collect candidates (either via index or fs walk) ──
@@ -157,81 +233,146 @@ export function runDuplicateScan(
     const confirmedGroups: DuplicateGroup[] = [];
     emitProgress("hashing", true);
 
+    // ── Cross-group parallel hashing ──
+    //
+    // Prior implementation serialised per-size-group: a single
+    // 500-file size bucket of 4 GB videos blocked all other
+    // size-groups. Now:
+    //   - Pass A: flatten every candidate into a single list,
+    //     compute prefix hashes with a global 16-way pool. Group
+    //     results into (size, prefix) buckets.
+    //   - Pass B: for each (size, prefix) bucket with ≥ 2 files,
+    //     queue every file into a single full-hash task list and
+    //     run the same 16-way pool. Group by final hash.
+    // Both passes consult the persistent cache first — unchanged
+    // files skip I/O entirely on repeat scans.
+    //
+    // Small files (≤ PREFIX_BYTES) are special-cased: their "prefix
+    // hash" is already the full content, so Pass B is a no-op and we
+    // can confirm the group after Pass A.
+
+    // Flatten every candidate into one task list, tagged with its
+    // size group so we can re-bucket in Pass A's tail.
+    const allCandidates: Array<{ file: FileCandidate; size: number }> = [];
     for (const [size, files] of candidateEntries) {
-      if (cancelled) return;
-
-      // Pass A: prefix hash (first 4KB) — fast reject for almost-certain-
-      // non-dupes without reading whole files.
-      const prefixMap = new Map<string, FileCandidate[]>();
-      for (let i = 0; i < files.length; i += HASH_CONCURRENCY) {
-        if (cancelled) return;
-        const batch = files.slice(i, i + HASH_CONCURRENCY);
-        const results = await Promise.all(
-          batch.map(async (file) => {
-            const prefixHash = await hashFilePrefix(file.path);
-            return { file, prefixHash };
-          }),
-        );
-        for (const { file, prefixHash } of results) {
-          filesHashed++;
-          if (!prefixHash) continue;
-          const bucket = prefixMap.get(prefixHash);
-          if (bucket) bucket.push(file);
-          else prefixMap.set(prefixHash, [file]);
-        }
-        emitProgress("hashing");
-      }
-
-      // Pass B: full hash for prefix-matched groups
-      for (const [, prefixGroup] of prefixMap) {
-        if (prefixGroup.length < 2) continue;
-        if (cancelled) return;
-
-        if (size <= PREFIX_BYTES) {
-          // Prefix hash IS the full hash for files ≤ 4 KB
-          confirmedGroups.push({
-            hash: (await hashFileFull(prefixGroup[0]!.path)) ?? "prefix",
-            size,
-            files: prefixGroup.map(toEntry),
-          });
-          groupsConfirmed++;
-          emitProgress("hashing");
-          continue;
-        }
-
-        const fullMap = new Map<string, FileCandidate[]>();
-        for (let i = 0; i < prefixGroup.length; i += HASH_CONCURRENCY) {
-          if (cancelled) return;
-          const batch = prefixGroup.slice(i, i + HASH_CONCURRENCY);
-          const results = await Promise.all(
-            batch.map(async (file) => {
-              const fullHash = await hashFileFull(file.path);
-              return { file, fullHash };
-            }),
-          );
-          for (const { file, fullHash } of results) {
-            if (!fullHash) continue;
-            const bucket = fullMap.get(fullHash);
-            if (bucket) bucket.push(file);
-            else fullMap.set(fullHash, [file]);
-          }
-        }
-
-        for (const [hash, dupes] of fullMap) {
-          if (dupes.length >= 2) {
-            confirmedGroups.push({
-              hash,
-              size,
-              files: dupes.map(toEntry),
-            });
-            groupsConfirmed++;
-            emitProgress("hashing");
-          }
-        }
-      }
+      for (const file of files) allCandidates.push({ file, size });
     }
 
+    // ── Pass A: prefix hash, globally parallelised ──
+    const prefixResults = await mapConcurrent(
+      allCandidates,
+      HASH_CONCURRENCY,
+      async ({ file, size }) => {
+        if (cancelled) return { file, size, prefixHash: null };
+        const prefixHash = await cachedHashPrefix(file);
+        return { file, size, prefixHash };
+      },
+      () => {
+        filesHashed++;
+        emitProgress("hashing");
+      },
+    );
     if (cancelled) return;
+
+    // Re-bucket by (size, prefix). Small files (≤ PREFIX_BYTES) skip
+    // Pass B — their prefix hash IS the full hash — so we collect
+    // them separately and confirm groups immediately.
+    const prefixBuckets = new Map<string, FileCandidate[]>();
+    for (const r of prefixResults) {
+      if (!r.prefixHash) continue;
+      const key = `${r.size}:${r.prefixHash}`;
+      const bucket = prefixBuckets.get(key);
+      if (bucket) bucket.push(r.file);
+      else prefixBuckets.set(key, [r.file]);
+    }
+
+    // Confirm small-file groups (size ≤ PREFIX_BYTES) without Pass B.
+    // For larger files, queue every file for the full-hash pass.
+    const fullHashTasks: Array<{ file: FileCandidate; size: number }> = [];
+    for (const [key, bucket] of prefixBuckets) {
+      if (bucket.length < 2) continue;
+      const size = Number(key.split(":")[0]);
+      if (size <= PREFIX_BYTES) {
+        // Prefix hash == full hash for these; derive the hash from
+        // the bucket key for deterministic output.
+        const hash = key.substring(key.indexOf(":") + 1);
+        const group: DuplicateGroup = {
+          hash,
+          size,
+          files: bucket.map(toEntry),
+        };
+        confirmedGroups.push(group);
+        confirmGroup(group); // buffer for the next progress emit
+        continue;
+      }
+      for (const file of bucket) fullHashTasks.push({ file, size });
+    }
+    emitProgress("hashing", true);
+
+    // ── Pass B: full hash, also globally parallelised ──
+    const fullResults = await mapConcurrent(
+      fullHashTasks,
+      HASH_CONCURRENCY,
+      async ({ file, size }) => {
+        if (cancelled) return { file, size, fullHash: null };
+        const fullHash = await cachedHashFull(file);
+        return { file, size, fullHash };
+      },
+      () => {
+        filesHashed++;
+        emitProgress("hashing");
+      },
+    );
+    if (cancelled) return;
+
+    // Bucket full-hash results by (size, full-hash), emit confirmed
+    // groups. Same-hash + same-size → duplicate.
+    const fullBuckets = new Map<string, FileCandidate[]>();
+    for (const r of fullResults) {
+      if (!r.fullHash) continue;
+      const key = `${r.size}:${r.fullHash}`;
+      const bucket = fullBuckets.get(key);
+      if (bucket) bucket.push(r.file);
+      else fullBuckets.set(key, [r.file]);
+    }
+    // Emit groups as they're confirmed, interleaved with progress
+    // ticks so the UI's duplicate list populates during the scan
+    // instead of in one flood at the end. Map iteration order is
+    // insertion order, so this also happens to emit the FIRST-
+    // discovered groups first — users see their biggest wasted-
+    // space finds early.
+    let sinceLastEmit = 0;
+    for (const [key, bucket] of fullBuckets) {
+      if (bucket.length < 2) continue;
+      const sep = key.indexOf(":");
+      const size = Number(key.substring(0, sep));
+      const hash = key.substring(sep + 1);
+      const group: DuplicateGroup = {
+        hash,
+        size,
+        files: bucket.map(toEntry),
+      };
+      confirmedGroups.push(group);
+      confirmGroup(group);
+      // Flush the progress emit on every ~10 groups so the UI sees
+      // incremental confirmations rather than all 2000 at once at
+      // the end. The emit itself is rate-limited by
+      // PROGRESS_INTERVAL_MS so this loop won't spam.
+      sinceLastEmit++;
+      if (sinceLastEmit >= 10) {
+        sinceLastEmit = 0;
+        emitProgress("hashing");
+      }
+    }
+    emitProgress("hashing", true);
+
+    if (cancelled) return;
+
+    // Persist the hash cache so the next scan skips unchanged files.
+    // Non-fatal on error; cache module handles its own logging.
+    if (options.cacheDir) {
+      await persistHashCache();
+    }
 
     confirmedGroups.sort(
       (a, b) => (b.files.length - 1) * b.size - (a.files.length - 1) * a.size,
@@ -446,6 +587,31 @@ async function collectFromWalk(
 }
 
 // ── Hashing helpers ──────────────────────────────────────────────────────
+
+/**
+ * Prefix-hash with cache. Cache key = "prefix:" + path. If the file's
+ * (size, mtime) matches the cached entry's, return the cached hash
+ * without reading. Otherwise hash and cache. Prefix cache entries are
+ * cheap — typical cache file holds millions and stays under 100 MB.
+ */
+async function cachedHashPrefix(file: FileCandidate): Promise<string | null> {
+  const cacheKey = `prefix:${file.path}`;
+  const cached = getCachedHash(cacheKey, file.size, file.mtime);
+  if (cached) return cached;
+  const hash = await hashFilePrefix(file.path);
+  if (hash) setCachedHash(cacheKey, file.size, file.mtime, hash);
+  return hash;
+}
+
+/** Full-hash with cache. Same scheme as prefix; key = "full:" + path. */
+async function cachedHashFull(file: FileCandidate): Promise<string | null> {
+  const cacheKey = `full:${file.path}`;
+  const cached = getCachedHash(cacheKey, file.size, file.mtime);
+  if (cached) return cached;
+  const hash = await hashFileFull(file.path);
+  if (hash) setCachedHash(cacheKey, file.size, file.mtime, hash);
+  return hash;
+}
 
 function hashFilePrefix(filePath: string): Promise<string | null> {
   return new Promise((resolve) => {

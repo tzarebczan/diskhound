@@ -1,5 +1,58 @@
 # Changelog
 
+## 0.5.9 — 2026-04-24
+
+Two improvements driven by user feedback:
+
+### EasyMove verify: distinguishes "access denied" from "missing"
+
+User verified my earlier conclusion about a broken Ubuntu VHDX
+symlink — turned out `fsutil reparsepoint query` returned *Access
+is denied*, not *File not found*. The symlink IS still there; a
+non-elevated shell can't enumerate `C:\ProgramData\Microsoft\
+Windows\Virtual Hard Disks\` because that parent directory is
+ACL-locked.
+
+The previous `verifyEasyMoves` code collapsed EACCES/EPERM into
+"sourceExists = false" and badged the record as "link broken". Now
+it distinguishes:
+- **ENOENT** → actually missing (badge: "link broken")
+- **EACCES / EPERM** → can't tell from this shell (badge:
+  "needs admin to verify", hover explains the ACL situation)
+
+### Duplicates: ~60-minute scans → seconds on repeat runs
+
+Four wins layered together:
+
+1. **Persistent hash cache** at
+   `<userData>/duplicate-hash-cache.ndjson.gz`. Keyed by
+   `(path, size, mtime)` → SHA-256. On repeat scans, files that
+   haven't changed skip the read+hash entirely. First scan pays
+   the full 30-60 minute hash cost; subsequent scans finish in
+   seconds for unchanged files. Cache is LRU-bounded at 500 k
+   entries.
+2. **Cross-group parallelism**. Prior code serialised per-size-
+   group: a single 500-file group of 4 GB videos blocked every
+   other group. Now the prefix-hash and full-hash passes
+   parallelise across ALL candidates globally — 16 in flight at
+   any time.
+3. **HASH_CONCURRENCY bumped 8 → 16**. Modern NVMe handles 16+
+   concurrent streaming reads without seek contention.
+   Configurable via `DISKHOUND_HASH_CONCURRENCY` env var.
+4. **Streaming results into the UI.** Progress events now carry
+   a `newGroups` delta — every ~200 ms the scanner flushes
+   newly-confirmed duplicate groups, and the renderer appends
+   them to the list in real time. Users watching a 30-minute
+   scan no longer stare at a counter-only progress bar — their
+   biggest wasted-space finds appear as they're discovered,
+   typically within the first minute. Final `onDuplicateResult`
+   overwrites with the sorted full list for the canonical view.
+
+Architecture refactor side-effect: the hashing loop is now two
+flat `mapConcurrent` passes (prefix → bucket → full → bucket)
+instead of nested per-group loops. Simpler to reason about; easier
+to extend if we ever want BLAKE3 or sampled-hash options.
+
 ## 0.5.8 — 2026-04-24
 
 EasyMove progress coverage extended to the two phases that used to

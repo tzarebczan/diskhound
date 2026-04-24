@@ -102,8 +102,38 @@ export async function verifyEasyMoves(): Promise<EasyMoveVerification[]> {
     // lstat (not stat) so symlinks don't transparently deref into
     // the target's metadata — we specifically want "is there a
     // reparse point at this path?".
-    const srcLstat = await FSP.lstat(rec.symlinkPath).catch(() => null);
-    const destStat = await FSP.stat(rec.movedToPath).catch(() => null);
+    //
+    // We also distinguish ENOENT ("truly missing") from EACCES /
+    // EPERM ("exists but we can't read it"). This matters for
+    // symlinks created into ACL-locked directories like
+    // C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\, where
+    // the parent directory is non-enumerable for non-elevated
+    // user shells. Pre-0.5.9 any error here was collapsed to
+    // "sourceExists = false" and the UI badged the record as
+    // "link broken" — a false alarm that made users think
+    // DiskHound had created a phantom symlink.
+    let srcLstat: Awaited<ReturnType<typeof FSP.lstat>> | null = null;
+    let srcInaccessible = false;
+    try {
+      srcLstat = await FSP.lstat(rec.symlinkPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EACCES" || code === "EPERM") {
+        srcInaccessible = true;
+      }
+      // ENOENT and anything else: srcLstat stays null, srcInaccessible false.
+    }
+
+    let destStat: Awaited<ReturnType<typeof FSP.stat>> | null = null;
+    let destInaccessible = false;
+    try {
+      destStat = await FSP.stat(rec.movedToPath);
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EACCES" || code === "EPERM") {
+        destInaccessible = true;
+      }
+    }
 
     const sourceExists = srcLstat !== null;
     const destExists = destStat !== null;
@@ -119,7 +149,12 @@ export async function verifyEasyMoves(): Promise<EasyMoveVerification[]> {
       : false;
 
     let status: EasyMoveStatus;
-    if (!sourceExists && !destExists) status = "both-missing";
+    if (srcInaccessible || destInaccessible) {
+      // Can't tell — report as inaccessible so the UI shows a
+      // distinct "needs admin to verify" badge instead of a
+      // misleading "link broken".
+      status = "inaccessible";
+    } else if (!sourceExists && !destExists) status = "both-missing";
     else if (!destExists) status = "dest-missing";
     else if (!sourceExists) status = "link-missing";
     else if (!sourceIsLink) status = "source-file";

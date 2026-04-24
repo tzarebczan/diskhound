@@ -2543,6 +2543,13 @@ void app.whenReady().then(async () => {
       {
         indexPath,
         minSizeBytes: options?.minSizeBytes,
+        // Enable the persistent hash cache so repeat duplicate scans
+        // on the same drive skip re-hashing unchanged files. The
+        // first scan on a drive pays the full 30-60 minute hashing
+        // cost; subsequent scans reuse cached hashes by
+        // (path, size, mtime) and finish in seconds for unchanged
+        // files.
+        cacheDir: app.getPath("userData"),
       },
     );
     activeDuplicateScans.set(key, handle);

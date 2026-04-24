@@ -251,6 +251,15 @@ function EasyMoveStatusBadge({
           double file
         </span>
       );
+    case "inaccessible":
+      return (
+        <span
+          className="easymove-row-status"
+          title="One or both ends of this move are in an ACL-locked directory (typical for C:\\ProgramData\\Microsoft\\Windows\\Virtual Hard Disks\\ and other TrustedInstaller-owned paths). Relaunch DiskHound as admin and hit Verify to confirm the link. Most likely it's fine — Windows just won't show it to non-elevated shells."
+        >
+          needs admin to verify
+        </span>
+      );
     case "ok":
       return (
         <span

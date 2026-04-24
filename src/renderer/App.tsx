@@ -439,6 +439,42 @@ export function App() {
         next.set(key, p);
         return next;
       });
+      // Stream confirmed groups into the per-root analyses map as
+      // they're emitted by the scanner. Without this, all 2000+
+      // groups land in one flood at scan-end; users stared at the
+      // progress bar for 30+ minutes before seeing any of their
+      // biggest wasted-space finds. Now the list populates live.
+      if (p.newGroups && p.newGroups.length > 0) {
+        setDuplicateAnalysesByRoot((prev) => {
+          const next = new Map(prev);
+          const existing = next.get(key);
+          const combinedGroups = existing?.groups
+            ? [...existing.groups, ...p.newGroups!]
+            : [...p.newGroups!];
+          // Running totals so the UI header shows live counts;
+          // finalised at scan-end via onDuplicateResult.
+          const totalWastedBytes = combinedGroups.reduce(
+            (sum, g) => sum + (g.files.length - 1) * g.size,
+            0,
+          );
+          const totalDuplicateFiles = combinedGroups.reduce(
+            (sum, g) => sum + g.files.length,
+            0,
+          );
+          next.set(key, {
+            groups: combinedGroups,
+            totalWastedBytes,
+            totalGroups: combinedGroups.length,
+            totalDuplicateFiles,
+            rootPath: p.rootPath,
+            filesWalked: p.filesWalked,
+            filesHashed: p.filesHashed,
+            elapsedMs: p.elapsedMs,
+            analyzedAt: existing?.analyzedAt ?? Date.now(),
+          });
+          return next;
+        });
+      }
       // Walking/hashing = active; done/cancelled/error = inactive.
       const isActive = p.status === "walking" || p.status === "hashing";
       setActiveDuplicateKeys((prev) => {
