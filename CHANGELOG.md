@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.5.5 — 2026-04-24
+
+**EasyMove to drive roots (`E:\`, `D:\`, etc.) was broken.** 0.5.4's
+diagnostic tracing surfaced the actual failure:
+
+```
+[easy-move] start src=C:\testing\...\headers dest=E:\
+[easy-move] stat ok isDir=false size=88388496
+[easy-move] outer catch error code=EPERM msg=EPERM: operation not permitted, mkdir 'E:\'
+```
+
+Node's `fs.mkdir('E:\\', { recursive: true })` throws EPERM on
+Windows drive roots — Windows refuses `CreateDirectoryW` on a drive
+letter even when it already exists. This is a known Node quirk
+(see nodejs/node#43831) and the `recursive: true` option doesn't
+short-circuit for drive roots.
+
+Fix:
+- Skip `fs.mkdir` entirely when `destinationDir` already exists.
+- **Outer-catch error messages now dispatch on `err.syscall`**, so
+  an `mkdir` failure says "Can't create destination folder" instead
+  of the misleading "Another process is likely holding the file
+  open" that blamed the source when the problem was on the
+  destination side.
+- Full underlying error message now appended to the toast so the
+  diagnostic is visible without crash-log digging.
+
+Users seeing the old "Another process is likely holding…" on a
+simple .txt move were hitting this mkdir bug, not a real file lock.
+
 ## 0.5.4 — 2026-04-24
 
 EasyMove diagnostics pass. Users reported EPERM-locked messages

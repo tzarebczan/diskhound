@@ -148,8 +148,20 @@ export async function easyMove(
       return { ok: false, message: `Destination already exists: ${destPath}` };
     }
 
-    // Ensure destination directory exists
-    await FSP.mkdir(destinationDir, { recursive: true });
+    // Ensure destination directory exists. We guard the mkdir with an
+    // existsSync check because Node's fs.mkdir with { recursive: true }
+    // throws `EPERM: operation not permitted, mkdir 'E:\'` on Windows
+    // drive roots — it calls CreateDirectoryW for each path component,
+    // and Windows rejects creating a drive letter even when it already
+    // exists. (Known Node quirk; see nodejs/node#43831.) Users hitting
+    // this thought EasyMove was broken ("Couldn't access headers, EPERM")
+    // when the actual root cause was the drive-root destination — not
+    // the source file at all.
+    if (!FS.existsSync(destinationDir)) {
+      await FSP.mkdir(destinationDir, { recursive: true });
+    } else {
+      logCrash("easy-move", `dest dir already exists, skipping mkdir: ${destinationDir}`);
+    }
 
     // Move strategy — four tiers, each only attempted if the previous
     // failed. Escalates in capability:
@@ -327,19 +339,34 @@ export async function easyMove(
     // typically FAILS even when elevated because the OS has them open
     // or ACL-locks them, so we also warn about that.
     const code = (error as NodeJS.ErrnoException)?.code;
+    const syscall = (error as NodeJS.ErrnoException)?.syscall;
+    const errPath = (error as NodeJS.ErrnoException)?.path;
     if (code === "EPERM" || code === "EACCES" || code === "EBUSY") {
       const name = Path.basename(sourcePath);
-      // Probe the current elevation state so we give the user a
-      // message that actually applies. Historically we surfaced this
-      // as "needs admin" unconditionally, but:
-      //   - Users running elevated hit this error too (WSL-locked
-      //     VHDX, Defender scan in flight, OneDrive mid-sync, etc.).
-      //     Telling them to "retry with admin" is confusing.
-      //   - EBUSY / sharing-violation is the most common cause,
-      //     NOT permission. An elevated retry wouldn't help.
-      // We only offer the UAC retry when non-elevated AND the code is
-      // a permission-flavoured one; otherwise we give a "file is
-      // locked" message with actionable suggestions.
+      // Dispatch on the syscall that failed so we don't lie about the
+      // cause. Previously every EPERM/EACCES was blamed on "another
+      // process holding the source file open" — but the error might
+      // be from mkdir on a drive root, from opendir on the destination,
+      // etc. Node populates `syscall` on ErrnoException for exactly
+      // this kind of dispatching.
+      if (syscall === "mkdir" && errPath) {
+        return {
+          ok: false,
+          message:
+            `Can't create destination folder '${errPath}' (${code}). ` +
+            `If you picked a drive root (like E:\\), pick a subfolder inside it instead — ` +
+            `Windows won't let us "create" a drive letter even when it exists.`,
+        };
+      }
+      if (syscall === "mkdir") {
+        return {
+          ok: false,
+          message: `Can't create destination folder (${code}): ${(error instanceof Error ? error.message : String(error))}`,
+        };
+      }
+      // Probe the current elevation state for source-side permission
+      // errors. Non-elevated users get the UAC retry; elevated get a
+      // "locked" message with actionable suggestions.
       const { isElevated } = await import("../elevation");
       const elevated = await isElevated();
       if (!elevated && (code === "EPERM" || code === "EACCES")) {
@@ -352,9 +379,11 @@ export async function easyMove(
       return {
         ok: false,
         message:
-          `Couldn't access ${name} (${code}). Another process is likely holding the file open — common culprits: ` +
+          `Couldn't ${syscall ?? "access"} ${name} (${code}). ` +
+          `Another process is likely holding the file open — common culprits: ` +
           `WSL (for .vhdx), Hyper-V, Windows Defender, OneDrive sync, or an antivirus scan. ` +
-          `Close the app using it or wait a moment and try again.`,
+          `Close the app using it or wait a moment and try again. ` +
+          `Full error: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
     return {
