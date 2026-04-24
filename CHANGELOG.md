@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.5.5 — 2026-04-24
+
+Icon design fix. 0.5.4 got the desktop integration working, which
+*revealed* a second problem: the icon design itself didn't scale
+to the small sizes GNOME actually requested. The top-bar icon
+next to "Activities" rendered as a near-black blob (8 colored
+blocks at 16 px is ~2 px each — they just dissolve into the dark
+frame), and the dock icon at 64-96 px looked like noise instead
+of an app silhouette.
+
+### Size-responsive icon rendering
+
+`scripts/generate-icon.mjs` now picks a different block layout
+per size tier:
+
+- **≤24 px** — single bold orange tile. Recognisable as
+  "DiskHound orange" against any GNOME top-bar background.
+- **32-48 px** — 2×2 grid of four big blocks (orange / dark
+  orange / red / blue). Hints at the treemap concept without
+  dissolving.
+- **64-96 px** — 5-block layout. Drops the smallest two tiles
+  from the full design so adjacent blocks don't fuse during
+  downscale.
+- **128+ px** — full 8-block treemap, unchanged.
+
+Padding scales up at small sizes too (was a flat 7.8% across all
+sizes — collapsed to 1 px at 16 px and was effectively invisible).
+Now 14% at ≤24 px, 10% at ≤48 px, 8% at large sizes. Same with
+gaps between tiles. 3D highlight/shadow cues skip below 64 px
+where every pixel matters for legibility.
+
+Outer corner radius bumped from 14% to 18% so the silhouette
+reads more like a "tile" than a "square" against the round-ish
+neighbours in the GNOME dock (Firefox, Settings).
+
 ## 0.5.4 — 2026-04-24
 
 Second Linux polish pass. A screenshot from an Ubuntu VM showed
