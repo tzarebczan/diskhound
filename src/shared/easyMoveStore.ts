@@ -4,7 +4,13 @@ import * as Path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execSync, spawn } from "node:child_process";
 
-import type { EasyMoveRecord, EasyMoveResult, PathActionResult } from "./contracts";
+import type {
+  EasyMoveRecord,
+  EasyMoveResult,
+  EasyMoveStatus,
+  EasyMoveVerification,
+  PathActionResult,
+} from "./contracts";
 
 const STORE_FILENAME = "easy-moves.json";
 
@@ -21,6 +27,26 @@ let logCrash: LogFn = () => { /* noop default */ };
 
 export function setEasyMoveLogger(fn: LogFn): void {
   logCrash = fn;
+}
+
+/**
+ * Optional progress hook for long-running copies. main.ts wires this
+ * to an IPC broadcast so the renderer can surface a progress toast or
+ * status line. Fires at most every 500 ms per operation; noop default
+ * means unit tests and non-Electron callers don't need to set it.
+ */
+export interface EasyMoveProgress {
+  sourcePath: string;
+  destinationPath: string;
+  bytesCopied: number;
+  bytesTotal: number;
+  phase: "copying" | "linking" | "done";
+}
+type ProgressFn = (p: EasyMoveProgress) => void;
+let emitProgress: ProgressFn = () => { /* noop */ };
+
+export function setEasyMoveProgress(fn: ProgressFn): void {
+  emitProgress = fn;
 }
 
 export function initEasyMoveStore(dir: string): void {
@@ -51,6 +77,64 @@ function persist(): void {
 
 export function getEasyMoves(): EasyMoveRecord[] {
   return [...records];
+}
+
+/**
+ * Verify an easy-move record's current on-disk state. Returns a
+ * status code per record so the UI can show link-missing / dest-
+ * missing badges next to each move and offer a repair action.
+ *
+ * Status meanings:
+ *   - "ok"            : source is a link/junction, dest file exists
+ *   - "link-missing"  : dest exists but source has no reparse point
+ *                       (file was moved, link was never created or
+ *                       was deleted externally)
+ *   - "dest-missing"  : link at source exists but the target file
+ *                       it points to is gone
+ *   - "both-missing"  : both ends are gone (user deleted everything)
+ *   - "source-file"   : source exists as a regular file (not a
+ *                       link) AND dest also exists — double file
+ *                       state, user intervention needed
+ */
+export async function verifyEasyMoves(): Promise<EasyMoveVerification[]> {
+  const results: EasyMoveVerification[] = [];
+  for (const rec of records) {
+    // lstat (not stat) so symlinks don't transparently deref into
+    // the target's metadata — we specifically want "is there a
+    // reparse point at this path?".
+    const srcLstat = await FSP.lstat(rec.symlinkPath).catch(() => null);
+    const destStat = await FSP.stat(rec.movedToPath).catch(() => null);
+
+    const sourceExists = srcLstat !== null;
+    const destExists = destStat !== null;
+    const sourceIsLink = srcLstat
+      ? srcLstat.isSymbolicLink() ||
+        // Windows junctions: lstat reports isDirectory=true AND
+        // sets the reparse-point attribute. Node's Stats doesn't
+        // expose attrs directly, but isSymbolicLink() covers most
+        // Windows symlinks + junctions in recent Node versions.
+        // Fall back to checking "size=0 and isDirectory" as a
+        // heuristic for junctions.
+        (process.platform === "win32" && srcLstat.isDirectory() && srcLstat.size === 0)
+      : false;
+
+    let status: EasyMoveStatus;
+    if (!sourceExists && !destExists) status = "both-missing";
+    else if (!destExists) status = "dest-missing";
+    else if (!sourceExists) status = "link-missing";
+    else if (!sourceIsLink) status = "source-file";
+    else status = "ok";
+
+    results.push({
+      id: rec.id,
+      status,
+      sourceExists,
+      sourceIsLink,
+      destExists,
+      destSize: destStat?.size ?? 0,
+    });
+  }
+  return results;
 }
 
 /**
@@ -199,12 +283,21 @@ export async function easyMove(
             await copyDirRecursive(sourcePath, destPath);
             await FSP.rm(sourcePath, { recursive: true, force: true });
           } else {
-            await FSP.copyFile(sourcePath, destPath);
+            // Stream-based copy with progress so large cross-drive
+            // moves don't feel frozen. Fires onProgress every
+            // ~500 ms; caller hooks that up to crash.log + UI via
+            // setEasyMoveProgress.
+            await streamCopyWithProgress(sourcePath, destPath, size);
             await FSP.unlink(sourcePath);
           }
           moveSucceeded = true;
+          logCrash("easy-move", `copy+unlink fallback succeeded`);
         } catch (copyErr) {
           lastMoveError = copyErr;
+          logCrash(
+            "easy-move",
+            `copy+unlink fallback failed: ${copyErr instanceof Error ? copyErr.message : String(copyErr)}`,
+          );
         }
       }
     }
@@ -442,30 +535,88 @@ async function createPlatformLink(
   linkPath: string,
   isDirectory: boolean,
 ): Promise<void> {
+  let method = "unknown";
   if (process.platform === "win32") {
     if (isDirectory) {
-      // Junction — no admin required
+      // Junction — no admin required. Works same-volume only but
+      // that's rarely a limit for user-chosen destinations.
       await FSP.symlink(target, linkPath, "junction");
+      method = "junction";
     } else {
-      // Try symlink first (works with Developer Mode on Win10+)
+      // Three-tier fallback for files. Each tier throws on failure
+      // so we move to the next; the OUTER catch in easyMove handles
+      // total failure. CRITICAL: prior versions swallowed each
+      // failure and returned "success" even when no link was
+      // actually created (observed: Ubuntu VHDX moved but source
+      // missing, no link, easy-moves.json thought it was fine).
+      // We now explicitly track which method succeeded and
+      // lstat-verify at the end.
+      let symlinkErr: unknown = null;
+      let mklinkErr: unknown = null;
       try {
         await FSP.symlink(target, linkPath, "file");
-      } catch {
-        // Fall back to mklink via cmd.exe
+        method = "symlink";
+      } catch (err) {
+        symlinkErr = err;
         try {
           execSync(
             `mklink "${linkPath}" "${target}"`,
             { stdio: "ignore", windowsHide: true },
           );
-        } catch {
-          // Last resort: hardlink (only works on same volume)
-          await FSP.link(target, linkPath);
+          method = "mklink";
+        } catch (err2) {
+          mklinkErr = err2;
+          // Hardlink only works same-volume. Moving across drives
+          // (C: → E:) guarantees this FAILS with EXDEV — at which
+          // point the user is going to get an error, which is what
+          // we want (better than silently returning "success" on
+          // a non-existent link).
+          try {
+            await FSP.link(target, linkPath);
+            method = "hardlink";
+          } catch (err3) {
+            throw new Error(
+              `Couldn't create any link at ${linkPath}. ` +
+              `symlink: ${symlinkErr instanceof Error ? symlinkErr.message : String(symlinkErr)}; ` +
+              `mklink: ${mklinkErr instanceof Error ? mklinkErr.message : String(mklinkErr)}; ` +
+              `hardlink: ${err3 instanceof Error ? err3.message : String(err3)}`,
+            );
+          }
         }
       }
     }
   } else {
     // macOS / Linux — standard symlinks
     await FSP.symlink(target, linkPath, isDirectory ? "dir" : "file");
+    method = "symlink";
+  }
+
+  // Post-creation verification. Any of the above methods could
+  // technically return without throwing yet leave no entry on disk
+  // (Defender quarantine races, Dev Mode misconfiguration, etc.).
+  // If lstat can't see something at linkPath, treat the creation
+  // as failed so the caller can roll back the move.
+  try {
+    const ls = await FSP.lstat(linkPath);
+    const isLink =
+      ls.isSymbolicLink() ||
+      // Windows junctions show as directories to lstat; check the
+      // reparse-point attribute bit instead. On non-Windows, a
+      // symlink always reports isSymbolicLink.
+      (process.platform === "win32" &&
+        (ls as unknown as { isReparsePoint?: boolean }).isReparsePoint === true);
+    logCrash(
+      "easy-move-link",
+      `method=${method} linkPath=${linkPath} lstat: ` +
+      `size=${ls.size} isDir=${ls.isDirectory()} isSymlink=${ls.isSymbolicLink()} ` +
+      `hardlink=${method === "hardlink"} verified=${isLink || method === "hardlink"}`,
+    );
+  } catch (err) {
+    throw new Error(
+      `Link creation reported success via '${method}' but lstat(${linkPath}) ` +
+      `fails: ${err instanceof Error ? err.message : String(err)}. ` +
+      `Treating as link-creation failure so the move can be rolled back.`,
+    );
   }
 }
 
@@ -633,5 +784,64 @@ function robocopyMove(
         message: err instanceof Error ? err.message : String(err),
       });
     }
+  });
+}
+
+/**
+ * Stream-based copy with periodic progress callbacks. Replaces plain
+ * FSP.copyFile for the cross-drive fallback path — on multi-GB files
+ * that takes tens of seconds, and without progress the UI looks
+ * frozen. Progress events fire at most every 500 ms to cap the IPC
+ * traffic; at 1 GB/s SSD throughput that's one event per ~500 MB,
+ * well within any reasonable UI refresh rate.
+ */
+async function streamCopyWithProgress(
+  src: string,
+  dest: string,
+  sizeTotal: number,
+): Promise<void> {
+  const readStream = FS.createReadStream(src);
+  const writeStream = FS.createWriteStream(dest);
+  let bytesCopied = 0;
+  let lastEmitAt = Date.now();
+
+  return await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const settle = (err?: Error) => {
+      if (settled) return;
+      settled = true;
+      // Always fire a final progress with phase=done so the UI can
+      // dismiss its progress indicator and the crash log has a
+      // closing line.
+      emitProgress({
+        sourcePath: src,
+        destinationPath: dest,
+        bytesCopied,
+        bytesTotal: sizeTotal,
+        phase: "done",
+      });
+      if (err) reject(err);
+      else resolve();
+    };
+
+    readStream.on("error", settle);
+    writeStream.on("error", settle);
+    writeStream.on("finish", () => settle());
+
+    readStream.on("data", (chunk) => {
+      bytesCopied += chunk.length;
+      const now = Date.now();
+      if (now - lastEmitAt >= 500) {
+        lastEmitAt = now;
+        emitProgress({
+          sourcePath: src,
+          destinationPath: dest,
+          bytesCopied,
+          bytesTotal: sizeTotal,
+          phase: "copying",
+        });
+      }
+    });
+    readStream.pipe(writeStream);
   });
 }

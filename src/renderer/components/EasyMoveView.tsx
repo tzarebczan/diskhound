@@ -1,13 +1,18 @@
 import { useEffect, useState } from "preact/hooks";
 
-import type { EasyMoveRecord } from "../../shared/contracts";
+import type {
+  EasyMoveRecord,
+  EasyMoveVerification,
+} from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 
 export function EasyMoveView() {
   const [records, setRecords] = useState<EasyMoveRecord[]>([]);
+  const [verifications, setVerifications] = useState<Map<string, EasyMoveVerification>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [verifying, setVerifying] = useState(false);
   const [busy, setBusy] = useState<Set<string>>(new Set());
 
   const refresh = async () => {
@@ -16,7 +21,42 @@ export function EasyMoveView() {
     setLoading(false);
   };
 
-  useEffect(() => { void refresh(); }, []);
+  /**
+   * Run lstat on every record's source + dest so the UI can badge
+   * broken links, missing destinations, etc. Kicked off
+   * automatically when the tab mounts; user can re-run any time
+   * via the Verify button. Cheap — typically <100 ms for 20
+   * records.
+   */
+  const verify = async () => {
+    setVerifying(true);
+    const results = await nativeApi.verifyEasyMoves().catch(() => null);
+    setVerifying(false);
+    if (!results) {
+      toast("error", "Couldn't verify Easy Moves");
+      return;
+    }
+    const next = new Map<string, EasyMoveVerification>();
+    for (const v of results) next.set(v.id, v);
+    setVerifications(next);
+    // Summarise in a toast when there's anything broken — silent
+    // "all-ok" path keeps the UI quiet on the common case.
+    const broken = results.filter((r) => r.status !== "ok").length;
+    if (broken > 0) {
+      toast(
+        "warning",
+        `${broken} of ${results.length} Easy Moves need attention`,
+        "See the status badges below.",
+      );
+    }
+  };
+
+  useEffect(() => {
+    void (async () => {
+      await refresh();
+      await verify();
+    })();
+  }, []);
 
   const moveBack = async (record: EasyMoveRecord) => {
     setBusy((b) => { const n = new Set(b); n.add(record.id); return n; });
@@ -48,6 +88,14 @@ export function EasyMoveView() {
             <span className="easymove-summary-label">
               {records.length === 1 ? "item" : "items"} linked
             </span>
+            <button
+              className="action-btn"
+              onClick={() => void verify()}
+              disabled={verifying}
+              title="Re-check every move's link + destination on disk"
+            >
+              {verifying ? "Verifying…" : "Verify"}
+            </button>
           </div>
         )}
       </div>
@@ -72,6 +120,7 @@ export function EasyMoveView() {
             <EasyMoveRow
               key={r.id}
               record={r}
+              verification={verifications.get(r.id) ?? null}
               isBusy={busy.has(r.id)}
               onMoveBack={() => void moveBack(r)}
             />
@@ -82,8 +131,9 @@ export function EasyMoveView() {
   );
 }
 
-function EasyMoveRow({ record, isBusy, onMoveBack }: {
+function EasyMoveRow({ record, verification, isBusy, onMoveBack }: {
   record: EasyMoveRecord;
+  verification: EasyMoveVerification | null;
   isBusy: boolean;
   onMoveBack: () => void;
 }) {
@@ -119,9 +169,7 @@ function EasyMoveRow({ record, isBusy, onMoveBack }: {
         <span className="easymove-row-age">{age}</span>
       </div>
       <div className="easymove-row-actions">
-        <span className={`easymove-row-status ${record.stranded ? "stranded" : ""}`}>
-          {record.stranded ? "stranded" : "linked"}
-        </span>
+        <EasyMoveStatusBadge record={record} verification={verification} />
         <button
           className="action-btn warn"
           disabled={isBusy}
@@ -132,5 +180,86 @@ function EasyMoveRow({ record, isBusy, onMoveBack }: {
       </div>
     </div>
   );
+}
+
+/**
+ * Status badge for an Easy Move record. Combines:
+ *   - The stranded flag from the record itself (set when link
+ *     creation failed and rollback also failed — file is at dest
+ *     with no link home).
+ *   - The live verification result from lstat (set by the Verify
+ *     button or auto-run on tab mount).
+ *
+ * Status priority (most-broken first):
+ *   stranded → both-missing → dest-missing → link-missing
+ *   source-file → ok (default when no verification available).
+ */
+function EasyMoveStatusBadge({
+  record,
+  verification,
+}: {
+  record: EasyMoveRecord;
+  verification: EasyMoveVerification | null;
+}) {
+  if (record.stranded) {
+    return (
+      <span
+        className="easymove-row-status stranded"
+        title="Link creation failed AND rollback failed. The file is at the destination but the source has no link. Use 'Move back' to restore it."
+      >
+        stranded
+      </span>
+    );
+  }
+  if (!verification) {
+    return <span className="easymove-row-status">linked</span>;
+  }
+  switch (verification.status) {
+    case "both-missing":
+      return (
+        <span
+          className="easymove-row-status stranded"
+          title="Both the source link AND the destination file are gone. This record is orphaned — delete it via 'Move back' to clean up."
+        >
+          both missing
+        </span>
+      );
+    case "dest-missing":
+      return (
+        <span
+          className="easymove-row-status stranded"
+          title="The destination file is gone — the link at source points nowhere. You may need to restore the dest from backup."
+        >
+          dest missing
+        </span>
+      );
+    case "link-missing":
+      return (
+        <span
+          className="easymove-row-status stranded"
+          title="The destination file exists but there's no link at the original location. Use 'Move back' to restore it, or recreate the link manually."
+        >
+          link broken
+        </span>
+      );
+    case "source-file":
+      return (
+        <span
+          className="easymove-row-status stranded"
+          title="The source exists as a regular file AND the destination also exists — DiskHound's record thinks it's linked but it isn't. Investigate before 'Move back'."
+        >
+          double file
+        </span>
+      );
+    case "ok":
+      return (
+        <span
+          className="easymove-row-status"
+          title={`Verified: source is a ${verification.sourceIsLink ? "symlink/junction" : "file"}, destination is ${formatBytes(verification.destSize)}.`}
+        >
+          verified
+        </span>
+      );
+  }
 }
 

@@ -47,7 +47,15 @@ import {
 } from "./shared/diskMonitor";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
-import { easyMove, easyMoveBack, getEasyMoves, initEasyMoveStore, setEasyMoveLogger } from "./shared/easyMoveStore";
+import {
+  easyMove,
+  easyMoveBack,
+  getEasyMoves,
+  initEasyMoveStore,
+  setEasyMoveLogger,
+  setEasyMoveProgress,
+  verifyEasyMoves,
+} from "./shared/easyMoveStore";
 import {
   consumeLastPrunedIds,
   getScanHistory,
@@ -482,6 +490,13 @@ void app.whenReady().then(async () => {
   // black box — we can't tell which tier (rename / copy / robocopy)
   // actually failed or whether isElevated returned as expected.
   setEasyMoveLogger((tag, msg) => writeCrashLog(tag, msg));
+
+  // Wire progress-broadcast hook. Stream-copy fires this every
+  // ~500 ms during long cross-drive moves; the renderer subscribes
+  // via onEasyMoveProgress and shows a live progress toast.
+  setEasyMoveProgress((progress) => {
+    mainWindow?.webContents.send("diskhound:easy-move-progress", progress);
+  });
 
   // Initialize scan history + full-file indexes
   initScanHistory(app.getPath("userData"));
@@ -1701,6 +1716,7 @@ void app.whenReady().then(async () => {
   });
 
   ipcMain.handle("diskhound:get-easy-moves", () => getEasyMoves());
+  ipcMain.handle("diskhound:verify-easy-moves", () => verifyEasyMoves());
 
   ipcMain.handle("diskhound:pick-move-destination", async () => {
     if (!mainWindow) return null;

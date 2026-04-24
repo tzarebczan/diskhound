@@ -348,6 +348,40 @@ export interface EasyMoveResult {
   requiresElevation?: boolean;
 }
 
+/**
+ * On-disk verification of an EasyMoveRecord. UI uses the `status`
+ * to badge each record as healthy / needs-repair / orphaned.
+ */
+export type EasyMoveStatus =
+  | "ok"
+  | "link-missing"
+  | "dest-missing"
+  | "both-missing"
+  | "source-file";
+
+export interface EasyMoveVerification {
+  id: string;
+  status: EasyMoveStatus;
+  sourceExists: boolean;
+  sourceIsLink: boolean;
+  destExists: boolean;
+  destSize: number;
+}
+
+/**
+ * Progress tick fired during long cross-drive Easy Move copies.
+ * Emitted at most every 500 ms per operation. `phase: "done"` is
+ * always the final event (success or failure), so subscribers can
+ * deterministically hide their progress UI.
+ */
+export interface EasyMoveProgress {
+  sourcePath: string;
+  destinationPath: string;
+  bytesCopied: number;
+  bytesTotal: number;
+  phase: "copying" | "linking" | "done";
+}
+
 // ── Scan Diff Types ────────────────────────────────────────
 
 export interface ScanHistoryEntry {
@@ -779,6 +813,11 @@ export interface DiskhoundNativeApi {
   easyMoveElevated: (sourcePath: string, destinationDir: string) => Promise<EasyMoveResult>;
   easyMoveBack: (recordId: string) => Promise<PathActionResult>;
   getEasyMoves: () => Promise<EasyMoveRecord[]>;
+  /** Verify every easy-move record's current on-disk state. Returns
+   *  one verification per record with a status code so the UI can
+   *  flag broken links, missing destinations, etc. Runs lstat on
+   *  every recorded path; typical call takes <100 ms for ~20 records. */
+  verifyEasyMoves: () => Promise<EasyMoveVerification[]>;
   pickMoveDestination: () => Promise<string | null>;
 
   // Duplicate Detection
@@ -856,6 +895,10 @@ export interface DiskhoundNativeApi {
   onScanSnapshot: (listener: (snapshot: ScanSnapshot) => void) => () => void;
   onDiskDelta: (listener: (delta: DiskDelta) => void) => () => void;
   onNotification: (listener: (message: ToastMessage) => void) => () => void;
+  /** Live bytes-copied events during long cross-drive Easy Move copies.
+   *  Renderer hooks wire this to a progress toast. `phase: "done"` is
+   *  always the last event per operation. */
+  onEasyMoveProgress: (listener: (progress: EasyMoveProgress) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────

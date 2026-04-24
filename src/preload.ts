@@ -6,6 +6,7 @@ import type {
   DiskhoundNativeApi,
   DuplicateAnalysis,
   DuplicateScanProgress,
+  EasyMoveProgress,
   ScanSnapshot,
   ToastMessage,
   UpdateStatus,
@@ -13,6 +14,7 @@ import type {
 
 const SCAN_SNAPSHOT_CHANNEL = "diskhound:scan-snapshot";
 const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
+const EASY_MOVE_PROGRESS_CHANNEL = "diskhound:easy-move-progress";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
@@ -108,6 +110,7 @@ const api: DiskhoundNativeApi = {
   easyMoveElevated: (sourcePath, destinationDir) => ipcRenderer.invoke("diskhound:easy-move-elevated", sourcePath, destinationDir),
   easyMoveBack: (recordId) => ipcRenderer.invoke("diskhound:easy-move-back", recordId),
   getEasyMoves: () => ipcRenderer.invoke("diskhound:get-easy-moves"),
+  verifyEasyMoves: () => ipcRenderer.invoke("diskhound:verify-easy-moves"),
   pickMoveDestination: () => ipcRenderer.invoke("diskhound:pick-move-destination"),
 
   // Theme
@@ -155,6 +158,13 @@ const api: DiskhoundNativeApi = {
     };
     ipcRenderer.on(NOTIFICATION_CHANNEL, wrapped);
     return () => { ipcRenderer.removeListener(NOTIFICATION_CHANNEL, wrapped); };
+  },
+  onEasyMoveProgress: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, progress: EasyMoveProgress) => {
+      listener(progress);
+    };
+    ipcRenderer.on(EASY_MOVE_PROGRESS_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(EASY_MOVE_PROGRESS_CHANNEL, wrapped); };
   },
 };
 

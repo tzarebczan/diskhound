@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.6 — 2026-04-24
+
+EasyMove robustness + progress visibility pass, driven by user
+verification finding that a prior move had completed but left no
+symlink at the source (silent failure in the 3-tier link fallback).
+
+- **Post-creation link verification.** `createPlatformLink` now
+  `lstat`s the link after each of its three fallback methods
+  (symlink → mklink → hardlink) and throws if the link isn't
+  actually there. Previously each fallback could "succeed" without
+  actually creating anything on disk; the outer try/catch then saved
+  a clean record even though the source was just … gone. Found via
+  user verification: `C:\ProgramData\…\Ubuntu 22.04 LTS.vhdx` was
+  missing with no link, easy-moves.json thought it was fine.
+- **Which link method succeeded is now logged** — crash.log shows
+  `[easy-move-link] method=symlink|mklink|hardlink verified=true`
+  so future failures are easy to triage.
+- **Easy Move tab verifies every record on mount.** New
+  `verifyEasyMoves` IPC runs lstat on every record's source + dest
+  and returns a status per entry. The UI badges each row as
+  `verified` / `link broken` / `dest missing` / `both missing` /
+  `double file` with hover tooltips explaining the state. A
+  "Verify" button re-runs the check on demand.
+- **Live progress toast for cross-drive copies.** Stream-based copy
+  now fires progress events every ~500 ms with bytes-copied,
+  bytes-total, and phase. A single upsert-by-id toast shows
+  "Moving X / Y (Z%)" and updates in place until the move
+  completes. Toast system extended with stable-id upsert + sticky
+  mode (`dismissAfterMs: 0`) so progress entries don't multiply
+  or auto-dismiss mid-copy.
+
 ## 0.5.5 — 2026-04-24
 
 **EasyMove to drive roots (`E:\`, `D:\`, etc.) was broken.** 0.5.4's

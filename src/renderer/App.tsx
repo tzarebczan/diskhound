@@ -31,7 +31,7 @@ import { FolderList } from "./components/FolderList";
 import { Overview } from "./components/Overview";
 import { StartupSplash } from "./components/StartupSplash";
 import { SettingsView } from "./components/SettingsView";
-import { ToastProvider, toast } from "./components/Toasts";
+import { ToastProvider, dismissToast, toast } from "./components/Toasts";
 
 const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "overview", label: "Overview", key: "1" },
@@ -469,11 +469,40 @@ export function App() {
       });
     });
 
+    // EasyMove live progress — cross-drive copies of large files
+    // can take tens of seconds. We show a single upsert-by-id
+    // toast per operation that updates in place as bytes stream,
+    // and auto-dismisses on the final "done" phase.
+    const unsubEasyMoveProgress = nativeApi.onEasyMoveProgress((p) => {
+      const name = p.sourcePath.split(/[\\/]/).pop() ?? p.sourcePath;
+      const toastId = `easy-move:${p.sourcePath}`;
+      if (p.phase === "done") {
+        // Don't spam a "done" toast — the final success/error toast
+        // from easyMove's return value handles the completion UI.
+        // Just dismiss the progress entry so it doesn't linger.
+        dismissToast(toastId);
+        return;
+      }
+      const pct =
+        p.bytesTotal > 0
+          ? Math.min(100, Math.round((p.bytesCopied / p.bytesTotal) * 100))
+          : 0;
+      const copied = formatBytes(p.bytesCopied);
+      const total = formatBytes(p.bytesTotal);
+      toast(
+        "info",
+        p.phase === "linking" ? `Linking ${name}…` : `Moving ${name}`,
+        `${copied} / ${total} (${pct}%)`,
+        { id: toastId, dismissAfterMs: 0 },
+      );
+    });
+
     return () => {
       unsub();
       unsubUpdate();
       unsubDupProgress();
       unsubDupResult();
+      unsubEasyMoveProgress();
     };
   }, []);
 
