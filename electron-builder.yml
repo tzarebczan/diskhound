@@ -60,8 +60,41 @@ mac:
 
 linux:
   target:
+    # AppImage is the "just works" option — single-file binary with
+    # built-in auto-update via electron-updater. Primary recommended
+    # download for most Linux users.
     - target: AppImage
       arch:
         - x64
+    # tar.gz fallback for distros / users that prefer a plain
+    # extract-and-run tree (e.g. custom launchers, sandboxing setups
+    # that don't play nicely with AppImage's FUSE mount). No
+    # auto-update; DiskHound shows an "update available" notification
+    # and links to the GitHub release page.
+    - target: tar.gz
+      arch:
+        - x64
   category: Utility
+  # Explicit icon path. AppImage and tar.gz both embed the 512×512
+  # PNG as the .desktop file's Icon= entry and the window-manager
+  # sidebar icon. Without this override, some distros' AppImage
+  # integrators fall back to a generic Electron glyph (user report:
+  # blank icon in Ubuntu's dash/taskbar on 0.5.1).
+  icon: build/icon.png
+  # Metadata embedded in the .desktop file — controls the name +
+  # tooltip the DE shows alongside the icon. electron-builder 26
+  # expects these under `desktop.entry`, not directly on `desktop`.
+  desktop:
+    entry:
+      Name: DiskHound
+      Comment: Fast disk space analyzer — find and clean up large files
+      Categories: Utility;System;Filesystem;
+      Keywords: disk;space;analyzer;duplicates;cleanup;treemap;
+      StartupWMClass: DiskHound
+  # Metadata used outside the .desktop file (synopsis shows up in
+  # some AppImage catalogs; maintainer is required for deb/rpm if
+  # we add those targets later).
+  synopsis: Fast disk space analyzer
+  description: Fast, cross-platform disk space analyzer. Find what's eating your drive, track changes over time, detect duplicates, and reclaim space.
+  maintainer: DiskHound <noreply@diskhound.app>
   artifactName: "${productName}-${version}-${arch}.${ext}"

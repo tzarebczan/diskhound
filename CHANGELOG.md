@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.5.2 — 2026-04-24
+
+Linux support pass. A user screenshot on Ubuntu 24.04 flagged four
+issues that had been lurking behind the Windows-first development:
+
+### Drive list no longer shows tmpfs / cgroup / proc mounts
+
+`getUnixDiskSpace()` was parsing `df -P -k` output with NO
+filesystem-type filter, so the drive picker showed:
+- `/run` (tmpfs)
+- `/dev/shm` (tmpfs)
+- `/run/lock` (tmpfs)
+- `/run/user/1000` (tmpfs)
+
+none of which are user-scannable storage. Fix: `df -P -k -T`
+(adds fs-type column), allow-list of real filesystems (ext2/3/4,
+btrfs, xfs, zfs, ntfs3, exfat, f2fs, nfs, cifs, etc.), drop
+everything else.
+
+### Linux scanner: virtual FS prune + parallel walk
+
+- **`process_read_dir` prune**: `/proc`, `/sys`, `/dev`, `/run`,
+  `/snap`, `/var/lib/docker/overlay2`, `/var/lib/containers/storage/overlay`
+  are now skipped BEFORE jwalk descends into them. Scanning `/` no
+  longer dives into kernel-generated text files in `/proc` or
+  squashfs loopback mounts under `/snap`.
+- **Rayon-parallel walk**: jwalk now runs with
+  `Parallelism::RayonNewPool(n)` where n = `DISKHOUND_PARALLEL_THREADS`
+  (env override) or `num_cpus::get().clamp(2, 8)`. Prior Linux
+  scanner was serial — noticeable on NVMe-backed filesystems where
+  the I/O layer can service 8+ concurrent `readdir` calls.
+- `[diskhound-native-scanner] linux:` log lines now record walk
+  start (with thread count) and end (files/dirs/skipped counters)
+  so crash.log entries have the same diagnostic density as Windows.
+
+### tar.gz build target alongside AppImage
+
+electron-builder now produces both `DiskHound-<ver>-x86_64.AppImage`
+(recommended, built-in auto-update) and `DiskHound-<ver>-x64.tar.gz`
+(extract-and-run tree, no auto-update). Users whose distros have
+trouble with AppImage's FUSE mount can grab the tar.gz instead.
+
+Release workflow was updated to upload `release/*.tar.gz` to the
+GitHub Release.
+
+### Linux icon + .desktop metadata
+
+AppImage users on Ubuntu reported a blank sidebar icon. Fixed by
+adding explicit `linux.icon`, `linux.desktop` metadata to
+electron-builder.yml:
+- `Name`, `Comment`, `Categories`, `Keywords`, `StartupWMClass`
+- 512×512 PNG embedded in the .desktop file's `Icon=` entry
+
+### Responsive CSS for narrow windows
+
+Drive pills in the header now scroll horizontally on overflow
+instead of clipping, with a soft fade on the right edge hinting
+more-content-offscreen. A new `@media (max-width: 780px)`
+breakpoint:
+- compresses pill padding + font size
+- drops the used/free bar inside pills (not readable below 14 px)
+- shrinks tab padding
+- caps `.scan-input` tighter so drives get more room
+
+Existing `@media (max-width: 960px)` breakpoint was extended with
+a `max-width: 50vw` cap on `.drive-pills` so it can't steal all
+the header space.
+
 ## 0.5.1 — 2026-04-24
 
 Polish + bug-fix pass following the 0.5.0 public release. Everything

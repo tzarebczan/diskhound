@@ -1065,11 +1065,97 @@ fn scan_root(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
     scan_generic(root_path, state)
 }
 
+/// Virtual / pseudo filesystem mount points that a user scan should
+/// never descend into. Walking these is both meaningless (the
+/// "files" under /proc and /sys are kernel-generated text and
+/// change every read) and occasionally dangerous (certain /proc
+/// entries can hang or cause side effects when opened).
+///
+/// The list covers the roots only; jwalk handles the subtree by
+/// virtue of the `.process_read_dir()` predicate pruning the walk
+/// below these mounts.
+///
+/// Docker and snap bind-mounts are excluded too — docker's
+/// overlayfs images + snap squashfs mounts multiply the visible
+/// file count 10-100× without telling the user anything useful
+/// about the host filesystem's free space.
+#[cfg(not(windows))]
+const LINUX_SKIP_PREFIXES: &[&str] = &[
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/snap",
+    "/var/lib/docker/overlay2",
+    "/var/lib/docker/containers",
+    "/var/lib/containers/storage/overlay",
+    // Flatpak + Nix per-app mounts; not the install roots, just the
+    // transient bind-mount views that blow up file counts.
+    "/var/lib/flatpak/exports",
+];
+
+#[cfg(not(windows))]
+fn should_skip_linux_path(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    // Match exact prefix followed by end-of-string or '/'. Pure
+    // `starts_with` would false-positive on paths like
+    // "/devices" matching "/dev".
+    for prefix in LINUX_SKIP_PREFIXES {
+        if s.len() == prefix.len() && s == *prefix {
+            return true;
+        }
+        if s.len() > prefix.len()
+            && s.as_bytes().starts_with(prefix.as_bytes())
+            && s.as_bytes()[prefix.len()] == b'/'
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(not(windows))]
 fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
+    // Parallelism: jwalk's default is serial. We explicitly enable
+    // parallelism via rayon's thread pool (bounded to 8 threads to
+    // match the Windows-parallel-walker tuning). The biggest wins
+    // are on ext4/btrfs on NVMe — directory enumeration is
+    // embarrassingly parallel at the I/O layer since readdir on
+    // separate directories hits different inode blocks.
+    //
+    // DISKHOUND_PARALLEL_THREADS env var lets users override,
+    // matching the Windows walker for consistency.
+    let thread_override = std::env::var("DISKHOUND_PARALLEL_THREADS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+    let thread_count = thread_override
+        .unwrap_or_else(|| num_cpus::get().clamp(2, 8));
+
     let walker = WalkDir::new(root_path)
         .sort(false)
-        .skip_hidden(false);
+        .skip_hidden(false)
+        .parallelism(jwalk::Parallelism::RayonNewPool(thread_count))
+        // Prune virtual/pseudo filesystems BEFORE descending. Drops
+        // /proc, /sys, /dev, /run, /snap, docker overlayfs, etc. so
+        // we never touch kernel-generated content. Without this a
+        // scan of `/` produced millions of bogus entries and sometimes
+        // hung on e.g. /proc/kcore.
+        .process_read_dir(|_depth, _path, _state, children| {
+            children.retain(|child_result| {
+                if let Ok(child) = child_result {
+                    !should_skip_linux_path(&child.path())
+                } else {
+                    true // Let the outer loop handle read errors.
+                }
+            });
+        });
+
+    eprintln!(
+        "[diskhound-native-scanner] linux: walking with jwalk, {} rayon threads",
+        thread_count
+    );
+    let walk_started = Instant::now();
 
     for entry in walker {
         if is_cancelled() {
@@ -1140,6 +1226,13 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         record_file(state, file_record)?;
     }
 
+    eprintln!(
+        "[diskhound-native-scanner] linux: walk done in {} ms (files={}, dirs={}, skipped={})",
+        walk_started.elapsed().as_millis(),
+        state.files_visited,
+        state.directories_visited,
+        state.skipped_entries,
+    );
     Ok(())
 }
 

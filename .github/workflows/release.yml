@@ -74,6 +74,7 @@ jobs:
             release/*.exe
             release/*.dmg
             release/*.AppImage
+            release/*.tar.gz
             release/*.yml
             release/*.blockmap
           if-no-files-found: ignore

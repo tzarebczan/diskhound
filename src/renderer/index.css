@@ -905,7 +905,22 @@ button, input, select, textarea { font: inherit; }
   display: flex;
   gap: 6px;
   align-items: center;
+  /* Horizontally scrollable on narrow windows instead of overflowing
+     the header. Prior to 0.5.2, on a ~900 px-wide window the pills
+     would overflow to the right and get clipped by the next row's
+     controls. Now they scroll in place; shadow cues on the edges
+     hint there's more. Scrollbar is hidden — overflow is navigated
+     by wheel/trackpad just like the tab bar below. */
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-width: 0; /* lets flex shrink this below content-width */
+  /* Soft fade on the right edge when content overflows, to hint
+     more-content-offscreen without a visible scrollbar. Uses a
+     mask so it works over any background. */
+  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
+          mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
 }
+.drive-pills::-webkit-scrollbar { display: none; }
 
 .drive-pill {
   display: flex;
@@ -920,6 +935,8 @@ button, input, select, textarea { font: inherit; }
   color: var(--text-secondary);
   cursor: pointer;
   transition: all 0.12s;
+  flex-shrink: 0; /* pills keep their content size; no squishing */
+  white-space: nowrap;
 }
 .drive-pill:hover {
   background: var(--bg-row-hover);
@@ -6214,6 +6231,41 @@ button, input, select, textarea { font: inherit; }
   .file-age { display: none; }
   .cleanup-grid { grid-template-columns: 1fr; }
   .picker-card { max-width: 100%; padding: 20px; }
+
+  /* Narrow-window header: picker-card was consuming the whole view
+     width on ~900 px windows and wrapping awkwardly. Cap it at 90 %
+     with centered auto-margins so the page breathes. */
+  .drive-pills {
+    max-width: 50vw;
+  }
+}
+
+/* Very small windows (e.g. side-by-side on a 1080p display). Drop
+   visual padding in the header, compress the pill text, and give
+   the tab bar more horizontal room by dropping the scan-input
+   max-width cap. */
+@media (max-width: 780px) {
+  .drive-pills {
+    max-width: 40vw;
+  }
+  .drive-pill {
+    font-size: 10px;
+    padding: 2px 6px;
+    gap: 4px;
+  }
+  .drive-pill .drive-pill-bar {
+    display: none; /* hide the tiny used/free bar — not readable */
+  }
+  .tab-btn {
+    padding: 0 12px;
+    font-size: 12px;
+  }
+  .scan-input {
+    max-width: 220px;
+  }
+  .picker-card {
+    padding: 14px;
+  }
 }
 
 /* ── GPU tab ────────────────────────────────────────────────────────── */

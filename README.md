@@ -27,7 +27,7 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 
 ## Features
 
-- 🦀 **Native Rust scanner** — reads the NTFS Master File Table directly on Windows drives (with admin), dropping cold scans on a 7 M-file drive from ~20 minutes to **under 90 seconds**. Falls back cleanly to `FindFirstFileExW` without admin, or `jwalk` on macOS/Linux.
+- 🦀 **Native Rust scanner** — reads the NTFS Master File Table directly on Windows drives (with admin), dropping cold scans on a 7 M-file drive from ~20 minutes to **under 90 seconds**. Falls back cleanly to `FindFirstFileExW` without admin. On Linux/macOS, a Rayon-parallel `jwalk` traversal skips virtual filesystems (`/proc`, `/sys`, `/dev`, `/run`, `/snap`, Docker overlayfs) and scales across CPU cores.
 - 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Two layouts: "Size" (largest-first, globally ordered) and "Tree" (WinDirStat-style — files cluster inside their parent directory's rectangle, with subtle depth-modulated folder outlines). Right-click any rectangle for reveal/open/trash/move actions.
 - ⚡ **Incremental monitoring** — after the first full scan, DiskHound tracks disk changes via the NTFS USN journal (Windows) and an mtime-based smart rescan (cross-platform). Repeat scans on a mostly-idle drive are 10–50× faster than a full walk — typical hourly checks complete in seconds, populating the Changes tab automatically.
 - 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index. History entries show an icon indicating whether they came from a fast delta scan or a full walk.
@@ -50,7 +50,7 @@ Download the latest release for your platform from [**Releases**](https://github
 |---|---|
 | Windows | `DiskHound-<version>-Setup.exe` (NSIS installer) |
 | macOS | `DiskHound-<version>-x64.dmg` / `-arm64.dmg` |
-| Linux | `DiskHound-<version>-x86_64.AppImage` |
+| Linux | `DiskHound-<version>-x86_64.AppImage` (recommended — built-in auto-update) or `DiskHound-<version>-x64.tar.gz` (extract-and-run tree) |
 
 ## Screenshots
 

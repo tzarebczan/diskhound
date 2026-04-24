@@ -230,22 +230,71 @@ async function getWindowsDiskSpaceFallback(): Promise<DiskSpaceInfo[]> {
   }
 }
 
+/**
+ * Filesystem types that represent real user storage we want to surface.
+ * Ordering by frequency: ext4 covers most Linux desktops, btrfs common on
+ * modern distros, NTFS/exFAT/FAT used on removable media. Types NOT in
+ * this allow-list (tmpfs, proc, sysfs, cgroup, devtmpfs, squashfs,
+ * overlay, fusectl, etc.) are virtual/pseudo filesystems that shouldn't
+ * appear in the drive picker — users don't scan "memory" or cgroups.
+ */
+const REAL_FILESYSTEM_TYPES = new Set([
+  "ext2", "ext3", "ext4",
+  "btrfs",
+  "xfs",
+  "zfs",
+  "reiserfs",
+  "jfs",
+  "f2fs",
+  "ntfs", "ntfs3",       // ntfs-3g (fuse) or kernel ntfs3
+  "exfat",
+  "vfat", "msdos", "fat",
+  "udf",                 // DVD/CD data
+  "iso9660",             // mounted ISO images (sometimes worth scanning)
+  "hfs", "hfsplus",
+  "apfs",
+  "nfs", "nfs4",
+  "cifs", "smbfs",
+  "fuseblk",             // fuse-mounted block devices (exfat-fuse, etc.)
+]);
+
 async function getUnixDiskSpace(): Promise<DiskSpaceInfo[]> {
   try {
-    const { stdout } = await execFileAsync("df", ["-P", "-k"], { timeout: 10_000 });
+    // `df -P -k -T` is POSIX-portable AND includes the filesystem type
+    // as an extra column. Adding -T upfront means we never need to
+    // cross-reference /proc/mounts — one subprocess, one parse pass.
+    // Column layout with -T:
+    //   Filesystem  Type  1024-blocks  Used  Available  Capacity  Mounted on
+    const { stdout } = await execFileAsync("df", ["-P", "-k", "-T"], { timeout: 10_000 });
     const lines = stdout.trim().split("\n").slice(1);
     const drives: DiskSpaceInfo[] = [];
 
     for (const line of lines) {
       const parts = line.trim().split(/\s+/);
-      if (parts.length < 6) continue;
+      if (parts.length < 7) continue;
 
-      const totalKb = parseInt(parts[1] ?? "0", 10);
-      const usedKb = parseInt(parts[2] ?? "0", 10);
-      const freeKb = parseInt(parts[3] ?? "0", 10);
-      const mount = parts[5] ?? "";
+      const fsType = (parts[1] ?? "").toLowerCase();
+      const totalKb = parseInt(parts[2] ?? "0", 10);
+      const usedKb = parseInt(parts[3] ?? "0", 10);
+      const freeKb = parseInt(parts[4] ?? "0", 10);
+      const mount = parts[6] ?? "";
 
-      if (totalKb === 0 || mount.startsWith("/snap") || mount.startsWith("/boot")) continue;
+      // Skip if zero-sized (empty tmpfs instances, broken mounts)
+      if (totalKb === 0) continue;
+      // Skip snap-specific mount bind points (each installed snap shows
+      // up as a squashfs loopback under /snap/<name>/<rev>).
+      if (mount.startsWith("/snap")) continue;
+      // Skip the EFI boot partition — small, not user-actionable.
+      if (mount.startsWith("/boot")) continue;
+
+      // Allow-list filter: only real user-storage filesystem types pass.
+      // Before 0.5.2 there was no type filter and /run (tmpfs), /dev/shm
+      // (tmpfs), /run/lock (tmpfs), /run/user/1000 (tmpfs) all appeared
+      // in the drive picker — useless entries taking up valuable UI
+      // space. Virtual / pseudo filesystems (tmpfs, devtmpfs, proc,
+      // sysfs, cgroup, overlay, squashfs, fusectl, etc.) are not
+      // user-scannable storage, so we drop them here.
+      if (fsType && !REAL_FILESYSTEM_TYPES.has(fsType)) continue;
 
       drives.push({
         drive: mount,
