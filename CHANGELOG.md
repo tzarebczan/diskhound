@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.5.7 — 2026-04-24
+
+Scan-status copy was contradicting itself on rescans of multi-million-
+file drives. User reported seeing "Getting ready — could take a
+couple of minutes on large drives (43 s elapsed)" → then "Reading
+the volume's filesystem metadata — this can take 30-60 seconds on
+drives with millions of files (1m 23 s elapsed)". The "30-60 s"
+phrase was unreachable relative to the scan-start timer (we'd
+already burned 60 s+ loading the baseline before the MFT read even
+started) and "Getting ready" misrepresented a 45-second baseline
+load as pre-scan prep.
+
+Fix: dispatch on `scan_phase` first, only use elapsed time as a
+qualifier. Three cases:
+
+1. **`starting` phase** (baseline-index load on rescans): now says
+   "Loading the prior scan's index — this speeds up the rescan"
+   with tiered copy that acknowledges long waits honestly
+   ("typical on drives with millions of files" → "large drives or
+   slow disks can take 2-3 minutes") instead of "Getting ready".
+2. **`reading_metadata` phase** (MFT bulk read): drops the absolute
+   "30-60 seconds" claim that made elapsed timing look contradictory;
+   now "typically 15-60 seconds of work, depending on file count" —
+   the estimate is about the phase, not the total scan.
+3. **fallback** (indexing / walker): unchanged early copy;
+   transitions to "Indexing files — tiles will stream in as
+   they're processed" once we're past the prep window.
+
+Byproduct: first-scan users (no baseline to load) still see the
+"Getting ready" → "first files should appear" → indexing arc
+quickly. Only rescans see the new baseline-load copy, where it
+actually applies.
+
 ## 0.5.6 — 2026-04-24
 
 EasyMove robustness + progress visibility pass, driven by user

@@ -372,30 +372,43 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
                     // counter so the flash is absorbed), keeping the
                     // title stable from scan-start to completion.
                     const title = `Scanning ${snapshot.rootPath}…`;
-                    // Pre-file-count copy. During reading_metadata the
-                    // scanner is bulk-reading the NTFS MFT to discover
-                    // every record on the volume — no file paths have
-                    // been reconstructed yet, so telling the user
-                    // "first files should appear in a few seconds"
-                    // was misleading. Explain what's happening.
-                    // Tiered copy so we don't lie when the actual wait
-                    // exceeds the initial estimate. On a 7M-file HDD
-                    // the walker can spend 10+ minutes in "reading
-                    // metadata" before the first file path is
-                    // emitted. Saying "a few seconds" at the 2m mark
-                    // makes it look broken.
-                    const preScanCopy =
-                      phase === "reading_metadata"
-                        ? displayElapsedMs < 20_000
-                          ? "Reading the volume's filesystem metadata — paths will be reconstructed in a moment"
-                          : displayElapsedMs < 90_000
-                            ? "Reading the volume's filesystem metadata — this can take 30-60 seconds on drives with millions of files"
-                            : "Still reading filesystem metadata — on multi-million-file drives or HDDs this can take several minutes. Leave it running."
-                        : displayElapsedMs < 30_000
-                          ? "Getting ready — first files should appear in a few seconds"
+                    // Phase-specific pre-scan copy. We dispatch on
+                    // `phase` FIRST (what's actually happening) and
+                    // only use elapsed time as a secondary qualifier
+                    // for long-waits. Previously `displayElapsedMs`
+                    // was measured from scan-start, so messages like
+                    // "30-60 seconds" read wrong when baseline
+                    // loading already burned the first 60 seconds.
+                    //
+                    // Phase semantics:
+                    //   - starting            : baseline index load
+                    //     (rescan-only). 0-90 s typical; 0-5 s on
+                    //     first scan since there's no baseline.
+                    //   - reading_metadata    : NTFS MFT bulk read.
+                    //     10-60 s typical; no file paths yet.
+                    //   - (no phase / else)   : walker or pre-emit
+                    //     in edge cases.
+                    //
+                    // Done/Indexing/Finalizing have richer copy
+                    // below (sub) that supersedes this.
+                    let preScanCopy: string;
+                    if (phase === "starting") {
+                      preScanCopy = displayElapsedMs < 5_000
+                        ? "Getting ready…"
+                        : displayElapsedMs < 45_000
+                          ? "Loading the prior scan's index — this speeds up the rescan"
                           : displayElapsedMs < 120_000
-                            ? "Getting ready — could take a couple of minutes on large drives"
-                            : "Scanning a very large drive — this is normal on drives with millions of files. Tiles will stream in as they're processed.";
+                            ? "Still loading the prior scan's index — typical on drives with millions of files"
+                            : "Still loading the prior scan's index — large drives or slow disks can take 2-3 minutes";
+                    } else if (phase === "reading_metadata") {
+                      preScanCopy = displayElapsedMs < 20_000
+                        ? "Reading the volume's filesystem metadata — paths will be reconstructed in a moment"
+                        : "Reading the volume's filesystem metadata — typically 15-60 seconds of work, depending on file count";
+                    } else {
+                      preScanCopy = displayElapsedMs < 30_000
+                        ? "Getting ready — first files should appear in a few seconds"
+                        : "Indexing files — tiles will stream in as they're processed";
+                    }
                     // During the indexing phase the scanner pre-sorts
                     // records biggest-first so bytes saturate the
                     // progress bar at ~98% long before the millions of
