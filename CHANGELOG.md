@@ -1,283 +1,151 @@
 # Changelog
 
-## 0.5.9 — 2026-04-24
-
-Two improvements driven by user feedback:
-
-### EasyMove verify: distinguishes "access denied" from "missing"
-
-User verified my earlier conclusion about a broken Ubuntu VHDX
-symlink — turned out `fsutil reparsepoint query` returned *Access
-is denied*, not *File not found*. The symlink IS still there; a
-non-elevated shell can't enumerate `C:\ProgramData\Microsoft\
-Windows\Virtual Hard Disks\` because that parent directory is
-ACL-locked.
-
-The previous `verifyEasyMoves` code collapsed EACCES/EPERM into
-"sourceExists = false" and badged the record as "link broken". Now
-it distinguishes:
-- **ENOENT** → actually missing (badge: "link broken")
-- **EACCES / EPERM** → can't tell from this shell (badge:
-  "needs admin to verify", hover explains the ACL situation)
-
-### Duplicates: ~60-minute scans → seconds on repeat runs
-
-Four wins layered together:
-
-1. **Persistent hash cache** at
-   `<userData>/duplicate-hash-cache.ndjson.gz`. Keyed by
-   `(path, size, mtime)` → SHA-256. On repeat scans, files that
-   haven't changed skip the read+hash entirely. First scan pays
-   the full 30-60 minute hash cost; subsequent scans finish in
-   seconds for unchanged files. Cache is LRU-bounded at 500 k
-   entries.
-2. **Cross-group parallelism**. Prior code serialised per-size-
-   group: a single 500-file group of 4 GB videos blocked every
-   other group. Now the prefix-hash and full-hash passes
-   parallelise across ALL candidates globally — 16 in flight at
-   any time.
-3. **HASH_CONCURRENCY bumped 8 → 16**. Modern NVMe handles 16+
-   concurrent streaming reads without seek contention.
-   Configurable via `DISKHOUND_HASH_CONCURRENCY` env var.
-4. **Streaming results into the UI.** Progress events now carry
-   a `newGroups` delta — every ~200 ms the scanner flushes
-   newly-confirmed duplicate groups, and the renderer appends
-   them to the list in real time. Users watching a 30-minute
-   scan no longer stare at a counter-only progress bar — their
-   biggest wasted-space finds appear as they're discovered,
-   typically within the first minute. Final `onDuplicateResult`
-   overwrites with the sorted full list for the canonical view.
-
-Architecture refactor side-effect: the hashing loop is now two
-flat `mapConcurrent` passes (prefix → bucket → full → bucket)
-instead of nested per-group loops. Simpler to reason about; easier
-to extend if we ever want BLAKE3 or sampled-hash options.
-
-## 0.5.8 — 2026-04-24
-
-EasyMove progress coverage extended to the two phases that used to
-run silently:
-
-- **Robocopy phase**. When a move hits the `/b` fallback (elevated
-  moves of TrustedInstaller-owned files like a 12 GB Hyper-V VHDX),
-  robocopy doesn't expose a parseable progress stream. We now poll
-  the destination file's size every 750 ms during the robocopy run
-  and emit progress events — user sees a live counter instead of a
-  frozen toast.
-- **Link-creation phase**. `createPlatformLink` is fast for
-  symbolic links but can take 1–2 seconds for mklink + junctions.
-  We now emit `phase: "linking"` immediately before that step so
-  the toast title flips to "Linking X…" instead of showing the
-  copying state at 100% until success lands.
-- **`phase: "done"` on every exit path**. Progress toast now
-  dismisses cleanly on robocopy failure, non-elevated short-
-  circuit, link-failure rollback, and the outer error catch — no
-  lingering "Copying" toasts after a failed move.
-
-## 0.5.7 — 2026-04-24
-
-Scan-status copy was contradicting itself on rescans of multi-million-
-file drives. User reported seeing "Getting ready — could take a
-couple of minutes on large drives (43 s elapsed)" → then "Reading
-the volume's filesystem metadata — this can take 30-60 seconds on
-drives with millions of files (1m 23 s elapsed)". The "30-60 s"
-phrase was unreachable relative to the scan-start timer (we'd
-already burned 60 s+ loading the baseline before the MFT read even
-started) and "Getting ready" misrepresented a 45-second baseline
-load as pre-scan prep.
-
-Fix: dispatch on `scan_phase` first, only use elapsed time as a
-qualifier. Three cases:
-
-1. **`starting` phase** (baseline-index load on rescans): now says
-   "Loading the prior scan's index — this speeds up the rescan"
-   with tiered copy that acknowledges long waits honestly
-   ("typical on drives with millions of files" → "large drives or
-   slow disks can take 2-3 minutes") instead of "Getting ready".
-2. **`reading_metadata` phase** (MFT bulk read): drops the absolute
-   "30-60 seconds" claim that made elapsed timing look contradictory;
-   now "typically 15-60 seconds of work, depending on file count" —
-   the estimate is about the phase, not the total scan.
-3. **fallback** (indexing / walker): unchanged early copy;
-   transitions to "Indexing files — tiles will stream in as
-   they're processed" once we're past the prep window.
-
-Byproduct: first-scan users (no baseline to load) still see the
-"Getting ready" → "first files should appear" → indexing arc
-quickly. Only rescans see the new baseline-load copy, where it
-actually applies.
-
-## 0.5.6 — 2026-04-24
-
-EasyMove robustness + progress visibility pass, driven by user
-verification finding that a prior move had completed but left no
-symlink at the source (silent failure in the 3-tier link fallback).
-
-- **Post-creation link verification.** `createPlatformLink` now
-  `lstat`s the link after each of its three fallback methods
-  (symlink → mklink → hardlink) and throws if the link isn't
-  actually there. Previously each fallback could "succeed" without
-  actually creating anything on disk; the outer try/catch then saved
-  a clean record even though the source was just … gone. Found via
-  user verification: `C:\ProgramData\…\Ubuntu 22.04 LTS.vhdx` was
-  missing with no link, easy-moves.json thought it was fine.
-- **Which link method succeeded is now logged** — crash.log shows
-  `[easy-move-link] method=symlink|mklink|hardlink verified=true`
-  so future failures are easy to triage.
-- **Easy Move tab verifies every record on mount.** New
-  `verifyEasyMoves` IPC runs lstat on every record's source + dest
-  and returns a status per entry. The UI badges each row as
-  `verified` / `link broken` / `dest missing` / `both missing` /
-  `double file` with hover tooltips explaining the state. A
-  "Verify" button re-runs the check on demand.
-- **Live progress toast for cross-drive copies.** Stream-based copy
-  now fires progress events every ~500 ms with bytes-copied,
-  bytes-total, and phase. A single upsert-by-id toast shows
-  "Moving X / Y (Z%)" and updates in place until the move
-  completes. Toast system extended with stable-id upsert + sticky
-  mode (`dismissAfterMs: 0`) so progress entries don't multiply
-  or auto-dismiss mid-copy.
-
-## 0.5.5 — 2026-04-24
-
-**EasyMove to drive roots (`E:\`, `D:\`, etc.) was broken.** 0.5.4's
-diagnostic tracing surfaced the actual failure:
-
-```
-[easy-move] start src=C:\testing\...\headers dest=E:\
-[easy-move] stat ok isDir=false size=88388496
-[easy-move] outer catch error code=EPERM msg=EPERM: operation not permitted, mkdir 'E:\'
-```
-
-Node's `fs.mkdir('E:\\', { recursive: true })` throws EPERM on
-Windows drive roots — Windows refuses `CreateDirectoryW` on a drive
-letter even when it already exists. This is a known Node quirk
-(see nodejs/node#43831) and the `recursive: true` option doesn't
-short-circuit for drive roots.
-
-Fix:
-- Skip `fs.mkdir` entirely when `destinationDir` already exists.
-- **Outer-catch error messages now dispatch on `err.syscall`**, so
-  an `mkdir` failure says "Can't create destination folder" instead
-  of the misleading "Another process is likely holding the file
-  open" that blamed the source when the problem was on the
-  destination side.
-- Full underlying error message now appended to the toast so the
-  diagnostic is visible without crash-log digging.
-
-Users seeing the old "Another process is likely holding…" on a
-simple .txt move were hitting this mkdir bug, not a real file lock.
-
-## 0.5.4 — 2026-04-24
-
-EasyMove diagnostics pass. Users reported EPERM-locked messages
-on `C:\Windows\LiveKernelReports\*.dmp` even on elevated scans
-despite 0.5.2's robocopy `/b` fallback. The existing logging stopped
-at the scanner boundary — we couldn't tell whether robocopy was
-actually invoked, what its exit code was, or whether `isElevated()`
-was returning what we expected.
-
-- **Crash-log tracing throughout `easyMove`**: every decision point
-  now writes an `[easy-move]` entry (stat result, rename result,
-  isElevated probe, robocopy spawn args + exit code + stdout/stderr,
-  outer catch error code). Next time a user hits EPERM, the log
-  will tell us exactly which tier failed.
-- **Robocopy failure now returns a specific, actionable message**
-  naming robocopy's exit code + hint about live processes
-  (Hyper-V / WSL / dump consumers) — replaces the old generic
-  "another process holding it open" string that masked the real
-  robocopy diagnostic.
-
-## 0.5.3 — 2026-04-24
-
-Walker-scan polish pass, rooted in user-reported log evidence:
-
-- **Folders tab showed 21 files / zero subdirs at C:\ on non-elevated
-  rescans.** Root cause: the walker's inheritance branch wrote
-  inherited dirs to the NDJSON index but skipped adding them to
-  `state.directory_totals`. The sidecar builder assembles each
-  parent's `d` (subdirs) array from `directory_totals` — with only
-  the root present, every parent's `d` was `[]`. Fix: inheritance
-  branch now populates `directory_totals` for every subtree dir
-  using the baseline's `dir_total_sizes` + `dir_file_counts` for
-  accurate per-dir size + file count. Applies to both the
-  sequential walker and the parallel walker's root-inheritance
-  shortcut. On a C:\ scan: root now shows C:\Users, C:\Windows,
-  C:\ProgramData, etc. — 1 M+ dirs populated correctly in the
-  sidecar instead of 0.
-
-- **Progress bar stuck at 99% for minutes on non-elevated rescans.**
-  Walker path never set `scan_phase`, so the UI's files-indexed
-  fraction ("1.6 M / 8.3 M files indexed · 99%") never kicked in —
-  the bar clamped at 99% with no hint the scan was still working.
-  Fix: walker entry sets `scan_phase = Indexing` (seeds
-  `expected_total_files` from baseline when available) and
-  `Finalizing` at post-walk-stream entry. UI now shows a moving
-  files-indexed fraction + "Finalizing" copy rather than a stuck
-  percentage.
-
-- **No tiles streaming during non-elevated scans.** The walker
-  populates `state.largest_files` in-process, but
-  `stream_inherited_files_into` (which processes 7 M+ inherited
-  file records post-walk) didn't call `maybe_emit_progress`
-  anywhere in its loop. Tiles grew in memory but never left to the
-  UI. Fix: emit every 50 K records; maybe_emit_progress's 200 ms
-  throttle handles the rate limit.
-
-- **Abrupt tile update at scan-end.** Running snapshots carried
-  top-200 tiles, Done carried top-5000. User saw the 4 800
-  additional small rectangles pop in at finalization. Fix: bump
-  running cap to 500. Pipe cost: ~1 MB/sec stdout at 5 emits/sec —
-  modest. Done transition now feels like a polish rather than a
-  redraw.
-
-## 0.5.2 — 2026-04-24
-
-EasyMove on TrustedInstaller-owned paths (Hyper-V VHDX in
-`C:\ProgramData\Microsoft\Windows\Virtual Hard Disks\`, etc.) now
-works. 0.5.1 got past `fs.stat` EPERM but `fs.rename` itself still
-failed because Node doesn't enable `SeBackupPrivilege` — so even an
-elevated DiskHound couldn't move the file.
-
-Fix: escalate to `robocopy /move /b` when `fs.rename` hits a
-permission error. `/b` (backup semantics) uses the admin token's
-`SeBackupPrivilege`, which is specifically designed for this case —
-Windows ships robocopy exactly for administrative moves across
-ACL-locked files. Applies to both the direct move path (when already
-elevated) and the elevated-PowerShell retry (when a non-elevated
-user accepts UAC).
-
-Non-elevated users hitting a protected path still get the
-`requiresElevation: true` signal, so the renderer prompts for UAC
-before attempting the move.
-
 ## 0.5.1 — 2026-04-24
 
-Bug-fix follow-up to 0.5.0:
+Polish + bug-fix pass following the 0.5.0 public release. Everything
+that shipped in local 0.5.1–0.5.9 iterations is consolidated here.
 
-- **Folders tab empty / showing handful of entries after USN rescan.**
-  USN-journal scans update the NDJSON index incrementally but never
-  emitted a folder-tree sidecar, so `history[0]` became a USN scan
-  with no sidecar, the next Folders-tab open fell through to the
-  worker-based rebuild (300+ MB gzipped NDJSON → 1.5 GB decompressed),
-  and on big drives the worker either OOM'd or produced a partial
-  tree. Fix: USN completion now copies the predecessor full scan's
-  sidecar forward to the new history entry. Accuracy is near-perfect
-  (USN deltas affect a tiny fraction of entries) and the next full
-  scan refreshes it. Logs: `[folder-tree-sidecar-carry-forward] usn
-  scan <id> carried forward sidecar from <prev-id>`.
+### Scan correctness + self-healing
 
-- **EasyMove EPERM on Windows-protected paths even when elevated.**
-  Hyper-V VHDX files under `C:\ProgramData\Microsoft\Windows\Virtual
-  Hard Disks\` are TrustedInstaller-owned, so `fs.stat` fails with
-  EPERM even for admins (Node doesn't enable SeBackupPrivilege by
-  default). Before: the user saw "Another process is likely holding
-  the file open" but nothing was locking it. Fix: on stat EPERM,
-  fall back to `lstat` (different CreateFile flags — works on more
-  paths), or guess `isDirectory` from the filename extension and
-  attempt the rename anyway. `fs.rename` on Windows only needs
-  write access to the source directory, not the file metadata
-  handle, so moves now succeed on paths where stat doesn't.
+- **Rescan truncation fix.** Non-elevated rescans following an
+  elevated MFT scan were silently dropping every inherited file
+  record — `Arc<ParallelSharedCtx>` held a clone of the baseline
+  Arc through `try_unwrap`, so the post-walk stream got skipped
+  and indices were written with 1.26 M dirs but only ~1968 file
+  records. Explicit `drop(shared)` before `try_unwrap` fixes it.
+- **Truncated-baseline auto-rejection.** A follow-up to the above:
+  previous buggy scans left poisoned on-disk indices that
+  self-propagated through subsequent rescans. The baseline loader
+  now rejects any index where `file_records < dir_count / 2` (real
+  NTFS has 5-50× more files than dirs), forcing a fresh full walk
+  that rebuilds cleanly. User sees a one-time info toast
+  explaining the rebuild. Self-healing — no manual intervention.
+- **USN rescans carry forward the folder-tree sidecar.** USN-journal
+  rescans update the NDJSON index but don't write a sidecar; the
+  next Folders-tab open forced a 300+ MB rebuild via an OOM-prone
+  worker. USN completion now copies the predecessor full scan's
+  sidecar to the new history entry (near-perfect accuracy since
+  USN deltas affect <1% of entries, refreshed on next full scan).
+- **Folder-tree worker heap 8 GB → 12 GB.** Bigger headroom for
+  drives past ~8 M records; paired with a `sidecar-empty-skip-rebuild`
+  guard that avoids re-running the worker when the sidecar exists
+  but parsed to zero entries.
+- **Walker populates `directory_totals` for inherited subtree dirs.**
+  Without this, the sidecar's `d` (subdirs) array was empty for every
+  parent — Folders tab showed 21 files at C:\ and no subfolders on
+  non-elevated rescans. The inheritance branch now primes
+  `directory_totals` using the baseline's per-dir aggregates.
+
+### Scan UX
+
+- **Phase-first scan-status copy.** Scan-start elapsed time no longer
+  lies about what's happening. `starting` (baseline load) → "Loading
+  the prior scan's index — this speeds up the rescan". Previously a
+  60-second baseline load was labelled "Getting ready" then followed
+  by a "30-60 seconds" MFT-read estimate that read as contradictory
+  at 1 m 23 s elapsed.
+- **Walker sets `scan_phase`.** Non-elevated walker used to stay on
+  `Starting` forever, clamping the UI at 99 % until scan-done. It now
+  transitions `Indexing` → `Finalizing` with `expected_total_files`
+  seeded from baseline.
+- **Tile streaming on all scan paths.** The running-status snapshot
+  now always includes the top-500 `largest_files` (up from the
+  one-shot lite-mode flip). On elevated scans the tile_slot is
+  assigned to the first-file shard instead of shard 0 — on dir-heavy
+  drives shard 0 was entirely dirs and never published. Non-elevated
+  walker's post-walk inherited-file stream emits progress every 50 K
+  records so tiles stream there too.
+- **Scheduled-task elevation reliability.** Tasks are now registered
+  with `<UserId>` + `LogonType=InteractiveToken` + `RunLevel=
+  HighestAvailable` instead of `<GroupId>S-1-5-32-544</GroupId>` —
+  the Administrators-group principal made tasks invisible + un-
+  runnable from the user's non-elevated shell. `hasScheduledTask`
+  also distinguishes "access denied" from "doesn't exist" now.
+  Settings toast surfaces the real schtasks error on failure.
+- **Single-instance lock handles relaunch-as-admin.** Elevated child
+  launched via `Start-Process -Verb RunAs` carries
+  `--relaunched-as-admin`; lock acquisition retries up to 5 s for
+  either that flag or `--launched-by-task` so the handoff doesn't
+  leave the user with no window.
+
+### Duplicates: 30-60 minute scans → seconds on repeat
+
+- **Persistent SHA-256 cache** at
+  `<userData>/duplicate-hash-cache.ndjson.gz`, keyed by
+  `(path, size, mtime)`. Unchanged files skip the read+hash
+  entirely on repeat scans. LRU-bounded at 500 k entries.
+- **Cross-group parallelism.** Two flat `mapConcurrent` passes
+  (prefix → bucket → full → bucket) replace the per-size-group
+  serial loop. A 500-file bucket of 4 GB videos no longer blocks
+  every other group.
+- **Concurrency 8 → 16** (configurable via
+  `DISKHOUND_HASH_CONCURRENCY`). Modern NVMe handles 16+ concurrent
+  streaming reads without seek contention.
+- **Streaming results into the UI.** Progress events carry a
+  `newGroups` delta; the renderer appends groups to its list every
+  ~200 ms so users see their biggest wasted-space finds within the
+  first minute instead of waiting for scan-end.
+
+### EasyMove: reliability + progress visibility
+
+- **Robocopy `/b` fallback** for TrustedInstaller-owned paths (Hyper-V
+  VHDX under `C:\ProgramData\...\Virtual Hard Disks\`, etc.).
+  `fs.rename`/`fs.copyFile` use basic `CreateFileW` which doesn't
+  enable `SeBackupPrivilege`; robocopy's `/b` flag does. Chain is:
+  rename → copyFile → robocopy → elevation prompt.
+- **`fs.mkdir` drive-root guard.** Moves to `E:\` (the drive root)
+  were failing because Node's recursive mkdir doesn't short-circuit
+  for existing drive letters (nodejs/node#43831). Now we
+  `existsSync`-check before mkdir.
+- **Live progress toast.** Stream-based cross-drive copies emit
+  bytes-copied events every ~500 ms; a single upsert-by-id toast
+  shows "Moving X / Y (Z %)" and updates in place. Robocopy path
+  polls destination file size every 750 ms to surface progress for
+  VHDX-sized moves. Link-creation phase emits `phase: "linking"` so
+  the toast title flips to "Linking X…".
+- **Post-creation link verification.** `createPlatformLink`
+  `lstat`s the link after each of its three fallback methods
+  (symlink → mklink → hardlink); throws if nothing's actually on
+  disk. Previously each method could "succeed" silently without
+  creating anything, saving a clean record for a broken link.
+- **EasyMove verify UI** in the Easy Move tab. Auto-runs on mount;
+  badges every record: `verified` / `link broken` /
+  `dest missing` / `both missing` / `double file` /
+  `needs admin to verify`. The last (new) category distinguishes
+  ACL-locked source paths — previously EACCES on lstat was
+  silently collapsed to "link broken" even when the link was fine.
+- **Outer-catch error messages dispatch on `err.syscall`** so an
+  `mkdir` failure says "Can't create destination folder" rather than
+  the misleading "another process is holding the source file".
+- **EasyMove diagnostic tracing** to `crash.log` via a
+  `setEasyMoveLogger` hook. Every stat/rename/robocopy/link
+  decision is logged.
+
+### New features
+
+- **GPU tab** (between CPU Heatmap and Affinity Rules). One
+  PowerShell call pulls `\GPU Engine`, `\GPU Process Memory`,
+  `\GPU Adapter Memory` counters + `Win32_VideoController` +
+  `Get-Process`. Adapter cards (3D / Compute / Decode / Encode /
+  Copy engine chips + dedicated/shared VRAM) + per-process table
+  with right-click context menu (Reveal / Copy path / End / Force
+  kill). Sampler caches `Win32_VideoController` across samples;
+  timeout bumped 10 s → 20 s; phantom "Adapter 2" entries (Microsoft
+  Basic Display Adapter) filtered out. Error messages summarised in
+  the footer instead of leaking full PowerShell script text.
+- **Affinity Rules tab** (Process Lasso-style). Persistent CPU
+  affinity rules matched by exe-name or path-substring; main-process
+  rule engine reapplies masks every ~4 s. Pin icon on every
+  Processes view (list, treemap tiles, heatmap labels). Right-click
+  on a pinned process opens "Edit affinity rule…" with the existing
+  rule pre-loaded (no duplicate).
+
+### Quality
+
+- **62 vitest tests pass** (no regressions).
+- All elevation/rescan/scan-phase logs use consistent `[easy-move]`,
+  `[elevation-probe]`, `[scheduled-task]`, `[folder-tree-…]` tags for
+  grep-friendly diagnostics.
 
 ## 0.5.0 — 2026-04-24
 
