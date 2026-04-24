@@ -47,7 +47,7 @@ import {
 } from "./shared/diskMonitor";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
-import { easyMove, easyMoveBack, getEasyMoves, initEasyMoveStore } from "./shared/easyMoveStore";
+import { easyMove, easyMoveBack, getEasyMoves, initEasyMoveStore, setEasyMoveLogger } from "./shared/easyMoveStore";
 import {
   consumeLastPrunedIds,
   getScanHistory,
@@ -477,6 +477,11 @@ void app.whenReady().then(async () => {
 
   // Initialize easy-move store
   initEasyMoveStore(app.getPath("userData"));
+  // Wire crash-log hook so EasyMove can trace its decision path.
+  // Without this the "EasyMove failed with EPERM" diagnostic is a
+  // black box — we can't tell which tier (rename / copy / robocopy)
+  // actually failed or whether isElevated returned as expected.
+  setEasyMoveLogger((tag, msg) => writeCrashLog(tag, msg));
 
   // Initialize scan history + full-file indexes
   initScanHistory(app.getPath("userData"));

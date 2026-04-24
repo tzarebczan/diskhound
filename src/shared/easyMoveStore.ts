@@ -11,6 +11,18 @@ const STORE_FILENAME = "easy-moves.json";
 let dataDir = "";
 let records: EasyMoveRecord[] = [];
 
+// Crash-log hook injected by main.ts at init so easyMove can trace its
+// decision path. Without this, "EasyMove failed with EPERM" is a black
+// box — we can't tell which tier (rename / copy / robocopy) failed, or
+// whether isElevated returned what we expected. The hook is optional
+// so the module still functions on non-Electron callers.
+type LogFn = (tag: string, msg: string) => void;
+let logCrash: LogFn = () => { /* noop default */ };
+
+export function setEasyMoveLogger(fn: LogFn): void {
+  logCrash = fn;
+}
+
 export function initEasyMoveStore(dir: string): void {
   dataDir = dir;
   records = [];
@@ -70,6 +82,7 @@ export async function easyMove(
   sourcePath: string,
   destinationDir: string,
 ): Promise<EasyMoveResult> {
+  logCrash("easy-move", `start src=${sourcePath} dest=${destinationDir}`);
   try {
     // [P1] Guard: destination must not be inside the source tree
     if (isInsideOrEqual(destinationDir, sourcePath)) {
@@ -98,9 +111,11 @@ export async function easyMove(
       isDirectory = stat.isDirectory();
       size = stat.size;
       statSucceeded = true;
+      logCrash("easy-move", `stat ok isDir=${isDirectory} size=${size}`);
     } catch (statErr) {
       const statCode = (statErr as NodeJS.ErrnoException)?.code;
       const permy = statCode === "EPERM" || statCode === "EACCES";
+      logCrash("easy-move", `stat failed code=${statCode ?? "?"} permy=${permy}`);
       if (!permy) {
         // ENOENT / other — not a permission issue, rethrow to outer catch.
         throw statErr;
@@ -154,6 +169,7 @@ export async function easyMove(
     try {
       await FSP.rename(sourcePath, destPath);
       moveSucceeded = true;
+      logCrash("easy-move", `rename ok src=${sourcePath} dest=${destPath}`);
     } catch (renameErr) {
       lastMoveError = renameErr;
       // Try the copy + delete fallback only if rename wasn't a
@@ -164,6 +180,7 @@ export async function easyMove(
       // escalation below.
       const renameCode = (renameErr as NodeJS.ErrnoException)?.code;
       const renameIsPerm = renameCode === "EPERM" || renameCode === "EACCES";
+      logCrash("easy-move", `rename failed code=${renameCode ?? "?"} permy=${renameIsPerm}`);
       if (!renameIsPerm) {
         try {
           if (isDirectory) {
@@ -186,19 +203,32 @@ export async function easyMove(
       // elevated, and can then reach robocopy).
       const { isElevated } = await import("../elevation");
       const elevated = await isElevated();
+      logCrash("easy-move", `entering robocopy branch, isElevated=${elevated}`);
       if (elevated) {
+        logCrash("easy-move", `invoking robocopy src=${sourcePath} dest=${destPath}`);
         const roboResult = await robocopyMove(sourcePath, destPath, isDirectory);
+        logCrash(
+          "easy-move",
+          `robocopy result ok=${roboResult.ok} exit=${roboResult.exitCode ?? "?"} message=${(roboResult.message ?? "").slice(0, 200)}`,
+        );
         if (roboResult.ok) {
           moveSucceeded = true;
         } else {
           // robocopy failed even with admin. At this point either the
           // file is genuinely locked by another process (WSL with VHDX
           // open, Hyper-V VM running, etc.) or an ACL deny applies
-          // even to admins. Propagate the robocopy message via the
-          // outer catch's "locked" branch.
-          lastMoveError = new Error(
-            `robocopy failed: ${roboResult.message ?? "exit " + roboResult.exitCode}`,
-          );
+          // even to admins. Return a specific, actionable error and
+          // skip the outer catch's generic "locked" message that lost
+          // the robocopy diagnostic.
+          return {
+            ok: false,
+            message:
+              `${Path.basename(sourcePath)}: robocopy /b also failed (${
+                roboResult.message ?? "exit " + roboResult.exitCode
+              }). ` +
+              `The file is likely open in another process (e.g. Hyper-V VM for a .vhdx, WSL for ext4.vhdx, ` +
+              `a running dump consumer for .dmp). Stop the other process and retry.`,
+          };
         }
       } else {
         // Non-elevated hitting a path we can't move — signal the
@@ -215,6 +245,7 @@ export async function easyMove(
     if (!moveSucceeded) {
       throw lastMoveError ?? new Error("Move failed for unknown reason");
     }
+    logCrash("easy-move", `move phase complete, creating link at source`);
 
     // Create link at the original location
     try {
@@ -283,6 +314,10 @@ export async function easyMove(
 
     return { ok: true, message: `Moved and linked: ${baseName}`, record };
   } catch (error) {
+    logCrash(
+      "easy-move",
+      `outer catch error code=${(error as NodeJS.ErrnoException)?.code ?? "?"} msg=${(error instanceof Error ? error.message : String(error)).slice(0, 200)}`,
+    );
     // Windows-protected paths (anything under \Windows\LiveKernelReports,
     // some of \Windows\System32, System Volume Information, etc.) throw
     // EPERM / EACCES on plain `stat` for non-admin users — before we
@@ -530,6 +565,7 @@ function robocopyMove(
 
     let stderrBuf = "";
     let stdoutBuf = "";
+    logCrash("easy-move-robocopy", `spawn robocopy.exe args=${JSON.stringify(args)}`);
     try {
       const child = spawn("robocopy.exe", args, {
         stdio: ["ignore", "pipe", "pipe"],
@@ -538,9 +574,14 @@ function robocopyMove(
       child.stdout?.on("data", (chunk) => { stdoutBuf += String(chunk); });
       child.stderr?.on("data", (chunk) => { stderrBuf += String(chunk); });
       child.on("error", (err) => {
+        logCrash("easy-move-robocopy", `spawn error: ${err.message}`);
         resolve({ ok: false, message: err.message });
       });
       child.on("exit", (code) => {
+        logCrash(
+          "easy-move-robocopy",
+          `exit=${code} stdout-len=${stdoutBuf.length} stderr-len=${stderrBuf.length} stdout=${stdoutBuf.slice(0, 500).replace(/\r?\n/g, " | ")} stderr=${stderrBuf.slice(0, 500).replace(/\r?\n/g, " | ")}`,
+        );
         // robocopy uses a BIT-FLAG exit model: codes 0-7 are success
         // (bits 1=copied, 2=extra files, 4=mismatched), 8+ are real
         // failures (8=copy errors, 16=fatal). Treat <8 as success.

@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.5.4 — 2026-04-24
+
+EasyMove diagnostics pass. Users reported EPERM-locked messages
+on `C:\Windows\LiveKernelReports\*.dmp` even on elevated scans
+despite 0.5.2's robocopy `/b` fallback. The existing logging stopped
+at the scanner boundary — we couldn't tell whether robocopy was
+actually invoked, what its exit code was, or whether `isElevated()`
+was returning what we expected.
+
+- **Crash-log tracing throughout `easyMove`**: every decision point
+  now writes an `[easy-move]` entry (stat result, rename result,
+  isElevated probe, robocopy spawn args + exit code + stdout/stderr,
+  outer catch error code). Next time a user hits EPERM, the log
+  will tell us exactly which tier failed.
+- **Robocopy failure now returns a specific, actionable message**
+  naming robocopy's exit code + hint about live processes
+  (Hyper-V / WSL / dump consumers) — replaces the old generic
+  "another process holding it open" string that masked the real
+  robocopy diagnostic.
+
 ## 0.5.3 — 2026-04-24
 
 Walker-scan polish pass, rooted in user-reported log evidence:
