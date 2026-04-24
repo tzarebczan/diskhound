@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.6 — 2026-04-24
+
+Icon design correction. 0.5.5 over-simplified the icon to fix the
+top-bar legibility problem — the sidebar at 64-96 px ended up
+showing only 4-5 blocks where it used to show a rich 8-block
+treemap, and the top-bar got a single orange tile that GNOME's
+Yaru theme washed out to a near-white square because flat colors
+are exactly what theme recoloring filters target.
+
+The right tradeoff is to use the v0.5.3 8-block treemap at every
+size where it physically fits (≥32 px), and only fall back at
+16-24 px to a 2×2 grid of bold tiles — four distinct colors are
+detail GNOME can't desaturate to "background", so the top-bar
+icon now stays recognisable as DiskHound regardless of theme.
+
+### Icon generator
+
+- ≥32 px: full 8-block treemap (the design from v0.5.3 that
+  matches the in-app Overview tab).
+- ≤24 px: 2×2 grid of orange / dark-orange / red / blue.
+- Padding back to v0.5.3's 7.8% at large sizes (the 8-18% range
+  in 0.5.5 was over-cropping the dock icon).
+
 ## 0.5.5 — 2026-04-24
 
 Icon design fix. 0.5.4 got the desktop integration working, which

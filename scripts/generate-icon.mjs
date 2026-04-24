@@ -58,54 +58,42 @@ function fillRoundedRect(pixels, size, x0, y0, w, h, radius, r, g, b) {
 }
 
 /**
- * Block layouts for the treemap-style icon, tiered by render size.
+ * Block layouts for the treemap-style icon.
  *
- * Why tiered: at 16-24 px each block in the original 8-block layout
- * was 2-3 actual pixels, and with anti-aliasing on the rounded
- * corners those pixels blended into the dark background — the icon
- * read as a featureless dark square in the GNOME top bar (the user
- * literally described it as "some black thing"). The fix is to drop
- * complexity at small sizes so the remaining elements stay bold and
- * legible, and only escalate to the full 8-block treemap at 64+ px
- * where each block has room to breathe.
+ * Why two tiers (and not more): at 16-24 px the full 8-block layout
+ * dissolves into noise — each block is 2-3 px and the anti-aliased
+ * corners blend into the dark frame, so GNOME's top-bar renderer
+ * either gets a featureless blob (early bug: black) or, when the
+ * theme applies its top-bar saturation/recolor, a near-white square
+ * (later bug). At 32 px and up there's room for the full 8-block
+ * treemap to breathe, and that's the design DiskHound has had since
+ * v0.5.3 — the user explicitly preferred it ("nicer and higher def")
+ * over the simpler 4/5-block fallbacks the previous version
+ * substituted at medium sizes. So now the 8-block layout owns
+ * everything ≥ 32 px, and only 16/24 fall back to a 2x2.
  *
  * Coordinate system: x/y/w/h are fractions of the inner content area
- * (after subtracting `pad` from each side), so a single layout works
- * across all sizes — the renderer scales them up.
+ * (after subtracting `pad` from each side). One layout, scales to
+ * every size we ship.
  *
- * Color palette is the DiskHound treemap colors (orange / red /
- * purple / blue / teal / green) so the icon visually matches the
- * Overview treemap at a glance.
+ * Color palette mirrors the DiskHound treemap (orange / red /
+ * purple / blue / teal / green) so the app icon and the in-app
+ * Overview look like the same family.
  */
 const BLOCKS_TINY = [
-  // ≤ 24 px: a single bold orange tile fills nearly the whole canvas.
-  // Recognisable as "DiskHound orange" against the GNOME top-bar
-  // background even when downscaled to 16 px.
-  { x: 0, y: 0, w: 1.0, h: 1.0, r: 245, g: 158, b: 11 },
-];
-const BLOCKS_SMALL = [
-  // 32-48 px: 2x2 grid of four big blocks. Enough resolution to
-  // hint at the treemap concept without dissolving into noise. The
-  // dominant orange (top-left) preserves brand identity at sidebar
-  // sizes.
-  { x: 0,    y: 0,    w: 0.55, h: 0.55, r: 245, g: 158, b: 11 }, // orange
-  { x: 0.55, y: 0,    w: 0.45, h: 0.55, r: 234, g: 120, b: 8  }, // dark orange
-  { x: 0,    y: 0.55, w: 0.55, h: 0.45, r: 239, g: 68,  b: 68 }, // red
-  { x: 0.55, y: 0.55, w: 0.45, h: 0.45, r: 59,  g: 130, b: 246 }, // blue
-];
-const BLOCKS_MEDIUM = [
-  // 64 px: 5 blocks. Drops the smallest two blocks from the full
-  // layout — enough complexity to read as a treemap, not so much
-  // that adjacent blocks merge.
-  { x: 0,    y: 0,    w: 0.60, h: 0.62, r: 245, g: 158, b: 11 },
-  { x: 0.62, y: 0,    w: 0.38, h: 0.40, r: 234, g: 120, b: 8  },
-  { x: 0.62, y: 0.42, w: 0.38, h: 0.20, r: 220, g: 90,  b: 12 },
-  { x: 0,    y: 0.64, w: 0.45, h: 0.36, r: 239, g: 68,  b: 68 },
-  { x: 0.47, y: 0.64, w: 0.53, h: 0.36, r: 59,  g: 130, b: 246 },
+  // ≤ 24 px: 2×2 grid of four bold tiles. Single-tile orange (the
+  // 0.5.5 attempt) read as a flat color which Yaru-style themes
+  // re-tinted to white in the GNOME top bar — four distinct colors
+  // are detail the theme can't desaturate to "background".
+  { x: 0,    y: 0,    w: 0.52, h: 0.52, r: 245, g: 158, b: 11  }, // orange
+  { x: 0.52, y: 0,    w: 0.48, h: 0.52, r: 234, g: 120, b: 8   }, // dark orange
+  { x: 0,    y: 0.52, w: 0.52, h: 0.48, r: 239, g: 68,  b: 68  }, // red
+  { x: 0.52, y: 0.52, w: 0.48, h: 0.48, r: 59,  g: 130, b: 246 }, // blue
 ];
 const BLOCKS_FULL = [
-  // 128+ px: full 8-block treemap. Detail is welcome at this size
-  // and matches DiskHound's actual treemap rendering.
+  // ≥ 32 px: the v0.5.3 8-block treemap. The same set the in-app
+  // Overview tab paints, so the dock icon, the title-bar icon, and
+  // the renderer's treemap all share a visual signature.
   { x: 0,    y: 0,    w: 0.54, h: 0.58, r: 245, g: 158, b: 11  },
   { x: 0.56, y: 0,    w: 0.44, h: 0.34, r: 234, g: 120, b: 8   },
   { x: 0.56, y: 0.36, w: 0.21, h: 0.22, r: 220, g: 90,  b: 12  },
@@ -117,37 +105,38 @@ const BLOCKS_FULL = [
 ];
 
 function pickBlocks(size) {
-  if (size <= 24) return BLOCKS_TINY;
-  if (size <= 48) return BLOCKS_SMALL;
-  if (size <= 96) return BLOCKS_MEDIUM;
-  return BLOCKS_FULL;
+  // Cutoff is 32: below it, 8 blocks of ≤2 px each become noise;
+  // at it, blocks are ~3-4 px which is visible.
+  return size < 32 ? BLOCKS_TINY : BLOCKS_FULL;
 }
 
 /**
- * Padding/gap profile: bigger at small sizes so the dark frame is
- * visually obvious (gives the icon a recognisable silhouette
- * against light dock backgrounds), smaller at large sizes where
- * blocks already have plenty of room.
+ * Padding/gap profile.
  *
- * The old generator used pad = 7.8% across the board, which at
- * 16 px collapsed to a 1 px frame — invisible on most themes and
- * indistinguishable from "no border at all". At 14% the frame is
- * a clear 2-3 px line at small sizes, and gap is generous enough
- * that adjacent blocks don't fuse during downscale.
+ * At ≤24 px we lean on a thicker frame (12-14% of canvas) so the
+ * dark border is a real silhouette element — without it, a 2x2 of
+ * bright tiles looks like 4 floating chips. At ≥32 px we use the
+ * original v0.5.3 7.8% padding so the 8 blocks fill the canvas
+ * the way the user remembers from earlier builds.
+ *
+ * The old generator used 7.8% across the board, which at 16 px
+ * collapsed to a 1 px frame — effectively invisible — and was one
+ * of the reasons the small icons rendered as featureless blobs.
  */
 function paddingFor(size) {
-  if (size <= 24) return Math.max(2, Math.round(size * 0.14));
-  if (size <= 48) return Math.max(2, Math.round(size * 0.10));
-  return Math.max(3, Math.round(size * 0.08));
+  if (size <= 24) return Math.max(2, Math.round(size * 0.13));
+  return Math.max(3, Math.round(size * 0.078));
 }
 
 function gapFor(size) {
   // Minimum 2 px so anti-aliasing on adjacent block edges doesn't
-  // blur into a single mass at small sizes. Scales up modestly so
-  // 512 px doesn't get gaps that look like negative space.
-  if (size <= 32) return 2;
-  if (size <= 64) return 3;
-  return Math.max(3, Math.round(size * 0.018));
+  // blur into a single mass at small sizes. Scales modestly with
+  // size so the 512 PNG doesn't get gaps that look like negative
+  // space at large dock sizes. Original v0.5.3 used a flat
+  // max(2, round(size*0.02)) which produced 2 px gaps everywhere
+  // up to 100 px — keep that behavior at the upper end.
+  if (size <= 24) return 2;
+  return Math.max(2, Math.round(size * 0.02));
 }
 
 function renderIcon(size) {
