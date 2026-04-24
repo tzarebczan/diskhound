@@ -69,10 +69,6 @@ export function createNativeScannerSession(
   input: ScanStartInput,
   callbacks: NativeScannerCallbacks,
 ): NativeScannerSession | null {
-  if (process.platform !== "win32") {
-    return null;
-  }
-
   const binaryPath = resolveNativeScannerBinary(projectRoot);
   if (!binaryPath) {
     console.warn("[nativeScanner] No binary found — falling back to JS worker");

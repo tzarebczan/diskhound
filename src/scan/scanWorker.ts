@@ -39,6 +39,8 @@ const STAT_BATCH_SIZE = 32;
 const SNAPSHOT_INTERVAL_MS = 200;
 // Scan everything — no exclusion lists. A disk analyzer must be comprehensive.
 
+const POSIX_BLOCK_BYTES = 512;
+
 // Guard: this module may get loaded outside a worker context
 // (e.g. shared-chunk resolution during bundling). Only wire up
 // the message handler when running as an actual Worker thread.
@@ -240,7 +242,6 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       const fullPath = Path.join(directoryPath, entry.name);
 
       if (entry.isSymbolicLink()) {
-        skippedEntries += 1;
         continue;
       }
 
@@ -258,7 +259,6 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
       }
 
       if (!entry.isFile()) {
-        skippedEntries += 1;
         continue;
       }
 
@@ -282,7 +282,7 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
             name: entry.name,
             parentPath: directoryPath,
             extension: getExtension(entry.name),
-            size: stat.size,
+            size: allocatedSize(stat),
             modifiedAt: stat.mtimeMs,
           } satisfies ScanFileRecord;
         }),
@@ -327,6 +327,14 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     lastEmitAt = now;
     emitSnapshot("running");
   }
+}
+
+function allocatedSize(stat: Stats): number {
+  const maybeBlocks = (stat as Stats & { blocks?: number }).blocks;
+  if (process.platform !== "win32" && typeof maybeBlocks === "number" && Number.isFinite(maybeBlocks)) {
+    return Math.max(0, maybeBlocks * POSIX_BLOCK_BYTES);
+  }
+  return stat.size;
 }
 
 function getExtension(fileName: string): string {

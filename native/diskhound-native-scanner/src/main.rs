@@ -15,6 +15,8 @@ static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 #[cfg(not(windows))]
 use jwalk::WalkDir;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use serde::Serialize;
 
 #[cfg(windows)]
@@ -1116,9 +1118,16 @@ fn should_skip_linux_path(path: &Path) -> bool {
 
 #[cfg(not(windows))]
 fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
+    state.scan_phase = ScanPhase::Indexing;
+    if let Some(baseline) = state.baseline.as_ref() {
+        if let Some(total) = baseline.dir_file_counts.get(&state.root_path_string) {
+            state.expected_total_files = Some(*total);
+        }
+    }
+
     // Parallelism: jwalk's default is serial. We explicitly enable
-    // parallelism via rayon's thread pool (bounded to 8 threads to
-    // match the Windows-parallel-walker tuning). The biggest wins
+    // parallelism via rayon's thread pool (default 4-16 threads,
+    // overridable via env var). The biggest wins
     // are on ext4/btrfs on NVMe — directory enumeration is
     // embarrassingly parallel at the I/O layer since readdir on
     // separate directories hits different inode blocks.
@@ -1129,8 +1138,14 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n >= 1);
-    let thread_count = thread_override
-        .unwrap_or_else(|| num_cpus::get().clamp(2, 8));
+    let thread_count = thread_override.unwrap_or_else(|| {
+        let logical = num_cpus::get().max(1);
+        if logical <= 2 {
+            logical
+        } else {
+            logical.clamp(4, 16)
+        }
+    });
 
     let walker = WalkDir::new(root_path)
         .sort(false)
@@ -1194,7 +1209,6 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
         }
 
         if !entry.file_type().is_file() {
-            state.skipped_entries += 1;
             maybe_emit_progress(state)?;
             continue;
         }
@@ -1219,7 +1233,7 @@ fn scan_generic(root_path: &Path, state: &mut ScanState) -> Result<(), String> {
             name: file_name.clone(),
             parent_path,
             extension: file_extension(&file_name),
-            size: metadata.len(),
+            size: allocated_size(&metadata),
             modified_at: metadata_modified_at_ms(&metadata),
         };
 
@@ -3465,6 +3479,16 @@ fn file_extension(file_name: &str) -> String {
         .and_then(OsStr::to_str)
         .map(|extension| format!(".{}", extension.to_ascii_lowercase()))
         .unwrap_or_else(|| String::from("(no ext)"))
+}
+
+#[cfg(unix)]
+fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
+    metadata.blocks().saturating_mul(512)
+}
+
+#[cfg(not(unix))]
+fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
+    metadata.len()
 }
 
 #[cfg(not(windows))]
