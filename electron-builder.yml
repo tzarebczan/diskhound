@@ -45,7 +45,7 @@ win:
     - target: nsis
       arch:
         - x64
-  artifactName: "${productName}-${version}-Setup.${ext}"
+  artifactName: "${productName}-Setup.${ext}"
 
 nsis:
   # Per-user install (no UAC needed). This matters for runAfterFinish:
@@ -68,7 +68,7 @@ mac:
         - x64
         - arm64
   category: public.app-category.utilities
-  artifactName: "${productName}-${version}-${arch}.${ext}"
+  artifactName: "${productName}-${arch}.${ext}"
 
 linux:
   executableName: diskhound
@@ -112,4 +112,4 @@ linux:
   synopsis: Fast disk space analyzer
   description: Fast, cross-platform disk space analyzer. Find what's eating your drive, track changes over time, detect duplicates, and reclaim space.
   maintainer: DiskHound <noreply@diskhound.app>
-  artifactName: "${productName}-${version}-${arch}.${ext}"
+  artifactName: "${productName}-${arch}.${ext}"
