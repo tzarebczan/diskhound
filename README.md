@@ -16,6 +16,23 @@
 </p>
 
 <p align="center">
+  <strong>Downloads — one-click for your OS</strong><br>
+  Click the platform below to download the matching asset from the latest release. If an asset is not present for the latest release the link may 404; in that case open the full Releases page to choose another version.
+</p>
+
+<p align="center">
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-Setup.exe">Windows — Installer (NSIS)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x64.dmg">macOS (x64)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-arm64.dmg">macOS (arm64)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x86_64.AppImage">Linux — AppImage</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x64.tar.gz">Linux — tar.gz</a>
+</p>
+
+<p align="center">
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest">All releases & assets</a>
+</p>
+
+<p align="center">
   <img src="https://github.com/user-attachments/assets/022ad2fe-120a-47fa-bb3c-72a98d47a93c" alt="DiskHound Overview" width="85%" />
 </p>
 
@@ -23,21 +40,21 @@
 
 ## Why DiskHound
 
-WinDirStat was the gold standard for a decade. DiskHound is what it would be today: a native Rust scanner, an instant-load treemap, real scan history with time-range diffs, duplicate detection, and safe file operations — all wrapped in a modern dark-mode UI.
+WinDirStat was the gold standard for a decade. DiskHound is what it would be today: a native Rust scanner, an instant-load treemap, real scan history with time-range diffs, duplicate detection, and reclaim space.
 
 ## Features
 
-- 🦀 **Native Rust scanner** — reads the NTFS Master File Table directly on Windows drives (with admin), dropping cold scans on a 7 M-file drive from ~20 minutes to **under 90 seconds**. Falls back cleanly to `FindFirstFileExW` without admin. On Linux/macOS, a Rayon-parallel `jwalk` traversal skips virtual filesystems (`/proc`, `/sys`, `/dev`, `/run`, `/snap`, Docker overlayfs) and scales across CPU cores.
-- 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Two layouts: "Size" (largest-first, globally ordered) and "Tree" (WinDirStat-style — files cluster inside their parent directory's rectangle, with subtle depth-modulated folder outlines). Right-click any rectangle for reveal/open/trash/move actions.
-- ⚡ **Incremental monitoring** — after the first full scan, DiskHound tracks disk changes via the NTFS USN journal (Windows) and an mtime-based smart rescan (cross-platform). Repeat scans on a mostly-idle drive are 10–50× faster than a full walk — typical hourly checks complete in seconds, populating the Changes tab automatically.
-- 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index. History entries show an icon indicating whether they came from a fast delta scan or a full walk.
+- 🦀 **Native Rust scanner** — reads the NTFS Master File Table directly on Windows drives (with admin), dropping cold scans on a 7 M-file drive from ~20 minutes to **under 90 seconds**. Falls back to a safe cross-platform walker when needed.
+- 🗺️ **Interactive treemap** — squarified layout with 70+ file type colors. Two layouts: "Size" (largest-first, globally ordered) and "Tree" (WinDirStat-style — files cluster inside their directories).
+- ⚡ **Incremental monitoring** — after the first full scan, DiskHound tracks disk changes via the NTFS USN journal (Windows) and an mtime-based smart rescan (cross-platform). Repeat scans on a monitored drive are extremely fast.
+- 📈 **Scan history & diffing** — every scan is persisted. Compare any two snapshots with quick-select pills (1h / 6h / 1d / 1w / 1M / 3M). Browse the full per-file diff from the persistent index.
 - 🔍 **Duplicate detection** — SHA-256 content hashing with two-pass optimization (4KB prefix rejection, then full hash). Concurrent I/O. "Keep newest" / "Keep oldest" bulk actions.
-- 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click. Offers a one-UAC-prompt elevated retry for protected Windows paths.
+- 🔗 **Easy Move** — move a large file to another drive, leave a symlink or junction in its place. Fully reversible. Tracks every move so you can put files back with one click. Offers a one-UAC fast-scan mode for system installs.
 - 📁 **Folder explorer** — drill into directories with breadcrumb navigation and proportional size bars.
 - 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
-- ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, processes on Y, amber intensity = CPU share), and Affinity Rules (Process-Lasso-style pin-persistent CPU masks by exe name or path). Kill processes with soft/hard signals.
-- 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode / Copy engine chips) + process table with engine-chip drill-down. Filters out phantom Microsoft Basic Display Adapter entries.
-- 🔐 **One-UAC fast-scan mode** — Settings → Performance → "Always run as admin" registers a Scheduled Task bound to the current user's SID, so the normal shortcut auto-elevates with **zero UAC prompts** on every subsequent launch.
+- ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, process on Y), and details.
+- 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode stats).
+- 🔐 **One-UAC fast-scan mode** — Settings → Performance → "Always run as admin" registers a Scheduled Task bound to the current user's SID, so the normal shortcut auto-elevates with **zero additional prompts**.
 - 🌓 **Dark & light themes** — with system preference detection. Toggle from the status bar.
 - ⌨️ **Keyboard navigation** — arrow keys in the file list, Enter to open, Delete to trash, Ctrl+F to search.
 - 🔄 **Auto-update** — via `electron-updater` with GitHub Releases. UAC elevation supported for system-wide installs.
@@ -148,15 +165,15 @@ native/diskhound-native-scanner/
 1. A JSON snapshot with top-N largest files, hottest directories, and aggregate totals.
 2. A gzipped NDJSON index containing every file's path, size, and mtime, plus directory mtime entries so the next scan can skip unchanged subtrees.
 
-**The diff engine** uses the snapshot for the "biggest changes" overview, and the full index for "browse every change." Both are streamed and capped for memory safety. Aggregate totals (net bytes changed, file count delta) are always exact since they come from complete scan counters.
+**The diff engine** uses the snapshot for the "biggest changes" overview, and the full index for "browse every change." Both are streamed and capped for memory safety. Aggregate totals (net bytes) are computed without loading the full index into memory.
 
 **Incremental monitoring** has two tiers:
-1. **USN journal (Windows)** — after a full scan anchors a cursor, subsequent monitoring ticks read only the NTFS change journal since that cursor. Creates/modifies/deletes are applied to a working copy of the index, a fresh snapshot is built from the updated index, and it's saved to history with an `⚡ fast` engine tag. Near-instant.
-2. **Mtime-based smart rescan (cross-platform)** — during a full walk, directories whose mtime matches the previous scan's baseline inherit their files from the baseline instead of being re-enumerated. Covers the case where USN is unavailable or the volume isn't NTFS.
+1. **USN journal (Windows)** — after a full scan anchors a cursor, subsequent monitoring ticks read only the NTFS change journal since that cursor. Creates/modifies/deletes are applied to a working index and merged.
+2. **Mtime-based smart rescan (cross-platform)** — during a full walk, directories whose mtime matches the previous scan's baseline inherit their files from the baseline instead of being re-enumerated.
 
-**Easy Move** uses platform-appropriate links: directory junctions on Windows (no admin), symlinks on macOS/Linux. Every move is journaled so it's fully reversible. Failed rollbacks are recorded as "stranded" with explicit recovery in the UI.
+**Easy Move** uses platform-appropriate links: directory junctions on Windows (no admin), symlinks on macOS/Linux. Every move is journaled so it's fully reversible. Failed rollbacks are recorded for manual remediation.
 
-**Process sampling** uses PowerShell `Get-Process` on Windows (fast, returns executable paths for icon resolution) with a fallback to basic `tasklist` if PowerShell is unavailable. macOS/Linux use `ps -axo pid,rss,%cpu,comm`. Results are cached in the main process so tab-switching is instant — a fresh sample fires in the background.
+**Process sampling** uses PowerShell `Get-Process` on Windows (fast, returns executable paths for icon resolution) with a fallback to basic `tasklist` if PowerShell is unavailable. macOS/Linux use `ps` and system reports.
 
 ## Contributing
 
