@@ -21,11 +21,11 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-Setup.exe">Windows — Installer (NSIS)</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x64.dmg">macOS (x64)</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-arm64.dmg">macOS (arm64)</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x86_64.AppImage">Linux — AppImage</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-<version>-x64.tar.gz">Linux — tar.gz</a>
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-Setup.exe">Windows</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x64.dmg">macOS (x64)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-arm64.dmg">macOS (arm64)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x86_64.AppImage">Linux — AppImage</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x64.tar.gz">Linux — tar.gz</a>
 </p>
 
 <p align="center">
