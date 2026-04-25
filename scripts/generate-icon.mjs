@@ -139,20 +139,54 @@ function gapFor(size) {
   return Math.max(2, Math.round(size * 0.02));
 }
 
-function renderIcon(size) {
-  const pixels = Buffer.alloc(size * size * 4);
+/**
+ * Internal supersample factor. We render every icon at SS× its
+ * target dimensions then box-filter average down to the requested
+ * size. Reasons:
+ *
+ *   - The hand-rolled `fillRoundedRect` AA produces a 1-px gradient
+ *     at the rounded corners. At small final sizes (16-32 px) that
+ *     gradient is wider than the corner itself, so corners look
+ *     stair-stepped instead of smooth. Supersampling moves the AA
+ *     into the source pixels where it has room to be subtle.
+ *
+ *   - Block edges (radius ~4-5 px native) similarly suffer at sizes
+ *     where 1 px ≈ 6% of the block. Rendering at 3× and
+ *     downsampling produces dramatically smoother edges that the
+ *     user described as "higher-res" in the previous round.
+ *
+ * 3× is the sweet spot — 4× doubles the work for marginal visual
+ * gain, 2× isn't enough to fix the 16-32 px corner aliasing.
+ */
+const SUPERSAMPLE = 3;
+
+function renderIcon(targetSize) {
+  // Render at supersampled size; downsample at the end. `designSize`
+  // (the target) drives layout decisions (which block set, where
+  // the highlight cutoff is); `canvas` is the actual pixel buffer
+  // we paint into.
+  const canvas = targetSize * SUPERSAMPLE;
+  const pixels = Buffer.alloc(canvas * canvas * 4);
 
   // Background: dark rounded square. Slightly larger corner radius
   // than the previous 14% — gives the icon a softer, more "tile"-
   // like silhouette in the GNOME dock where neighbours (Firefox,
   // Settings) all have round-ish silhouettes.
-  fillRoundedRect(pixels, size, 0, 0, size, size, Math.round(size * 0.18), 10, 10, 18);
+  fillRoundedRect(pixels, canvas, 0, 0, canvas, canvas, Math.round(canvas * 0.18), 10, 10, 18);
 
-  const pad = paddingFor(size);
-  const area = size - pad * 2;
-  const gap = gapFor(size);
-  const blocks = pickBlocks(size);
-  const blockRadius = Math.max(2, Math.round(size * 0.045));
+  // padding/gap are picked using the TARGET size so the visual
+  // weight matches what the user sees (a 16 px icon should look
+  // like a 16 px icon, not "16 × the same fractional padding as
+  // 256"). Then scale up to canvas pixels for actual painting.
+  const pad = paddingFor(targetSize) * SUPERSAMPLE;
+  const area = canvas - pad * 2;
+  const gap = gapFor(targetSize) * SUPERSAMPLE;
+  const blocks = pickBlocks(targetSize);
+  const blockRadius = Math.max(2, Math.round(canvas * 0.045));
+  // Use targetSize for the small-size highlight cutoff — the 3D
+  // cues are noise at small target sizes regardless of how many
+  // canvas pixels we actually painted into.
+  const skipDepthCues = targetSize < 64;
 
   for (const b of blocks) {
     const bx = Math.round(pad + b.x * area);
@@ -160,20 +194,16 @@ function renderIcon(size) {
     const bw = Math.max(1, Math.round(b.w * area) - gap);
     const bh = Math.max(1, Math.round(b.h * area) - gap);
 
-    fillRoundedRect(pixels, size, bx, by, bw, bh, blockRadius, b.r, b.g, b.b);
+    fillRoundedRect(pixels, canvas, bx, by, bw, bh, blockRadius, b.r, b.g, b.b);
 
-    // Highlight + shadow are subtle 3D cues that read as "pressed
-    // tile" at large sizes but become noise at small sizes — skip
-    // them below 64 px where every pixel of the block matters for
-    // legibility.
-    if (size < 64) continue;
+    if (skipDepthCues) continue;
 
-    const highlightRows = Math.max(1, Math.round(size * 0.006));
+    const highlightRows = Math.max(1, Math.round(canvas * 0.006));
     for (let row = 0; row < highlightRows; row++) {
       for (let x = bx + blockRadius + 2; x < bx + bw - blockRadius - 2; x++) {
-        const i = ((by + row) * size + x) * 4;
+        const i = ((by + row) * canvas + x) * 4;
         if (i >= 0 && i < pixels.length - 3) {
-          const delta = Math.max(8, Math.round(size * 0.07) - row * Math.max(3, Math.round(size * 0.02)));
+          const delta = Math.max(8, Math.round(canvas * 0.07) - row * Math.max(3, Math.round(canvas * 0.02)));
           pixels[i] = Math.min(255, pixels[i] + delta);
           pixels[i + 1] = Math.min(255, pixels[i + 1] + delta);
           pixels[i + 2] = Math.min(255, pixels[i + 2] + delta);
@@ -181,13 +211,13 @@ function renderIcon(size) {
       }
     }
 
-    const shadowRows = Math.max(1, Math.round(size * 0.004));
+    const shadowRows = Math.max(1, Math.round(canvas * 0.004));
     for (let row = 0; row < shadowRows; row++) {
       for (let x = bx + blockRadius + 2; x < bx + bw - blockRadius - 2; x++) {
         const yy = by + bh - 1 - row;
-        const i = (yy * size + x) * 4;
+        const i = (yy * canvas + x) * 4;
         if (i >= 0 && i < pixels.length - 3) {
-          const delta = Math.max(6, Math.round(size * 0.05) - row * Math.max(2, Math.round(size * 0.02)));
+          const delta = Math.max(6, Math.round(canvas * 0.05) - row * Math.max(2, Math.round(canvas * 0.02)));
           pixels[i] = Math.max(0, pixels[i] - delta);
           pixels[i + 1] = Math.max(0, pixels[i + 1] - delta);
           pixels[i + 2] = Math.max(0, pixels[i + 2] - delta);
@@ -196,7 +226,46 @@ function renderIcon(size) {
     }
   }
 
-  return pixels;
+  // Box-filter downsample from canvas (= targetSize × SUPERSAMPLE)
+  // to targetSize. Each output pixel is the unweighted average of
+  // the SS×SS source pixels it corresponds to. Box filter is
+  // crude vs. Lanczos but for our flat-color blocks with hard
+  // edges it produces clean, slightly-softened edges without the
+  // ringing artifacts a sharper filter would introduce.
+  return downsampleBoxed(pixels, canvas, targetSize);
+}
+
+function downsampleBoxed(srcPixels, srcSize, dstSize) {
+  if (srcSize === dstSize) return srcPixels;
+  const ratio = srcSize / dstSize;
+  const out = Buffer.alloc(dstSize * dstSize * 4);
+  for (let dy = 0; dy < dstSize; dy++) {
+    for (let dx = 0; dx < dstSize; dx++) {
+      const sxStart = Math.floor(dx * ratio);
+      const sxEnd = Math.min(srcSize, Math.floor((dx + 1) * ratio));
+      const syStart = Math.floor(dy * ratio);
+      const syEnd = Math.min(srcSize, Math.floor((dy + 1) * ratio));
+      let r = 0, g = 0, b = 0, a = 0, count = 0;
+      for (let sy = syStart; sy < syEnd; sy++) {
+        for (let sx = sxStart; sx < sxEnd; sx++) {
+          const si = (sy * srcSize + sx) * 4;
+          r += srcPixels[si];
+          g += srcPixels[si + 1];
+          b += srcPixels[si + 2];
+          a += srcPixels[si + 3];
+          count += 1;
+        }
+      }
+      const di = (dy * dstSize + dx) * 4;
+      if (count > 0) {
+        out[di]     = Math.round(r / count);
+        out[di + 1] = Math.round(g / count);
+        out[di + 2] = Math.round(b / count);
+        out[di + 3] = Math.round(a / count);
+      }
+    }
+  }
+  return out;
 }
 
 function encodePng(size, pixels) {
@@ -244,7 +313,14 @@ function encodePng(size, pixels) {
 mkdirSync("build", { recursive: true });
 mkdirSync("build/icons", { recursive: true });
 
-const sizes = [16, 24, 32, 48, 64, 128, 256, 512];
+// Standard freedesktop hicolor sizes plus 96 + 192. We include 96
+// because the GNOME dock at default scale renders icons in the
+// 64-96 px range — without an explicit 96 size, GNOME picks 64.png
+// and upscales 1.5×, which is exactly the "low-res / jaggedy"
+// rendering the user reported. 192 covers the same gap at HiDPI
+// (200% scale → 128 logical = 256 physical, dock often picks the
+// in-between).
+const sizes = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 for (const size of sizes) {
   const png = encodePng(size, renderIcon(size));
   const iconPath = size === 512 ? "build/icon.png" : `build/icons/${size}x${size}.png`;

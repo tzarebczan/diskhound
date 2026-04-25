@@ -67,8 +67,11 @@ import * as Path from "node:path";
  *   integration, which needs no sudo and survives AppImage moves.
  */
 
-/** Icon sizes we ship — must match scripts/generate-icon.mjs output. */
-const ICON_SIZES = [16, 24, 32, 48, 64, 128, 256, 512];
+/** Icon sizes we ship — must match scripts/generate-icon.mjs output.
+ *  96 and 192 added in 0.5.7 because GNOME's dock at default scale
+ *  picks an icon size in the 64-96 px range and upscales when no
+ *  exact match exists; explicit 96.png removes the upscale step. */
+const ICON_SIZES = [16, 24, 32, 48, 64, 96, 128, 192, 256, 512];
 
 /** Match the WM class we set via app.commandLine.appendSwitch("class", ...) in main.ts. */
 const APP_WM_CLASS = "diskhound";

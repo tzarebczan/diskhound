@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.7 — 2026-04-24
+
+Window-geometry persistence + icon sharpness pass.
+
+### Persist window size / position across restarts
+
+DiskHound now remembers width, height, x, y, and maximize /
+fullscreen state between launches. Saved to
+`userData/window-state.json` via a new `windowStateStore` that
+mirrors the existing settings/scan store pattern (no new
+dependencies).
+
+Cross-platform behavior:
+
+- **Windows / Linux**: x/y honored. Window comes back where you
+  left it.
+- **macOS**: maximize maps to "zoom" (fills work area minus
+  dock/menu bar). Fullscreen restoration opens a new Space and
+  animates ~500 ms. Both correct.
+- **Multi-monitor sanity**: on every launch we validate the
+  saved rect against `screen.getAllDisplays()`. If you've
+  unplugged a monitor and the saved position is now off-screen,
+  the position is dropped and the WM centers the window —
+  better than stranding it on a phantom display.
+
+Save cadence is debounced ~400 ms during a drag/resize so a slow
+window-resize doesn't generate one disk write per frame. The
+debounce is flushed on `app.before-quit` and on the window's
+`close` event so we never lose a final-state save.
+
+### Icon sharpness — supersampled AA + 96/192 sizes
+
+Sidebar icon rendered "jaggedy / lower-res" on Ubuntu 22.04 even
+at 64-96 px dock sizes. Two causes:
+
+1. **GNOME upscaled `64.png` to fit the dock** because we shipped
+   no closer match. Adding 96.png and 192.png (both standard
+   freedesktop hicolor sizes) means GNOME picks an exact match
+   for the default-scale dock and the 200%-scale HiDPI dock,
+   eliminating the upscale step.
+2. **Hand-rolled `fillRoundedRect` AA was 1 px wide.** At small
+   target sizes, that gradient was wider than the corner itself,
+   producing stair-stepped edges on rounded blocks. The
+   generator now renders every icon at 3× target dimensions and
+   box-filter downsamples — same pixels of detail, dramatically
+   smoother corners and edges.
+
+`linuxDesktopIntegration.ts` updated to install the new sizes
+into `~/.local/share/icons/hicolor/`.
+
 ## 0.5.6 — 2026-04-24
 
 Icon design correction. 0.5.5 over-simplified the icon to fix the

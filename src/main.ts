@@ -47,6 +47,7 @@ import {
 } from "./shared/diskMonitor";
 import { createScanSnapshotStore } from "./shared/scanStore";
 import { createSettingsStore, type SettingsStore } from "./shared/settingsStore";
+import { createWindowStateStore, type WindowStateStore } from "./shared/windowStateStore";
 import {
   easyMove,
   easyMoveBack,
@@ -161,6 +162,7 @@ const scanKey = (rootPath: string): string => normPath(rootPath);
 const activeDuplicateScans: Map<string, DuplicateScanHandle> = new Map();
 let monitoringInterval: ReturnType<typeof setInterval> | null = null;
 let settingsStore: SettingsStore | null = null;
+let windowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
 
@@ -600,6 +602,15 @@ void app.whenReady().then(async () => {
 
   const scanStore = await createScanSnapshotStore(app.getPath("userData"));
   settingsStore = await createSettingsStore();
+  // Window-geometry persistence — restores width/height/x/y plus
+  // maximize / fullscreen state across restarts. Must be created
+  // before createWindow() so resolveBounds() can feed the
+  // BrowserWindow constructor.
+  windowStateStore = await createWindowStateStore({
+    defaults: { width: 1560, height: 980 },
+    minWidth: 960,
+    minHeight: 640,
+  });
 
   // Initialize disk monitor with persistent baseline storage
   await initDiskMonitor(app.getPath("userData"));
@@ -3114,9 +3125,17 @@ void app.whenReady().then(async () => {
         ? (appIconImage ?? appIconPath ?? undefined)
         : undefined;
 
-    mainWindow = new BrowserWindow({
+    // Restored geometry from the previous session, or defaults on
+    // first launch / when the saved position is on a now-disconnected
+    // monitor (windowStateStore.resolveBounds drops x/y in that case
+    // so the WM centers the window instead of stranding it).
+    const savedBounds = windowStateStore?.resolveBounds() ?? {
       width: 1560,
       height: 980,
+    };
+
+    mainWindow = new BrowserWindow({
+      ...savedBounds,
       minWidth: 960,
       minHeight: 640,
       backgroundColor: "#0a0a0f",
@@ -3148,6 +3167,26 @@ void app.whenReady().then(async () => {
         /* non-fatal — WM just uses the default Electron icon */
       }
     }
+
+    // Re-apply maximize / fullscreen from the saved state. We can't
+    // pass these as BrowserWindow constructor options, so it has to
+    // happen post-construction. setFullScreen wins over maximize:
+    // they're mutually exclusive in practice, but if both flags
+    // somehow ended up true (ought-to-be-impossible on a single
+    // window, but we read them out of a JSON file users could edit),
+    // fullscreen is the more recent state to honor. Fullscreen on
+    // macOS opens a new Space and animates ~500 ms; users see the
+    // app come up at last-session geometry then transition.
+    if (windowStateStore?.shouldRestoreFullScreen()) {
+      mainWindow.setFullScreen(true);
+    } else if (windowStateStore?.shouldRestoreMaximized()) {
+      mainWindow.maximize();
+    }
+
+    // Attach the resize/move/maximize listeners that capture future
+    // geometry changes. Persistence is debounced inside the store so
+    // a slow drag doesn't generate a write per frame.
+    windowStateStore?.track(mainWindow);
 
     if (rendererEntryUrl) {
       await mainWindow.loadURL(rendererEntryUrl);
@@ -3383,6 +3422,15 @@ void app.whenReady().then(async () => {
       tray = null;
     }
     treemapCache.clear();
+    // Flush pending window-state debounce so the final geometry
+    // (e.g. user dragged the window then quit within 400 ms) is
+    // written to disk before the process exits. Fire-and-forget —
+    // app.before-quit is synchronous from Electron's POV; if the
+    // write hasn't finished by app.quit() we lose at most one
+    // session's geometry, which is the same outcome as a kernel
+    // panic would produce. The window's own close listener also
+    // calls persistNow as a belt-and-suspenders.
+    void windowStateStore?.flush();
   });
 }).catch((err) => {
   writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);
