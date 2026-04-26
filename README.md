@@ -17,7 +17,7 @@
 
 <p align="center">
   <strong>Downloads — one-click for your OS</strong><br>
-  Click the platform below to download the matching asset from the latest release. If an asset is not present for the latest release the link may 404; in that case open the full Releases page to choose another version.
+  Each link points at the latest release on GitHub.
 </p>
 
 <p align="center">
@@ -61,13 +61,13 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 
 ## Install
 
-Download the latest release for your platform from [**Releases**](https://github.com/tzarebczan/diskhound/releases/latest):
+Use the one-click download links at the top of this README, or grab any release from the [Releases page](https://github.com/tzarebczan/diskhound/releases/latest).
 
 | Platform | Artifact |
 |---|---|
-| Windows | `DiskHound-<version>-Setup.exe` (NSIS installer) |
-| macOS | `DiskHound-<version>-x64.dmg` / `-arm64.dmg` |
-| Linux | `DiskHound-<version>-x86_64.AppImage` (recommended — built-in auto-update) or `DiskHound-<version>-x64.tar.gz` (extract-and-run tree) |
+| Windows | `DiskHound-Setup.exe` — NSIS per-user installer with auto-update. |
+| macOS | `DiskHound-x64.dmg` / `DiskHound-arm64.dmg` — choose by Mac CPU. |
+| Linux | `DiskHound-x86_64.AppImage` (recommended — built-in auto-update) or `DiskHound-x64.tar.gz` (extract-and-run tree). |
 
 ## Screenshots
 
@@ -130,7 +130,7 @@ bun run dev
 | `bun run build:native` | Build the Rust native scanner (release) |
 | `bun run start` | Launch the built production app |
 | `bun run dist` | Build everything and create the installer |
-| `bun run test` | Run Vitest test suite (44 tests) |
+| `bun run test` | Run the Vitest test suite |
 | `bun run typecheck` | TypeScript type checking |
 
 ### Architecture
