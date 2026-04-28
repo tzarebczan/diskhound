@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
-import { formatBytes, humanAge, relativePath } from "../lib/format";
-import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
+import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
+import { usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -10,6 +10,22 @@ import { toast } from "./Toasts";
 type QuickFilter = "all" | "video" | "archives" | "installers" | "images" | "audio" | "documents";
 type SortField = "size" | "name" | "ext" | "age";
 type SortDir = "asc" | "desc";
+
+/**
+ * Page size for the Largest Files list. Rendering ~50K rows of
+ * Preact JSX in a single pass costs ~600 ms on mid-range hardware
+ * and stutters during sort/filter changes (every keystroke
+ * re-renders all rows). 1000 keeps interactivity snappy and is
+ * still more than any realistic "find what to clean up" session
+ * needs from a single page — when users do need more, the
+ * Load-more button extends the limit without repaginating the
+ * whole list.
+ *
+ * Filter / sort / quick-filter changes reset the page back to one
+ * (see useEffect below) so the user isn't stuck on a stale tail
+ * of the list after narrowing the view.
+ */
+const PAGE_SIZE = 1000;
 
 const QUICK_FILTERS: { id: QuickFilter; label: string }[] = [
   { id: "all", label: "All" },
@@ -57,8 +73,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
   const { busy, markBusy, clearBusy, handleEasyMove, handleEasyMoveBatch } = usePathActions();
   const [sortField, setSortField] = useState<SortField>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
-  const safeDeleteOnly = useSafeDeleteOnly();
   const [focusIndex, setFocusIndex] = useState(-1);
+  /** How many rows of the filtered+sorted result to actually render.
+   *  Starts at PAGE_SIZE; "Load more" bumps it by another PAGE_SIZE. */
+  const [pageLimit, setPageLimit] = useState(PAGE_SIZE);
   const listRef = useRef<HTMLDivElement>(null);
 
   // Ref for keyboard handler to access latest visibleFiles without dependency cycle
@@ -73,7 +91,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
     }
   };
 
-  const visibleFiles = useMemo(() => {
+  // Full filtered+sorted list — used for the "Showing X of Y"
+  // status, "Select all" semantics (selecting only the visible
+  // page would be confusing), and the Load-more decision.
+  const filteredFiles = useMemo(() => {
     const query = filterText.trim().toLowerCase();
     const filtered = snapshot.largestFiles
       .filter((f) => !dismissed.has(f.path))
@@ -82,11 +103,45 @@ export function FileList({ snapshot, initialFilter }: Props) {
     return [...filtered].sort(compareFn(sortField, sortDir));
   }, [snapshot.largestFiles, filterText, quickFilter, dismissed, sortField, sortDir]);
 
-  visibleFilesRef.current = visibleFiles;
+  // Paginated slice we actually render. Filter/sort changes reset
+  // the page back to PAGE_SIZE in the effect below, so the user
+  // isn't stuck on a stale tail of the list after narrowing the
+  // view (e.g. picking the "Video" quick-filter dropping from 50K
+  // to 200 results — they shouldn't have to scroll back through
+  // a paginated 1K window to see the matches).
+  const visibleFiles = useMemo(
+    () => filteredFiles.slice(0, pageLimit),
+    [filteredFiles, pageLimit],
+  );
 
+  // Reset pagination whenever the user narrows or re-orders the
+  // list. Snapshot updates (new scan results) also reset, since
+  // the underlying data shifted enough that the saved page index
+  // would no longer line up with what the user expected to see.
+  useEffect(() => {
+    setPageLimit(PAGE_SIZE);
+  }, [filterText, quickFilter, sortField, sortDir, snapshot.largestFiles]);
+
+  visibleFilesRef.current = visibleFiles;
+  const totalCount = filteredFiles.length;
+  const hasMore = totalCount > visibleFiles.length;
+
+  // Selection counts. We track two distinct numbers:
+  //  - selectedVisible: how many checkboxes the user can currently
+  //    see ticked. Drives the "X / N selected" label and the
+  //    Select-All / Clear-All toggle.
+  //  - selectedTotal: how many files across the entire filtered set
+  //    are selected (covers paginated rows the user expanded into
+  //    but later collapsed away). Drives the bulk-action targets
+  //    so "Trash selected" / "Delete selected" act on every ticked
+  //    row, not just the rendered page.
   const selectedVisible = useMemo(
     () => visibleFiles.filter((f) => selected.has(f.path)).length,
     [visibleFiles, selected],
+  );
+  const selectedTotal = useMemo(
+    () => filteredFiles.filter((f) => selected.has(f.path)).length,
+    [filteredFiles, selected],
   );
 
   // Keyboard navigation
@@ -152,6 +207,12 @@ export function FileList({ snapshot, initialFilter }: Props) {
   };
 
   const toggleSelectAll = () => {
+    // Operate on the *visible* page — selecting all means "tick the
+    // checkboxes I can see right now." If the user has 50K filtered
+    // files and clicks "Select all" once, they should get the
+    // current 1K page selected, not be silently signed up for a
+    // 50K bulk delete. To select more they'd Load-more then click
+    // again.
     const paths = visibleFiles.map((f) => f.path);
     const allSelected = paths.every((p) => selected.has(p));
     setSelected((s) => {
@@ -186,9 +247,20 @@ export function FileList({ snapshot, initialFilter }: Props) {
     label: "trash" | "delete",
     action: (p: string) => Promise<PathActionResult>,
   ) => {
-    const targets = visibleFiles.filter((f) => selected.has(f.path));
+    // Bulk acts on every selected file, not just the currently-
+    // rendered page. Otherwise scrolling to the next page would
+    // silently drop earlier selections from the operation, which
+    // is exactly the "I clicked select-all on page 1, then page 2,
+    // then trash, but only page-2 got trashed" footgun we want to
+    // avoid.
+    const targets = filteredFiles.filter((f) => selected.has(f.path));
     if (targets.length === 0) return;
-    if (label === "delete" && !confirm(`Permanently delete ${targets.length} file(s)?`)) return;
+    if (label === "delete") {
+      const msg =
+        `Permanently delete ${targets.length} file(s)?\n\n` +
+        `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
+      if (!confirm(msg)) return;
+    }
 
     const ok: string[] = [];
     for (const f of targets) {
@@ -204,7 +276,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
   };
 
   const bulkMove = async () => {
-    const targets = visibleFiles.filter((f) => selected.has(f.path));
+    const targets = filteredFiles.filter((f) => selected.has(f.path));
     if (targets.length === 0) return;
     const moved = await handleEasyMoveBatch(targets.map((f) => f.path));
     if (moved.length > 0) markDismissed(moved);
@@ -233,15 +305,19 @@ export function FileList({ snapshot, initialFilter }: Props) {
       </div>
 
       <div className="bulk-bar">
-        <span className="bulk-bar-count">{selectedVisible}/{visibleFiles.length}</span>
-        <span>selected</span>
+        {/* "X selected (of N matching)" — the parenthetical tells
+         *  the user that bulk actions cover every selected row, not
+         *  just the rendered page. Without it, paginating felt
+         *  like the off-page selections were lost. */}
+        <span className="bulk-bar-count">{selectedTotal}</span>
+        <span>selected{totalCount > visibleFiles.length ? ` (of ${formatCount(totalCount)} matching)` : ""}</span>
         <div className="bulk-spacer" />
         <button className="bulk-btn" onClick={toggleSelectAll}>
-          {selectedVisible === visibleFiles.length && visibleFiles.length > 0 ? "Clear all" : "Select all"}
+          {selectedVisible === visibleFiles.length && visibleFiles.length > 0 ? "Clear page" : "Select page"}
         </button>
         <button
           className="bulk-btn"
-          disabled={selectedVisible === 0}
+          disabled={selectedTotal === 0}
           onClick={() => void bulkMove()}
           title="Move selected files to another location and leave a symlink so they still open from here"
         >
@@ -249,20 +325,20 @@ export function FileList({ snapshot, initialFilter }: Props) {
         </button>
         <button
           className="bulk-btn warn"
-          disabled={selectedVisible === 0}
+          disabled={selectedTotal === 0}
           onClick={() => void bulkAction("trash", nativeApi.trashPath)}
+          title="Send to OS trash — recoverable until emptied"
         >
           Trash selected
         </button>
-        {!safeDeleteOnly && (
-          <button
-            className="bulk-btn danger"
-            disabled={selectedVisible === 0}
-            onClick={() => void bulkAction("delete", nativeApi.permanentlyDeletePath)}
-          >
-            Delete selected
-          </button>
-        )}
+        <button
+          className="bulk-btn danger"
+          disabled={selectedTotal === 0}
+          onClick={() => void bulkAction("delete", nativeApi.permanentlyDeletePath)}
+          title="Permanently delete — skips trash, frees disk space immediately, cannot be undone"
+        >
+          Delete selected
+        </button>
       </div>
 
       {/* ── Column headers ── */}
@@ -282,27 +358,56 @@ export function FileList({ snapshot, initialFilter }: Props) {
             <span>No files match the current filter</span>
           </div>
         ) : (
-          visibleFiles.map((file, idx) => (
-            <FileRow
-              key={file.path}
-              file={file}
-              index={idx}
-              focused={focusIndex === idx}
-              rootPath={snapshot.rootPath}
-              selected={selected.has(file.path)}
-              isBusy={busy.has(file.path)}
-              safeDeleteOnly={safeDeleteOnly}
-              onToggle={() => toggleSelected(file.path)}
-              onReveal={() => void runAction(file.path, () => nativeApi.revealPath(file.path))}
-              onOpen={() => void runAction(file.path, () => nativeApi.openPath(file.path))}
-              onMove={() => void handleEasyMove(file.path)}
-              onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { dismiss: true })}
-              onDelete={() => {
-                if (!confirm(`Permanently delete ${file.name}?`)) return;
-                void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { dismiss: true });
-              }}
-            />
-          ))
+          <>
+            {visibleFiles.map((file, idx) => (
+              <FileRow
+                key={file.path}
+                file={file}
+                index={idx}
+                focused={focusIndex === idx}
+                rootPath={snapshot.rootPath}
+                selected={selected.has(file.path)}
+                isBusy={busy.has(file.path)}
+                onToggle={() => toggleSelected(file.path)}
+                onReveal={() => void runAction(file.path, () => nativeApi.revealPath(file.path))}
+                onOpen={() => void runAction(file.path, () => nativeApi.openPath(file.path))}
+                onMove={() => void handleEasyMove(file.path)}
+                onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { dismiss: true })}
+                onDelete={() => {
+                  const msg =
+                    `Permanently delete ${file.name}?\n\n` +
+                    `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
+                  if (!confirm(msg)) return;
+                  void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { dismiss: true });
+                }}
+              />
+            ))}
+            {/* Load-more footer. Shown only when there's another
+             *  page of filtered results past the current limit.
+             *  Bumps in PAGE_SIZE chunks so a click on a 50K-result
+             *  filter doesn't lock the renderer for half a second
+             *  trying to materialise everything. */}
+            {hasMore && (
+              <div className="file-list-loadmore">
+                <span className="file-list-loadmore-status">
+                  Showing {formatCount(visibleFiles.length)} of {formatCount(totalCount)}
+                </span>
+                <button
+                  className="action-btn"
+                  onClick={() => setPageLimit((n) => n + PAGE_SIZE)}
+                >
+                  Load {formatCount(Math.min(PAGE_SIZE, totalCount - visibleFiles.length))} more
+                </button>
+                <button
+                  className="action-btn"
+                  onClick={() => setPageLimit(totalCount)}
+                  title="Render every matching file. May lag on very large result sets — prefer filtering or quick-filters first."
+                >
+                  Show all
+                </button>
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>
@@ -343,7 +448,6 @@ function FileRow(props: {
   rootPath: string | null;
   selected: boolean;
   isBusy: boolean;
-  safeDeleteOnly: boolean;
   onToggle: () => void;
   onReveal: () => void;
   onOpen: () => void;
@@ -351,7 +455,7 @@ function FileRow(props: {
   onTrash: () => void;
   onDelete: () => void;
 }) {
-  const { file, index, focused, rootPath, selected, isBusy, safeDeleteOnly, onToggle, onReveal, onOpen, onMove, onTrash, onDelete } = props;
+  const { file, index, focused, rootPath, selected, isBusy, onToggle, onReveal, onOpen, onMove, onTrash, onDelete } = props;
 
   return (
     <div className={`file-row ${selected ? "selected" : ""} ${focused ? "focused" : ""}`} data-index={index}>
@@ -377,10 +481,27 @@ function FileRow(props: {
         </button>
         <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
         <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
-        <button className="action-btn warn" disabled={isBusy} onClick={onTrash}>Trash</button>
-        {!safeDeleteOnly && (
-          <button className="action-btn danger" disabled={isBusy} onClick={onDelete}>Del</button>
-        )}
+        <button
+          className="action-btn warn"
+          disabled={isBusy}
+          onClick={onTrash}
+          title="Send to OS trash (recoverable until emptied)"
+        >
+          Trash
+        </button>
+        {/* Permanent delete is now always available — the
+         * cleanup.safeDeleteToTrash setting used to gate this button
+         * but it created a confusing two-step (open Settings, flip
+         * a toggle, come back, delete). Confirm dialog with strong
+         * irreversibility wording remains the safety net. */}
+        <button
+          className="action-btn danger"
+          disabled={isBusy}
+          onClick={onDelete}
+          title="Permanently delete (skips trash, cannot be undone)"
+        >
+          Del
+        </button>
       </div>
     </div>
   );

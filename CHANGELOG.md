@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.8 — 2026-04-26
+
+Largest Files tab — pagination + always-on permanent delete.
+
+### 1K-row pagination
+
+Rendering 50K files (the scanner's default top-file ceiling) in a
+single Preact pass cost ~600 ms and made every keystroke in the
+filter input stutter. The list now renders the top 1,000 rows of
+the filtered+sorted view by default and offers two follow-up
+actions:
+
+- **Load N more** — bumps the limit by another page (1,000).
+  Bounded N to "remaining matches" so the label is honest.
+- **Show all** — bypasses pagination for users who want to
+  scroll everything (e.g. exporting). Tooltipped warning that
+  it may lag on very large result sets.
+
+Filter / sort / quick-filter changes reset the page to 1, so
+narrowing the view (e.g. picking the Video chip) doesn't leave
+the user stuck on a stale tail of the list.
+
+Bulk actions ("Trash selected", "Delete selected", "Move
+selected") now operate on the full filtered selection — not just
+the rendered page. Without this, paginating with rows ticked on
+page 1 then page 2 would silently drop page-1's selection from
+the bulk action. The selection counter shows
+"X selected (of N matching)" so the larger-than-visible target
+set is obvious before clicking.
+
+"Select all" was renamed to "Select page" to match the new
+semantics: it toggles every checkbox on the visible page, not
+across the entire filtered result.
+
+### Permanent delete always available
+
+The per-row "Del" and bulk "Delete selected" buttons used to be
+gated on a global Settings toggle (`cleanup.safeDeleteToTrash`)
+which defaulted to "trash only." Hiding the permanent option
+behind a settings round-trip was hostile when the user knew
+exactly what they wanted to do — a Steam cache, a deleted-but-
+still-trashed VM image, etc. Both buttons are now always
+visible. The confirm dialog gained stronger irreversibility
+wording ("SKIPS the trash and CANNOT be undone — the OS will
+free the bytes immediately") to compensate for the reduced
+friction.
+
 ## 0.5.7 — 2026-04-24
 
 Window-geometry persistence + icon sharpness pass.

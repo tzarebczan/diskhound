@@ -2427,6 +2427,26 @@ button, input, select, textarea { font: inherit; }
   text-align: center;
 }
 
+/* Load-more footer for the Largest Files list. Sits at the bottom
+ * of the .file-list-scroll container after the last paginated row
+ * and only renders when there are more filtered results past the
+ * current page limit. Visually distinct from rows (transparent
+ * background, centered) so it doesn't read as another file. */
+.file-list-loadmore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 16px 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  font-size: 12.5px;
+}
+.file-list-loadmore-status {
+  margin-right: auto;
+  margin-left: 12px;
+}
+
 /* ── Folder Explorer ──────────────────────────── */
 .folder-explorer {
   /* Flex column instead of grid: we gained a third child in v0.3.6
