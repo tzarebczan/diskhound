@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "prea
 
 import type {
   AppSettings,
+  AppView,
   DiskIoProcessInfo,
   DiskIoSnapshot,
   DiskSpaceInfo,
@@ -26,9 +27,19 @@ const DISK_REFRESH_MS = 10_000;
 const MEMORY_REFRESH_MS = 4_000;
 const DISK_IO_REFRESH_MS = 3_000;
 const GPU_REFRESH_MS = 7_500;
-/** Hide the "baseline" / "first sample…" placeholder text for this
- *  long after mount so the widget's first paint isn't hostile. */
+/** Hide the "first sample…" placeholder text for this long after
+ *  mount so the widget's first paint isn't hostile. */
 const BASELINE_GRACE_MS = 4_000;
+/** Show a stale-data pill at the top when the memory sample is
+ *  older than this. The slowest live sampler (disk/scan, 10 s)
+ *  drives the threshold — anything older than ~3× that means
+ *  the widget has lost the heartbeat. */
+const STALE_THRESHOLD_MS = 30_000;
+/** Sparkline ring-buffer cap. 20 points × per-metric cadence
+ *  gives 60-200 s of trend per tile, which is the right horizon
+ *  for "is this getting worse right now?" — long enough to read
+ *  the slope, short enough that the line stays current. */
+const HISTORY_CAP = 20;
 
 function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
   if (theme === "light") return "light";
@@ -55,8 +66,8 @@ function rootDrive(rootPath: string | null | undefined, drives: DiskSpaceInfo[])
 }
 
 /** Match the DriveCard pressure thresholds in the main app
- *  (DiskPicker.tsx) so a 92 %-full drive reads "critical" in both
- *  places. Was previously low/mid/high — now ok/warn/critical. */
+ *  (DiskPicker.tsx) so a 92 %-full drive reads "critical" in
+ *  both places. */
 function pressureClass(usedPercent: number | null | undefined): "ok" | "warn" | "critical" {
   if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) return "ok";
   if (usedPercent > 90) return "critical";
@@ -64,10 +75,23 @@ function pressureClass(usedPercent: number | null | undefined): "ok" | "warn" | 
   return "ok";
 }
 
+/** Map drive pressure → tile accent color. Critical (>90 %)
+ *  reads RED in the hero tile, matching the per-drive bar
+ *  below it. Previously the DISK tile was hard-coded to amber
+ *  regardless of the actual percentage, which created the
+ *  awkward "92 % shown in amber while the same drive's bar
+ *  below shows red" inconsistency. */
+function diskPressureAccent(usedPercent: number | null | undefined): TileAccent {
+  switch (pressureClass(usedPercent)) {
+    case "critical": return "red";
+    case "warn":     return "amber";
+    default:         return "green";
+  }
+}
+
 /** Categorise a disk-I/O process by direction. If reads dominate
- *  ≥5× over writes (or vice versa) we collapse to a single label;
- *  otherwise show both. Returns the label and the rate to display
- *  alongside it (always in bytes/s). */
+ *  ≥5× over writes (or vice versa) we collapse to a single
+ *  label; otherwise show both. */
 function ioDirectionLabel(p: DiskIoProcessInfo): { prefix: string; rate: number } {
   const r = Math.max(0, p.readBytesPerSec);
   const w = Math.max(0, p.writeBytesPerSec);
@@ -77,8 +101,20 @@ function ioDirectionLabel(p: DiskIoProcessInfo): { prefix: string; rate: number 
   return { prefix: "r+w", rate: p.totalBytesPerSec };
 }
 
+function formatStaleAge(seconds: number): string {
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    const remSec = seconds % 60;
+    return remSec > 0 ? `${minutes}m ${remSec}s ago` : `${minutes}m ago`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m ago`;
+}
+
+type TileAccent = "amber" | "blue" | "green" | "teal" | "red";
+
 interface SamplerIssue {
-  /** Stable key for React + dedupe. */
   source: "memory" | "diskIo" | "gpu";
   message: string;
 }
@@ -90,18 +126,24 @@ export function SystemWidget() {
   const [diskIo, setDiskIo] = useState<DiskIoSnapshot | null>(null);
   const [gpu, setGpu] = useState<GpuSnapshot | null>(null);
   const [pinned, setPinned] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
   const [hasFirstSample, setHasFirstSample] = useState(false);
   const [mountedAt] = useState<number>(() => Date.now());
+  // Re-evaluated periodically so the stale pill ages even
+  // between sampler ticks. Cheap to update — the main render
+  // is already gated on snapshot changes for the data tiles.
+  const [now, setNow] = useState<number>(() => Date.now());
+
+  // Per-metric ring buffers for the sparklines. Each metric
+  // appends its latest 0-100 value when its sampler returns;
+  // sparkline component reads tail-N for the trace.
+  const [diskHistory, setDiskHistory] = useState<number[]>([]);
+  const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
+  const [cpuHistory, setCpuHistory] = useState<number[]>([]);
+  const [gpuHistory, setGpuHistory] = useState<number[]>([]);
 
   const gpuAvailable = nativeApi.platform === "win32";
 
   // ── Theme + body class ────────────────────────────────────
-  // Body class added on mount, removed on unmount. Repeated calls
-  // are no-ops via classList semantics so HMR re-mounts don't
-  // double-class. useLayoutEffect rather than useEffect: the body
-  // class controls the radial-gradient backdrop, and we'd rather
-  // paint it on the first frame than after a flash of bare-body.
   useLayoutEffect(() => {
     document.body.classList.add("system-widget-body");
     return () => {
@@ -109,9 +151,6 @@ export function SystemWidget() {
     };
   }, []);
 
-  // Apply theme + colorblind flags from a settings object. Pure
-  // (no IPC); the caller passes either the initial getSettings()
-  // payload or a push-broadcast payload.
   const applySettingsToTheme = useCallback((settings: AppSettings) => {
     const root = document.documentElement;
     const next = resolveThemePreference(settings.general.theme);
@@ -120,12 +159,6 @@ export function SystemWidget() {
     root.classList.toggle("colorblind", Boolean(settings.general.colorBlindMode));
   }, []);
 
-  // Initial read + push subscription. Replaces the prior 12 s
-  // poll: the main process now broadcasts `settings-updated` to
-  // every renderer window after every successful settings write
-  // (see `settingsStore.subscribe` in main.ts). A theme flip in
-  // the main app reaches the widget within a couple of ms instead
-  // of up to 12 s — feels alive, costs less.
   useEffect(() => {
     void nativeApi.getSettings().then((settings) => {
       if (settings) applySettingsToTheme(settings);
@@ -134,6 +167,15 @@ export function SystemWidget() {
       applySettingsToTheme(settings);
     });
   }, [applySettingsToTheme]);
+
+  // Periodic `now` refresh purely so the stale-pill age ticks
+  // between sampler updates. 5 s cadence is fine — staleness
+  // accumulates slowly by definition. No re-render cost when the
+  // pill is hidden (it's gated on isStale below).
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   // ── Sampler refresh helpers ───────────────────────────────
   const refreshDiskAndScan = useCallback(async () => {
@@ -166,26 +208,17 @@ export function SystemWidget() {
   }, [gpuAvailable]);
 
   const refreshAll = useCallback(async () => {
-    setRefreshing(true);
-    try {
-      await Promise.allSettled([
-        refreshDiskAndScan(),
-        refreshMemory(),
-        refreshDiskIo(),
-        refreshGpu(),
-      ]);
-    } finally {
-      setRefreshing(false);
-    }
+    await Promise.allSettled([
+      refreshDiskAndScan(),
+      refreshMemory(),
+      refreshDiskIo(),
+      refreshGpu(),
+    ]);
   }, [refreshDiskAndScan, refreshDiskIo, refreshGpu, refreshMemory]);
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      // Pre-paint from main-process caches so the widget doesn't
-      // flash "—%" placeholders before the first live samples
-      // return. Each cache call resolves null on a cold boot, in
-      // which case we just rely on refreshAll() below.
       const [cachedMemory, cachedDiskIo, cachedGpu] = await Promise.allSettled([
         nativeApi.getCachedMemorySnapshot(),
         nativeApi.getCachedDiskIoSnapshot(),
@@ -214,8 +247,6 @@ export function SystemWidget() {
     };
   }, [gpuAvailable, refreshAll, refreshDiskAndScan, refreshDiskIo, refreshGpu, refreshMemory]);
 
-  // First-sample latch — flips true the moment ANY sampler comes
-  // back. Drives the skeleton ↔ full-UI swap below.
   useEffect(() => {
     if (hasFirstSample) return;
     if (memory || diskIo || drives.length > 0 || (gpuAvailable && gpu)) {
@@ -224,9 +255,6 @@ export function SystemWidget() {
   }, [hasFirstSample, memory, diskIo, drives.length, gpu, gpuAvailable]);
 
   // ── Keyboard ──────────────────────────────────────────────
-  // Esc closes the widget; Ctrl/Cmd+R refreshes without reloading
-  // the renderer (Electron's default F5/Ctrl+R reload would blow
-  // away in-flight samples and is hostile in a frameless utility).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
@@ -280,8 +308,6 @@ export function SystemWidget() {
   const topCpu = memory?.processes
     .filter((p) => typeof p.cpuPercent === "number")
     .sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0))[0];
-  // Top CPU sub-line: "<name> 12%" — bare name doesn't tell you
-  // anything about whether to act on it.
   const cpuSub = topCpu
     ? `${shortProcessName(topCpu.name)} ${pct(topCpu.cpuPercent)}`
     : memory ? `${memory.cpuCount} logical CPUs` : "";
@@ -289,7 +315,7 @@ export function SystemWidget() {
   const diskRate = (diskIo?.totalReadBytesPerSec ?? 0) + (diskIo?.totalWriteBytesPerSec ?? 0);
   const topDisk = diskIo?.processes[0] ?? null;
   const topDiskDir = topDisk ? ioDirectionLabel(topDisk) : null;
-  const diskBaselineGraceActive = !diskIo?.hasRateBaseline && (Date.now() - mountedAt < BASELINE_GRACE_MS);
+  const diskBaselineGraceActive = !diskIo?.hasRateBaseline && (now - mountedAt < BASELINE_GRACE_MS);
 
   const gpuPercent = gpu && !gpu.unavailable
     ? Math.max(
@@ -308,8 +334,53 @@ export function SystemWidget() {
         ? `${formatBytes(gpuMemUsed)} VRAM`
         : "";
 
-  // Sampler error stack — dedupe by source so a single PowerShell
-  // failure doesn't show up three times.
+  // ── Sparkline ring-buffer updates ─────────────────────────
+  // Each metric pushes when its underlying snapshot changes.
+  // Gating on `drives` / `memory` / `diskIo` / `gpu` (rather
+  // than on the derived percent) keeps us from double-pushing
+  // the same value across renders that don't carry new data.
+  useEffect(() => {
+    if (drives.length === 0) return;
+    const value = activeDrive?.usedPercent ?? totalDisk.usedPercent;
+    if (typeof value === "number" && Number.isFinite(value)) {
+      setDiskHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), value]);
+    }
+    // activeDrive depends on drives + scan?.rootPath; both changing
+    // legitimately moves the "active" drive, which we want to record.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drives, scan?.rootPath]);
+  useEffect(() => {
+    if (!memory) return;
+    setMemoryHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), memory.usedPercent]);
+    const cpu = memory.processes
+      .map((p) => p.cpuPercent)
+      .filter((v): v is number => typeof v === "number" && Number.isFinite(v));
+    if (cpu.length > 0) {
+      const total = Math.min(100, cpu.reduce((sum, v) => sum + Math.max(0, v), 0));
+      setCpuHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), total]);
+    }
+  }, [memory]);
+  useEffect(() => {
+    if (!gpu || gpu.unavailable) return;
+    const value = Math.max(
+      0,
+      ...gpu.adapters.map((a) => a.utilizationPercent),
+      ...gpu.processes.map((p) => p.utilizationPercent),
+    );
+    setGpuHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), value]);
+  }, [gpu]);
+
+  // ── Stale callout ─────────────────────────────────────────
+  // Memory is the fastest sampler (4 s cadence) and the one
+  // that drives the rest of the widget's "alive" feel — if its
+  // sampledAt drifts >30 s we tell the user. Below the
+  // threshold the pill is hidden entirely so normal operation
+  // is silent (per the "don't add noise that's always true"
+  // principle from the previous round of polish).
+  const memoryAge = memory ? Math.max(0, Math.round((now - memory.sampledAt) / 1000)) : 0;
+  const isStale = memory != null && (now - memory.sampledAt) > STALE_THRESHOLD_MS;
+
+  // ── Sampler error stack ───────────────────────────────────
   const samplerIssues: SamplerIssue[] = useMemo(() => {
     const out: SamplerIssue[] = [];
     if (memory?.errorMessage) out.push({ source: "memory", message: memory.errorMessage });
@@ -318,6 +389,7 @@ export function SystemWidget() {
     return out;
   }, [memory, diskIo, gpu, gpuAvailable]);
 
+  // ── Scan section ──────────────────────────────────────────
   const scanDrive = rootDrive(scan?.rootPath, drives);
   const scanPercent = scan?.status === "running" && scanDrive && scanDrive.usedBytes > 0
     ? Math.min(99, Math.max(0, Math.round((scan.bytesSeen / scanDrive.usedBytes) * 100)))
@@ -339,9 +411,6 @@ export function SystemWidget() {
       : scan?.status === "error"
         ? "error"
         : "idle";
-  // Scan bar fill: 0 when idle, scanPercent when running, 100 when
-  // done/error. Idle was previously a phantom 8% stub which made
-  // the widget look like something was always running.
   const scanFillPercent = scan?.status === "running"
     ? (scanPercent ?? 5)
     : scan?.status === "done" || scan?.status === "error"
@@ -355,10 +424,15 @@ export function SystemWidget() {
     setPinned(actual);
   };
 
-  // Build the hero tile list dynamically. GPU is hidden on
-  // non-Windows because the sampler genuinely doesn't work there
-  // (Windows-only WDDM perf counters); a permanent "n/a" tile is
-  // wasted real estate. Hero grid auto-adjusts to N columns.
+  // ── Click-through helper ──────────────────────────────────
+  // Single entry point — the widget brings the main window
+  // forward AND tells its renderer which tab to switch to. The
+  // main process IPC handler does both atomically (focus +
+  // emit-navigate); App.tsx subscribes once on mount.
+  const navigate = useCallback((view: AppView, scanRoot?: string) => {
+    void nativeApi.focusMainWithView({ view, ...(scanRoot ? { scanRoot } : {}) });
+  }, []);
+
   const heroTileCount = gpuAvailable ? 4 : 3;
 
   // ── Skeleton state ────────────────────────────────────────
@@ -366,10 +440,7 @@ export function SystemWidget() {
     return (
       <div className="system-widget-shell">
         <Titlebar
-          updatedLabel="sampling…"
-          refreshing={true}
           pinned={pinned}
-          onRefresh={() => void refreshAll()}
           onTogglePin={() => void setPinnedMode()}
         />
         <main className="system-widget-content system-widget-content-loading">
@@ -385,21 +456,28 @@ export function SystemWidget() {
   return (
     <div className="system-widget-shell">
       <Titlebar
-        updatedLabel={memory ? `updated ${relativeTime(memory.sampledAt)}` : "—"}
-        refreshing={refreshing}
         pinned={pinned}
-        onRefresh={() => void refreshAll()}
         onTogglePin={() => void setPinnedMode()}
       />
 
       <main className="system-widget-content">
+        {isStale && (
+          <div className="system-widget-stale" title={`Last sample at ${new Date(memory!.sampledAt).toLocaleTimeString()}`}>
+            <span className="system-widget-stale-dot" aria-hidden="true" />
+            stale · {formatStaleAge(memoryAge)}
+          </div>
+        )}
+
         <section className={`system-widget-tiles tiles-${heroTileCount}`}>
           <StatTile
             kicker="Disk"
             value={diskValue}
             sub={diskSub}
             percent={diskPct}
-            accent="amber"
+            accent={diskPressureAccent(diskPct)}
+            history={diskHistory}
+            onClick={() => navigate("overview", activeDrive?.drive)}
+            ariaLabel={`Disk ${diskValue} used. Click to open the main app's Overview.`}
           />
           <StatTile
             kicker="Memory"
@@ -407,6 +485,9 @@ export function SystemWidget() {
             sub={memory ? `${formatBytes(memory.usedBytes)} / ${formatBytes(memory.totalBytes)}` : ""}
             percent={memoryPct ?? 0}
             accent="blue"
+            history={memoryHistory}
+            onClick={() => navigate("memory")}
+            ariaLabel={`Memory ${pct(memoryPct)} used. Click to open the Processes tab.`}
           />
           <StatTile
             kicker="CPU"
@@ -414,6 +495,9 @@ export function SystemWidget() {
             sub={cpuSub}
             percent={cpuPercent ?? 0}
             accent="green"
+            history={cpuHistory}
+            onClick={() => navigate("memory")}
+            ariaLabel={`CPU ${pct(cpuPercent)} active. Click to open the Processes tab.`}
           />
           {gpuAvailable && (
             <StatTile
@@ -423,11 +507,17 @@ export function SystemWidget() {
               percent={gpu?.unavailable ? 0 : (gpuPercent ?? 0)}
               accent="teal"
               dimmed={gpu?.unavailable}
+              history={gpuHistory}
+              onClick={() => navigate("memory")}
+              ariaLabel={`GPU ${gpu?.unavailable ? "not available" : pct(gpuPercent)}. Click to open the Processes tab.`}
             />
           )}
         </section>
 
-        <section className="system-widget-section">
+        <ClickableSection
+          onClick={() => navigate("diskIo")}
+          ariaLabel="Open the Disk I/O tab in the main app"
+        >
           <SectionHead label="Disk I/O" value={`${formatBytes(diskRate)}/s`} />
           <div className="system-widget-io-bars">
             <FlowBar label="read"  value={diskIo?.totalReadBytesPerSec ?? 0}  total={Math.max(1, diskRate)} tone="blue" />
@@ -449,9 +539,13 @@ export function SystemWidget() {
               <span>{diskIo?.hasRateBaseline ? "idle" : "first sample…"}</span>
             </div>
           ) : null}
-        </section>
+        </ClickableSection>
 
-        <section className={`system-widget-section system-widget-scan ${scan?.status ?? "idle"}`}>
+        <ClickableSection
+          onClick={() => navigate("changes")}
+          ariaLabel="Open the Changes tab in the main app"
+          className={`system-widget-scan ${scan?.status ?? "idle"}`}
+        >
           <SectionHead label={scanTitle} value={scanRightLabel} />
           <div className="system-widget-scan-path" title={scanDetail}>{scanDetail}</div>
           {scan && scan.status !== "idle" && (
@@ -467,7 +561,7 @@ export function SystemWidget() {
               style={{ width: `${scanFillPercent}%` }}
             />
           </div>
-        </section>
+        </ClickableSection>
 
         <section className="system-widget-section">
           <SectionHead label="Drives" value={`${formatBytes(totalDisk.freeBytes)} free`} />
@@ -475,7 +569,13 @@ export function SystemWidget() {
             {drives.slice(0, 4).map((drive) => {
               const cls = pressureClass(drive.usedPercent);
               return (
-                <div className="system-widget-drive-row" key={drive.drive}>
+                <button
+                  type="button"
+                  className="system-widget-drive-row"
+                  key={drive.drive}
+                  onClick={() => navigate("overview", drive.drive)}
+                  title={`${drive.drive} ${formatBytes(drive.freeBytes)} free of ${formatBytes(drive.totalBytes)} · ${pct(drive.usedPercent)} used · click to focus in main`}
+                >
                   <div className="system-widget-drive-label">
                     <span>{drive.drive}</span>
                     <span>{formatBytes(drive.freeBytes)} free</span>
@@ -486,7 +586,7 @@ export function SystemWidget() {
                       style={{ width: `${Math.max(2, Math.min(100, drive.usedPercent))}%` }}
                     />
                   </div>
-                </div>
+                </button>
               );
             })}
             {drives.length === 0 && <div className="system-widget-empty">Waiting for drive telemetry.</div>}
@@ -494,7 +594,7 @@ export function SystemWidget() {
               <button
                 type="button"
                 className="system-widget-drive-more"
-                onClick={() => void nativeApi.focusMainWindow()}
+                onClick={() => navigate("overview")}
                 title="Open the main app to see all drives"
               >
                 + {drives.length - 4} more {drives.length - 4 === 1 ? "drive" : "drives"} →
@@ -520,38 +620,18 @@ export function SystemWidget() {
 // ── Sub-components ───────────────────────────────────────────
 
 function Titlebar(props: {
-  updatedLabel: string;
-  refreshing: boolean;
   pinned: boolean;
-  onRefresh: () => void;
   onTogglePin: () => void;
 }) {
-  const { updatedLabel, refreshing, pinned, onRefresh, onTogglePin } = props;
+  const { pinned, onTogglePin } = props;
   return (
     <header className="system-widget-titlebar">
       <DragGrip />
       <div className="system-widget-brand">
         <BrandMark />
-        <div className="system-widget-brand-text">
-          <div className="system-widget-title">DiskHound Monitor</div>
-          <div className="system-widget-subtitle">
-            <span className={`system-widget-live-dot ${refreshing ? "refreshing" : ""}`} aria-hidden="true" />
-            {updatedLabel}
-          </div>
-        </div>
+        <div className="system-widget-title">DiskHound Monitor</div>
       </div>
       <div className="system-widget-actions">
-        <button
-          type="button"
-          className={`system-widget-icon-btn ${refreshing ? "refreshing" : ""}`}
-          title="Refresh (Ctrl+R)"
-          onClick={onRefresh}
-        >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M12 3.5V1h-2.5" />
-            <path d="M11.2 4A5 5 0 1 0 12 8" />
-          </svg>
-        </button>
         <button
           type="button"
           className={`system-widget-icon-btn ${pinned ? "active" : ""}`}
@@ -588,10 +668,6 @@ function Titlebar(props: {
   );
 }
 
-/** Same 16×16 stacked-tile mark used in the main app header
- *  ([App.tsx, line ~882](src/renderer/App.tsx)). Anchors widget
- *  identity to DiskHound rather than feeling like a separate
- *  product. */
 function BrandMark() {
   return (
     <svg className="system-widget-brand-mark" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
@@ -603,10 +679,6 @@ function BrandMark() {
   );
 }
 
-/** 2-column dot grip — the de-facto standard "this is draggable"
- *  affordance on frameless utility windows (iStat, Stats, Loop,
- *  Rectangle, every menubar widget on macOS). Pure decoration,
- *  zero-width interactive (drag is the whole titlebar). */
 function DragGrip() {
   return (
     <svg className="system-widget-grip" width="8" height="14" viewBox="0 0 8 14" fill="currentColor" aria-hidden="true">
@@ -620,23 +692,14 @@ function DragGrip() {
   );
 }
 
-/** Real thumbtack glyph viewed from the front: head bar on top,
- *  trapezoidal body, vertical shaft. When `active` (pinned) the
- *  body fills with currentColor so the state reads at a glance —
- *  prior svg used the same outline-only path either way and the
- *  pinned/unpinned states were indistinguishable past arm's
- *  length. */
 function PinIcon({ active }: { active: boolean }) {
   return (
     <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round">
-      {/* head bar */}
       <path d="M4.2 2h5.6" />
-      {/* trapezoidal body */}
       <path
         d="M4.6 2v3.4L3.1 7.1h7.8L9.4 5.4V2"
         fill={active ? "currentColor" : "none"}
       />
-      {/* shaft */}
       <path d="M7 7.1v5.4" />
     </svg>
   );
@@ -651,27 +714,106 @@ function SectionHead({ label, value }: { label: string; value: string }) {
   );
 }
 
-function StatTile({ kicker, value, sub, percent, accent, dimmed = false }: {
+/**
+ * Section card whose entire surface is a click-through into a
+ * specific main-app tab. Renders as a `<button>` so it's
+ * keyboard-focusable and announces correctly to screen readers.
+ * Hover state lifts the background a touch and reveals a small
+ * "↗" affordance in the corner. Section content is passed as
+ * children so each call site can keep its bespoke layout.
+ */
+function ClickableSection(props: {
+  onClick: () => void;
+  ariaLabel: string;
+  className?: string;
+  children: preact.ComponentChildren;
+}) {
+  const { onClick, ariaLabel, className, children } = props;
+  return (
+    <button
+      type="button"
+      className={`system-widget-section system-widget-section-clickable ${className ?? ""}`}
+      onClick={onClick}
+      aria-label={ariaLabel}
+    >
+      {children}
+    </button>
+  );
+}
+
+function StatTile(props: {
   kicker: string;
   value: string;
   sub: string;
   percent: number;
-  accent: "amber" | "blue" | "green" | "teal";
+  accent: TileAccent;
   dimmed?: boolean;
+  history: number[];
+  onClick: () => void;
+  ariaLabel: string;
 }) {
+  const { kicker, value, sub, percent, accent, dimmed = false, history, onClick, ariaLabel } = props;
   const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
   return (
-    <div className={`system-widget-stat ${accent} ${dimmed ? "dimmed" : ""}`}>
+    <button
+      type="button"
+      className={`system-widget-stat ${accent} ${dimmed ? "dimmed" : ""}`}
+      onClick={onClick}
+      aria-label={ariaLabel}
+    >
       <div className="system-widget-stat-kicker">{kicker}</div>
-      <div className="system-widget-stat-value">{value}</div>
+      <div className="system-widget-stat-value-row">
+        <span className="system-widget-stat-value">{value}</span>
+        <Sparkline values={history} accent={accent} />
+      </div>
       <div className="system-widget-stat-track" aria-hidden="true">
         <div className="system-widget-stat-fill" style={{ width: `${clamped}%` }} />
       </div>
-      {/* &nbsp; reserves the line so tiles with an empty sub still
-       *  align vertically with their neighbours — otherwise a tile
-       *  with a process name and one without have different heights. */}
       <div className="system-widget-stat-sub" title={sub}>{sub || " "}</div>
-    </div>
+    </button>
+  );
+}
+
+/**
+ * Inline SVG sparkline. 60 × 16 px, fixed scale 0-100 (every
+ * metric is a percent so we don't need to compute min/max — the
+ * absolute "where am I in 0-100?" is the right framing). Returns
+ * null below 2 points because a single dot reads as noise.
+ *
+ * Stroke uses the tile's accent color via `currentColor`. No
+ * fill — a flat polyline is enough; an area fill would compete
+ * with the progress bar below it for the "how full?" signal.
+ */
+function Sparkline({ values, accent }: { values: number[]; accent: TileAccent }) {
+  if (values.length < 2) {
+    // Reserve the space so tiles with and without history don't
+    // bounce in width as samples accumulate.
+    return <span className="system-widget-sparkline system-widget-sparkline-empty" aria-hidden="true" />;
+  }
+  const W = 60;
+  const H = 16;
+  const max = 100;
+  const stepX = W / (values.length - 1);
+  const points = values
+    .map((v, i) => {
+      const x = i * stepX;
+      const clamped = Math.max(0, Math.min(max, v));
+      // 1 px inset top + bottom so the stroke doesn't get clipped
+      // at the edges.
+      const y = H - 1 - (clamped / max) * (H - 2);
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    })
+    .join(" ");
+  return (
+    <svg
+      className={`system-widget-sparkline ${accent}`}
+      width={W}
+      height={H}
+      viewBox={`0 0 ${W} ${H}`}
+      aria-hidden="true"
+    >
+      <polyline points={points} fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

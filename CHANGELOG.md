@@ -1,5 +1,110 @@
 # Changelog
 
+## 0.5.13 — 2026-04-30
+
+System Widget: click-through tiles, sparklines, stale callout,
+DISK pressure color, chrome cleanup. Plus a small main-app
+header tidy-up.
+
+### Widget chrome cleanup
+
+- **Dropped the "updated just now" subtitle.** With sampler
+  cadences ranging from 3-10 s and `relativeTime` returning
+  "just now" up to 60 s, the line was always-true noise. The
+  widget being open + tiles updating IS the alive signal; the
+  warning strip surfaces real problems.
+- **Dropped the manual refresh button.** Auto-refresh + the
+  existing `Ctrl/Cmd+R` shortcut cover every legitimate use.
+  The button was anxiety UX and the spinning-icon affordance
+  for the in-flight state went with it.
+- **Dropped the live-pulse dot.** It only existed to anchor the
+  subtitle line; with the line gone there was nothing to anchor
+  to. Title bar collapses to drag-grip + brand mark + title +
+  pin / open-main / close.
+
+### DISK tile color now tracks pressure
+
+The hero DISK tile was hard-coded to amber regardless of fill
+percentage. A 92 %-full drive showed amber in the tile *while*
+the per-drive bar below it correctly showed red — same drive,
+same percentage, two different colors. Tile now picks the
+gradient via the same `pressureClass` thresholds the drive bars
+use (>90 critical → red, >75 warn → amber, else ok → green).
+Added a new `red` accent variant covering the critical case.
+
+### Click-through tiles + sections
+
+Every tile and section in the widget is now a click-through into
+the matching tab in the main app:
+
+| Click | Lands on |
+|---|---|
+| DISK tile | Overview (active drive's treemap) |
+| MEMORY / CPU / GPU tile | Processes |
+| DISK I/O section | Disk I/O tab |
+| LATEST SCAN section | Changes tab |
+| Each drive row | Overview, with that drive primed in the picker |
+| "+ N more drives" | Overview |
+
+Plumbed via a new `focusMainWithView({ view, scanRoot? })` IPC
+that brings the main window forward AND pushes a
+`diskhound:navigate-view` message to its renderer. App.tsx
+subscribes once on mount, sets `currentRoot` and `view` on
+receipt. The widget's renderer never receives its own request
+back — main only sends the navigate signal to the main window.
+
+Stat tiles + clickable sections render as `<button>`, so they
+get keyboard focus rings (amber outline) and a tiny "↗"
+affordance in the corner that fades in on hover.
+
+### Sparklines
+
+A 60×16 px inline SVG trace next to each hero tile's value
+shows the last ~20 samples. Per-metric ring buffer in the
+widget; the polyline is plotted at fixed 0-100 scale (every
+metric is a percent so absolute "where am I in this range?" is
+the right framing). Stroke uses the tile's accent color via
+`currentColor`, dimmed to 0.75 opacity so the absolute value
+stays primary and the trend stays secondary.
+
+20 points × per-metric cadence = 60-200 s of trend per tile —
+long enough to read the slope, short enough to stay current.
+Below 360 px width the sparkline hides entirely (cramped) and
+the absolute value carries the load.
+
+### Stale callout
+
+Hidden in normal operation. When the memory sampler
+(`sampledAt`) is older than 30 s, a small pulsing-amber pill
+shows above the tiles: "stale · 1m 12s ago". Surfaces real
+problems (sleep/wake, hung sampler) without adding noise during
+normal use. Age ticks every 5 s via a separate `now` interval
+so the user sees it climb without waiting on the next sampler
+return.
+
+### Settings push instead of poll (already in 0.5.11, now used)
+
+The widget's theme handling switched from a 12 s `getSettings()`
+poll to a push subscription on the new `onSettingsUpdated`
+channel back in 0.5.11. This release is the first where it's
+actually used end-to-end (the previous landings still had the
+poll wired). Theme flips made in main reach the widget within
+~1 ms.
+
+### Main-app header
+
+Picture-in-Picture-style icon for the System Widget button —
+universal "open as floating window" affordance, recognisable
+from Apple, YouTube, video apps. Was a generic "rectangle with
+content rows" that read as "settings panel" or "document".
+
+The three header utility buttons (search / widget / settings)
+are now wrapped in a `.header-utilities` flex container with
+4 px internal gap and a thin vertical divider in front of them,
+so they read as a separate region from the drive pills next to
+them. Header grid drops from 5 to 4 columns — the third utility
+button used to spill into row 2 on narrow widths.
+
 ## 0.5.12 — 2026-04-30
 
 Release pipeline: macOS goes universal, drops macos-13 dependency.

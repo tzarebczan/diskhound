@@ -791,7 +791,13 @@ button, input, select, textarea { font: inherit; }
 /* ── Header ────────────────────────────────── */
 .header {
   display: grid;
-  grid-template-columns: auto 1fr auto auto auto;
+  /* 4 columns in 0.5.13 — utility buttons (search / widget /
+   * settings) are now wrapped in a single .header-utilities
+   * flex container that occupies one cell, instead of three
+   * separate cells competing for width with the drive pills.
+   * Was 5 cols (auto 1fr auto auto auto); the third utility
+   * button used to spill into row 2 on narrow widths. */
+  grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 12px;
   padding: 0 12px;
@@ -1012,6 +1018,31 @@ button, input, select, textarea { font: inherit; }
   box-shadow: 0 0 5px rgba(245,158,11,0.5);
   transition: width 0.5s ease-out;
   pointer-events: none;
+}
+
+/* Utility button group — search / system-widget / settings.
+ * Pinned together at the right end of the header with a thin
+ * vertical divider in front of them, so the trio reads as a
+ * separate region from the drive pills next to it. Tighter
+ * 4 px internal gap (vs. the header's 12 px) so the icons
+ * don't claim more horizontal space than they deserve. */
+.header-utilities {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  position: relative;
+  padding-left: 9px;
+  -webkit-app-region: no-drag;
+}
+.header-utilities::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 1px;
+  height: 18px;
+  background: var(--border);
 }
 
 .header-icon-btn {
@@ -7008,14 +7039,16 @@ body.system-widget-body #app {
   gap: 9px;
   min-width: 0;
   flex: 1;
+  /* Brand block reduced to a single row in 0.5.13 — the prior
+   * "● updated just now" subtitle was always-true noise (the
+   * slowest sampler runs every 10 s and relativeTime returns
+   * "just now" up to 60 s, so the line never said anything
+   * useful). The widget being open + tiles updating IS the
+   * alive signal; the warning strip surfaces actual problems. */
 }
 .system-widget-brand-mark {
   flex-shrink: 0;
   color: var(--amber);
-}
-.system-widget-brand-text {
-  display: grid;
-  min-width: 0;
 }
 .system-widget-title {
   font-size: 12.5px;
@@ -7023,36 +7056,10 @@ body.system-widget-body #app {
   letter-spacing: 0;
   color: var(--text);
   line-height: 1.1;
-}
-.system-widget-subtitle {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  font-family: var(--font-mono);
-  font-size: 9.5px;
-  letter-spacing: 0.04em;
-  color: var(--text-tertiary);
   min-width: 0;
-}
-.system-widget-live-dot {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--green);
-  box-shadow: 0 0 0 3px var(--green-glow);
-}
-/* Live-dot semantic: stays GREEN always (the brand's warn color
- * is amber — repurposing it for a benign refresh tick was
- * confusing). While refreshing, a soft opacity pulse signals
- * activity without changing color meaning. */
-.system-widget-live-dot.refreshing {
-  animation: system-widget-live-pulse 1.2s ease-in-out infinite;
-}
-@keyframes system-widget-live-pulse {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.45; }
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .system-widget-actions {
@@ -7106,15 +7113,6 @@ body.system-widget-body #app {
   border-color: rgba(239, 68, 68, 0.25);
   background: var(--red-glow);
 }
-/* Refresh icon spins while a refresh is in flight. Visible
- * confirmation that the click registered, useful when sampler
- * is slow (cold PowerShell ~1.5 s on Get-Counter). */
-.system-widget-icon-btn.refreshing svg {
-  animation: system-widget-spin 0.9s linear infinite;
-}
-@keyframes system-widget-spin {
-  to { transform: rotate(360deg); }
-}
 
 /* ── Content ──────────────────────────────────────────── */
 .system-widget-content {
@@ -7138,6 +7136,11 @@ body.system-widget-body #app {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
+/* Stat tile is a <button> in 0.5.13 — clicking it focuses the
+ * main window and switches to the relevant tab (DISK→Overview,
+ * MEM/CPU→Processes, GPU→Processes/GPU). Reset browser button
+ * styles, keep the visual identical to a passive card unless
+ * hovered/focused. */
 .system-widget-stat {
   min-width: 0;
   display: grid;
@@ -7146,11 +7149,52 @@ body.system-widget-body #app {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.035);
+  /* button reset */
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
 }
 :root.light .system-widget-stat {
   background: rgba(255, 255, 255, 0.82);
 }
+.system-widget-stat:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-focus);
+}
+:root.light .system-widget-stat:hover {
+  background: rgba(255, 255, 255, 0.95);
+}
+.system-widget-stat:active {
+  transform: translateY(1px);
+}
+.system-widget-stat:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+/* Tiny "↗" hover affordance in the corner — invisible by default,
+ * fades in when the user hovers. Signals "this is clickable"
+ * without being permanently visible noise. */
+.system-widget-stat::after {
+  content: "↗";
+  position: absolute;
+  top: 6px;
+  right: 9px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.system-widget-stat:hover::after,
+.system-widget-stat:focus-visible::after {
+  opacity: 0.7;
+}
 .system-widget-stat.dimmed { opacity: 0.55; }
+.system-widget-stat.dimmed:hover { opacity: 0.7; }
 .system-widget-stat-kicker {
   font-family: var(--font-mono);
   font-size: 9.5px;
@@ -7188,10 +7232,45 @@ body.system-widget-body #app {
    * 4 s cadence so a hard jump every refresh felt jittery. */
   transition: width 0.25s ease;
 }
-.system-widget-stat.amber .system-widget-stat-fill { background: linear-gradient(90deg, var(--amber), var(--orange)); }
-.system-widget-stat.blue  .system-widget-stat-fill { background: linear-gradient(90deg, var(--blue),  var(--teal)); }
-.system-widget-stat.green .system-widget-stat-fill { background: linear-gradient(90deg, var(--green), var(--teal)); }
-.system-widget-stat.teal  .system-widget-stat-fill { background: linear-gradient(90deg, var(--teal),  var(--blue)); }
+.system-widget-stat.amber .system-widget-stat-fill { background: linear-gradient(90deg, var(--amber),  var(--orange)); }
+.system-widget-stat.blue  .system-widget-stat-fill { background: linear-gradient(90deg, var(--blue),   var(--teal)); }
+.system-widget-stat.green .system-widget-stat-fill { background: linear-gradient(90deg, var(--green),  var(--teal)); }
+.system-widget-stat.teal  .system-widget-stat-fill { background: linear-gradient(90deg, var(--teal),   var(--blue)); }
+/* Red accent — used by the DISK tile when the active drive is
+ * critical (>90 % full). Matches the per-drive bar's `critical`
+ * gradient below so the same drive reads the same color in both
+ * places. */
+.system-widget-stat.red   .system-widget-stat-fill { background: linear-gradient(90deg, var(--orange), var(--red)); }
+
+/* Value + sparkline row. The sparkline sits to the right of the
+ * value, baseline-aligned, in the tile's accent color. */
+.system-widget-stat-value-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.system-widget-sparkline {
+  flex-shrink: 0;
+  width: 60px;
+  height: 16px;
+  align-self: center;
+  /* Slightly dimmed so the absolute value reads as primary and
+   * the trace as secondary information. */
+  opacity: 0.75;
+}
+.system-widget-sparkline-empty {
+  /* Reserves the same footprint while the ring buffer fills, so
+   * tiles don't reflow as samples accumulate. */
+  display: inline-block;
+}
+.system-widget-stat.amber .system-widget-sparkline { color: var(--amber); }
+.system-widget-stat.blue  .system-widget-sparkline { color: var(--blue); }
+.system-widget-stat.green .system-widget-sparkline { color: var(--green); }
+.system-widget-stat.teal  .system-widget-sparkline { color: var(--teal); }
+.system-widget-stat.red   .system-widget-sparkline { color: var(--red); }
+
 .system-widget-stat-sub {
   min-width: 0;
   overflow: hidden;
@@ -7208,9 +7287,57 @@ body.system-widget-body #app {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.035);
+  /* Section also rendered as <button> when click-through is wired
+   * (Disk I/O, Latest Scan). The reset block below keeps native
+   * button styles from leaking into the layout. The Drives
+   * section is a passive wrapper around per-drive button rows
+   * and doesn't need the click-through styles. */
 }
 :root.light .system-widget-section {
   background: rgba(255, 255, 255, 0.82);
+}
+/* Click-through wrapper variant. Stays visually identical to a
+ * passive section card unless hovered/focused; tiny "↗" appears
+ * on hover for the same reason as on the stat tiles. */
+.system-widget-section-clickable {
+  display: block;
+  width: 100%;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  position: relative;
+  transition: background 0.12s, border-color 0.12s, transform 0.08s;
+}
+.system-widget-section-clickable:hover {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--border-focus);
+}
+:root.light .system-widget-section-clickable:hover {
+  background: rgba(255, 255, 255, 0.95);
+}
+.system-widget-section-clickable:active {
+  transform: translateY(1px);
+}
+.system-widget-section-clickable:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+.system-widget-section-clickable::after {
+  content: "↗";
+  position: absolute;
+  top: 8px;
+  right: 11px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-muted);
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.system-widget-section-clickable:hover::after,
+.system-widget-section-clickable:focus-visible::after {
+  opacity: 0.7;
 }
 .system-widget-section-head {
   display: flex;
@@ -7361,9 +7488,30 @@ body.system-widget-body #app {
   display: grid;
   gap: 9px;
 }
+/* Each drive is a click-through button → focuses the main app's
+ * Overview with that drive set as the scan root. Reset native
+ * button styling so the visual matches the prior passive row. */
 .system-widget-drive-row {
   display: grid;
   gap: 5px;
+  width: 100%;
+  padding: 4px 6px;
+  margin: -4px -6px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.system-widget-drive-row:hover {
+  background: var(--bg-row-hover);
+}
+.system-widget-drive-row:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
 }
 .system-widget-drive-label {
   display: flex;
@@ -7417,6 +7565,39 @@ body.system-widget-body #app {
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-tertiary);
+}
+
+/* ── Stale callout ────────────────────────────────────── */
+/* Hidden in normal operation. Surfaces only when the memory
+ * sampler hasn't refreshed in >30 s — sleep/wake is the most
+ * common trigger; a hung PowerShell on Windows or stuck /proc
+ * read on Linux is the other. The age ticks every 5 s via the
+ * widget's `now` interval so the user sees it climb. */
+.system-widget-stale {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: var(--radius-md);
+  background: var(--amber-glow);
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.system-widget-stale-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--amber);
+  box-shadow: 0 0 0 3px var(--amber-glow);
+  animation: system-widget-stale-pulse 1.6s ease-in-out infinite;
+}
+@keyframes system-widget-stale-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.4; }
 }
 
 /* ── Sampler error stack ──────────────────────────────── */
@@ -7538,9 +7719,6 @@ body.system-widget-body #app {
 }
 
 @media (max-width: 360px) {
-  .system-widget-subtitle {
-    display: none;
-  }
   .system-widget-actions {
     gap: 3px;
   }
@@ -7554,6 +7732,18 @@ body.system-widget-body #app {
   .system-widget-flow-row {
     grid-template-columns: 32px minmax(0, 1fr) 60px;
     gap: 6px;
+  }
+  /* Sparkline becomes noise once tile width drops under
+   * ~150 px — the trace gets cramped and the absolute value
+   * still tells the truth. Hide rather than scale down. */
+  .system-widget-sparkline {
+    display: none;
+  }
+  /* Hover-↗ glyph also gets cramped at this width; the rows
+   * are still clickable, just no decorative hint. */
+  .system-widget-stat::after,
+  .system-widget-section-clickable::after {
+    display: none;
   }
 }
 

@@ -8,6 +8,7 @@ import type {
   DuplicateAnalysis,
   DuplicateScanProgress,
   EasyMoveProgress,
+  NavigateViewPayload,
   ScanSnapshot,
   ToastMessage,
   UpdateStatus,
@@ -30,6 +31,7 @@ const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
+const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
 const api: DiskhoundNativeApi = {
   platform,
@@ -84,6 +86,7 @@ const api: DiskhoundNativeApi = {
   openSystemWidget: () => ipcRenderer.invoke("diskhound:open-system-widget"),
   closeSystemWidget: () => ipcRenderer.invoke("diskhound:close-system-widget"),
   focusMainWindow: () => ipcRenderer.invoke("diskhound:focus-main-window"),
+  focusMainWithView: (payload) => ipcRenderer.invoke("diskhound:focus-main-with-view", payload),
   setSystemWidgetPinned: (pinned) => ipcRenderer.invoke("diskhound:set-system-widget-pinned", pinned),
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
@@ -192,6 +195,13 @@ const api: DiskhoundNativeApi = {
     };
     ipcRenderer.on(SETTINGS_UPDATED_CHANNEL, wrapped);
     return () => { ipcRenderer.removeListener(SETTINGS_UPDATED_CHANNEL, wrapped); };
+  },
+  onNavigateView: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: NavigateViewPayload) => {
+      listener(payload);
+    };
+    ipcRenderer.on(NAVIGATE_VIEW_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(NAVIGATE_VIEW_CHANNEL, wrapped); };
   },
 };
 

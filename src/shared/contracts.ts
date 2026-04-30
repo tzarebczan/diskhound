@@ -768,6 +768,26 @@ export interface DuplicateScanOptions {
 
 export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "settings";
 
+/**
+ * Payload for `focusMainWithView` — used by the System Widget's
+ * click-through tiles to jump straight to the relevant tab in the
+ * main window. The main process forwards this as a
+ * `diskhound:navigate-view` push to mainWindow's webContents
+ * (only — the widget renderer that initiated the navigation
+ * doesn't need to receive its own request back).
+ */
+export interface NavigateViewPayload {
+  /** Which tab to switch to in the main app. */
+  view: AppView;
+  /**
+   * Optional scan-root to focus. When set, the main app picks
+   * this drive in its picker / sets the active root for the
+   * snapshot lookup before switching tabs. Used by the per-drive
+   * rows in the widget so clicking C: jumps to its overview.
+   */
+  scanRoot?: string;
+}
+
 // ── IPC API ─────────────────────────────────────────────────
 
 /**
@@ -999,6 +1019,23 @@ export interface DiskhoundNativeApi {
    * widget's prior 12 s polling loop.
    */
   onSettingsUpdated: (listener: (settings: AppSettings) => void) => () => void;
+
+  /**
+   * Focus the main window AND switch its active tab. Used by the
+   * System Widget's click-through tiles: clicking the DISK tile
+   * surfaces the main window with the Overview tab active;
+   * clicking a drive row sets that drive as the scan root before
+   * switching tabs. No-op if the main window has been closed
+   * (`closeMainWindow` from the tray menu can do this).
+   */
+  focusMainWithView: (payload: NavigateViewPayload) => Promise<void>;
+  /**
+   * Push notification (main → mainWindow only) carrying a
+   * `NavigateViewPayload`. App.tsx subscribes once on mount and
+   * applies the view change. The widget never receives its own
+   * navigation request — only the main window's renderer does.
+   */
+  onNavigateView: (listener: (payload: NavigateViewPayload) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────

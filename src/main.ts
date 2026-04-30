@@ -28,6 +28,7 @@ import {
   type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
+  type NavigateViewPayload,
   type PathActionResult,
   type ScanEngine,
   type ScanFileRecord,
@@ -116,6 +117,11 @@ const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
  *  are persisted. Replaces the widget's prior 12 s poll — see the
  *  `settingsStore.subscribe` wiring in whenReady. */
 const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
+/** Push from main to the MAIN window's renderer only (not the
+ *  widget). Carries a NavigateViewPayload — App.tsx subscribes
+ *  and switches its active tab in response. Powers the System
+ *  Widget's click-through tiles. */
+const NAVIGATE_VIEW_CHANNEL = "diskhound:navigate-view";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererEntryUrl = process.env.VITE_DEV_SERVER_URL;
@@ -3267,6 +3273,26 @@ void app.whenReady().then(async () => {
     if (!mainWindow.isVisible()) mainWindow.show();
     if (mainWindow.isMinimized()) mainWindow.restore();
     mainWindow.focus();
+  });
+  ipcMain.handle("diskhound:focus-main-with-view", async (_event, payload: NavigateViewPayload) => {
+    // Bring the main window forward AND tell its renderer to
+    // switch tabs (and optionally set the active scan root).
+    // Powers the widget's click-through tiles. No-op if the main
+    // window has been destroyed (rare — the tray "Quit" path
+    // would do that, but in that case the user wouldn't have a
+    // widget open either).
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+    // Send only to mainWindow — the widget renderer doesn't need
+    // to receive its own navigation request, and other future
+    // renderers (preview windows, etc.) are out of scope.
+    try {
+      mainWindow.webContents.send(NAVIGATE_VIEW_CHANNEL, payload);
+    } catch {
+      // Renderer may be unloading — best effort.
+    }
   });
   ipcMain.handle("diskhound:set-system-widget-pinned", (_event, pinned: boolean) => {
     if (!widgetWindow || widgetWindow.isDestroyed()) return false;

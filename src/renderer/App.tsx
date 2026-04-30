@@ -454,6 +454,20 @@ export function App() {
       setUpdateStatus(status);
     });
 
+    // System-Widget click-throughs: the widget's hero tiles + sections fire
+    // `focusMainWithView` IPC, which the main process forwards here as a
+    // navigate push. Set the active root first (if specified) so a click on
+    // the widget's "C:" drive row drops the user into Overview pre-pointed
+    // at C:; then switch the tab. Skip the picker — user's intent was to
+    // see this view immediately, not pick a drive.
+    const unsubNavigate = nativeApi.onNavigateView(({ view, scanRoot }) => {
+      if (scanRoot) {
+        setCurrentRoot(scanRoot);
+      }
+      setShowPicker(false);
+      setView(view);
+    });
+
     // ── Duplicate scan IPC wiring ──
     // Seed: an in-progress scan kicked off before the renderer mounted (or
     // before a tab-switch remounted App) should still show as active.
@@ -567,6 +581,7 @@ export function App() {
     return () => {
       unsub();
       unsubUpdate();
+      unsubNavigate();
       unsubDupProgress();
       unsubDupResult();
       unsubEasyMoveProgress();
@@ -1000,42 +1015,56 @@ export function App() {
             })}
           </div>
 
-          {/* Search toggle */}
-          <button
-            className={`header-icon-btn ${searchOpen ? "active" : ""}`}
-            onClick={() => {
-              if (showPicker) return;
-              if (!isSearchableView) {
-                setFilterExt(undefined);
-                setView("files");
-                setSearchOpen(true);
-                return;
-              }
-              setSearchOpen(!searchOpen);
-              if (searchOpen) setSearchQuery("");
-            }}
-            title="Search largest files (Ctrl+F)"
-          >
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <circle cx="6" cy="6" r="4" />
-              <path d="M9.5 9.5L12.5 12.5" />
-            </svg>
-          </button>
+          {/* Utility buttons grouped behind a visual divider so they
+           *  read as a separate region from the drive pills. The
+           *  group keeps a tighter 4 px internal gap (vs. the
+           *  header's 12 px) so the three icons share visual
+           *  weight without stealing horizontal real estate from
+           *  the pills next to them. */}
+          <div className="header-utilities">
+            {/* Search toggle */}
+            <button
+              className={`header-icon-btn ${searchOpen ? "active" : ""}`}
+              onClick={() => {
+                if (showPicker) return;
+                if (!isSearchableView) {
+                  setFilterExt(undefined);
+                  setView("files");
+                  setSearchOpen(true);
+                  return;
+                }
+                setSearchOpen(!searchOpen);
+                if (searchOpen) setSearchQuery("");
+              }}
+              title="Search largest files (Ctrl+F)"
+            >
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <circle cx="6" cy="6" r="4" />
+                <path d="M9.5 9.5L12.5 12.5" />
+              </svg>
+            </button>
 
-          <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title="Open system widget (Ctrl+Shift+W)">
-            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.35">
-              <rect x="1.5" y="2" width="11" height="10" rx="1.6" />
-              <path d="M4 5.2h2.2M4 8.8h2.2M8 5.2h2M8 8.8h2" />
-              <path d="M1.5 4.2h11" opacity="0.7" />
-            </svg>
-          </button>
+            {/* System Widget. Picture-in-Picture-style glyph
+             *  (filled sub-window inside an outer window outline)
+             *  is the universal "open as a floating window" affordance,
+             *  the same shape Apple, YouTube, and most video apps
+             *  use for PiP. The previous icon (rect with content
+             *  rows) read as "settings panel" / "document" rather
+             *  than "detach to floating monitor." */}
+            <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title="Open system widget (Ctrl+Shift+W)">
+              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round">
+                <rect x="1.5" y="2.5" width="11" height="9" rx="1.4" />
+                <rect x="6.5" y="6.5" width="5" height="4" rx="0.8" fill="currentColor" stroke="none" />
+              </svg>
+            </button>
 
-          <button className="header-icon-btn" onClick={() => { setShowPicker(false); setView("settings"); }} title="Settings">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
-              <circle cx="12" cy="12" r="3" />
-            </svg>
-          </button>
+            <button className="header-icon-btn" onClick={() => { setShowPicker(false); setView("settings"); }} title="Settings">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
+                <circle cx="12" cy="12" r="3" />
+              </svg>
+            </button>
+          </div>
         </header>
 
         {/* ── Search bar (slides in) ── */}
