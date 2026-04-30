@@ -1,5 +1,75 @@
 # Changelog
 
+## 0.5.9 — 2026-04-28
+
+Release-pipeline + cross-platform polish pass.
+
+### macOS arm64 builds are now actually arm64
+
+The release workflow ran `electron-builder` on a single
+`macos-latest` runner (currently macOS 14, arm64) and asked it to
+package both arm64 and x64 — which meant the x64 native scanner
+was a cross-compile that may or may not have actually shipped in
+the .dmg. Split into two macOS jobs:
+
+- `macos-13` builds the `x86_64-apple-darwin` Rust target and
+  packages with `electron-builder --mac --x64`.
+- `macos-14` builds the `aarch64-apple-darwin` Rust target and
+  packages with `electron-builder --mac --arm64`.
+
+Each runner now produces exactly one binary, natively-built for
+its target. Same approach applied to Windows + Linux jobs
+(`--win --x64`, `--linux --x64`) so each runner only emits its
+own artifact. Also wires `cargo build --target ${rust-target}`
+explicitly and stages the produced binary at
+`target/release/<bin>` where electron-builder expects it.
+
+### macOS disk listing
+
+`getDiskSpace()` was calling `df -P -k -T` on every Unix host —
+but `-T` is a GNU coreutils flag, BSD/macOS `df` rejects it and
+the whole call failed silently, leaving the drive picker empty
+on Mac. Split into a separate `getMacDiskSpace()` that:
+
+- Uses POSIX-portable `df -P -k` (no `-T`).
+- Filters `/System/Volumes/*` (paired with `/` on APFS — Finder
+  shows them as one disk, we should too), `/dev`, the swap mount
+  at `/private/var/vm`, and zero-sized devfs entries.
+- Keeps the modern APFS `/` ("Macintosh HD"), `/Volumes/*`
+  external/network shares, and direct `/dev/*` mounts.
+
+Also fixes mount paths containing spaces (`/Volumes/Media Share`)
+on both Linux and Mac — previously `parts[6]` truncated at the
+first space and dropped the trailing path component.
+
+New `parseMacDfOutput` test (2 cases, +2 to the suite total)
+covers happy-path + virtual-volume filtering.
+
+### Drive card label
+
+The drive card was hard-coding a trailing `:` after the drive
+label, which read fine for Windows (`C:`) but produced
+`/Users:` on macOS / `/:` on the Linux root. Now strips trailing
+slashes/backslashes and shows the bare path.
+
+### Rust scanner
+
+- **Final scan_phase = Complete.** The `Done` message now carries
+  `ScanPhase::Complete` instead of leaking whatever phase was last
+  active (Walk / Indexing). Cosmetic but the renderer was briefly
+  showing "Indexing… (done)" between the last progress event and
+  the snapshot swap.
+- **`allocated_size` cfg gate** simplified to `#[cfg(not(windows))]`.
+  Only the Linux/Mac `scan_generic` walker calls it (the Windows
+  scanner uses MFT and never touches Node's `stat`), so the
+  `metadata.len()` Windows fallback was dead code.
+
+### CI
+
+`rust-check` job now runs on Windows + Linux + macOS instead of
+just Windows. Catches `#[cfg(...)]` regressions like the one
+above before they reach a release tag.
+
 ## 0.5.8 — 2026-04-26
 
 Largest Files tab — pagination + always-on permanent delete.

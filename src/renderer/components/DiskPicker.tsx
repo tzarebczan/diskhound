@@ -117,7 +117,7 @@ function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void
   const level = pct > 90 ? "critical" : pct > 75 ? "warn" : "ok";
 
   const driveLabel = drive.drive.includes(":")
-    ? drive.drive.replace(":", "")
+    ? drive.drive.replace(/[\\/]$/, "")
     : drive.drive;
 
   return (
@@ -131,7 +131,7 @@ function DriveCard({ drive, onScan }: { drive: DiskSpaceInfo; onScan: () => void
       </div>
 
       <div className="drive-card-info">
-        <div className="drive-card-name">{driveLabel}:</div>
+        <div className="drive-card-name">{driveLabel}</div>
         <div className="drive-card-bar">
           <div className={`drive-card-fill ${level}`} style={{ width: `${pct}%` }} />
         </div>

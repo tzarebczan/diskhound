@@ -1042,6 +1042,10 @@ fn run() -> Result<(), String> {
         }
     }
 
+    if matches!(final_status, ScanStatus::Done) {
+        state.scan_phase = ScanPhase::Complete;
+    }
+
     let emit_result = emit_message(&Message::Done {
         snapshot: state.snapshot(final_status, None),
     })
@@ -3481,14 +3485,9 @@ fn file_extension(file_name: &str) -> String {
         .unwrap_or_else(|| String::from("(no ext)"))
 }
 
-#[cfg(unix)]
+#[cfg(not(windows))]
 fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
     metadata.blocks().saturating_mul(512)
-}
-
-#[cfg(not(unix))]
-fn allocated_size(metadata: &std::fs::Metadata) -> u64 {
-    metadata.len()
 }
 
 #[cfg(not(windows))]

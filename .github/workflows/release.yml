@@ -16,10 +16,16 @@ jobs:
         include:
           - os: windows-latest
             rust-target: x86_64-pc-windows-msvc
+            electron-builder-args: --win --x64
           - os: ubuntu-latest
             rust-target: x86_64-unknown-linux-gnu
-          - os: macos-latest
+            electron-builder-args: --linux --x64
+          - os: macos-13
             rust-target: x86_64-apple-darwin
+            electron-builder-args: --mac --x64
+          - os: macos-14
+            rust-target: aarch64-apple-darwin
+            electron-builder-args: --mac --arm64
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -42,7 +48,17 @@ jobs:
         run: bun run sync:version-from-tag ${{ github.ref_name }}
 
       - name: Build native scanner
-        run: cargo build --release --manifest-path native/diskhound-native-scanner/Cargo.toml
+        run: cargo build --release --target ${{ matrix.rust-target }} --manifest-path native/diskhound-native-scanner/Cargo.toml
+
+      - name: Stage native scanner for electron-builder
+        shell: bash
+        run: |
+          mkdir -p native/diskhound-native-scanner/target/release
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp native/diskhound-native-scanner/target/${{ matrix.rust-target }}/release/diskhound-native-scanner.exe native/diskhound-native-scanner/target/release/diskhound-native-scanner.exe
+          else
+            cp native/diskhound-native-scanner/target/${{ matrix.rust-target }}/release/diskhound-native-scanner native/diskhound-native-scanner/target/release/diskhound-native-scanner
+          fi
 
       - name: Verify native binary exists
         shell: bash
@@ -57,7 +73,7 @@ jobs:
         run: bun run build
 
       - name: Package
-        run: npx electron-builder --config electron-builder.yml --publish never
+        run: npx electron-builder --config electron-builder.yml --publish never ${{ matrix.electron-builder-args }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

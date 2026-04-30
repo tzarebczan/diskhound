@@ -83,7 +83,10 @@ export async function getDiskSpace(): Promise<DiskSpaceInfo[]> {
   if (process.platform === "win32") {
     return getWindowsDiskSpace();
   }
-  return getUnixDiskSpace();
+  if (process.platform === "darwin") {
+    return getMacDiskSpace();
+  }
+  return getLinuxDiskSpace();
 }
 
 export async function checkDiskDeltas(): Promise<MonitoringSnapshot> {
@@ -258,9 +261,9 @@ const REAL_FILESYSTEM_TYPES = new Set([
   "fuseblk",             // fuse-mounted block devices (exfat-fuse, etc.)
 ]);
 
-async function getUnixDiskSpace(): Promise<DiskSpaceInfo[]> {
+async function getLinuxDiskSpace(): Promise<DiskSpaceInfo[]> {
   try {
-    // `df -P -k -T` is POSIX-portable AND includes the filesystem type
+    // GNU `df -P -k -T` includes the filesystem type
     // as an extra column. Adding -T upfront means we never need to
     // cross-reference /proc/mounts — one subprocess, one parse pass.
     // Column layout with -T:
@@ -277,7 +280,7 @@ async function getUnixDiskSpace(): Promise<DiskSpaceInfo[]> {
       const totalKb = parseInt(parts[2] ?? "0", 10);
       const usedKb = parseInt(parts[3] ?? "0", 10);
       const freeKb = parseInt(parts[4] ?? "0", 10);
-      const mount = parts[6] ?? "";
+      const mount = parts.slice(6).join(" ");
 
       // Skip if zero-sized (empty tmpfs instances, broken mounts)
       if (totalKb === 0) continue;
@@ -310,4 +313,72 @@ async function getUnixDiskSpace(): Promise<DiskSpaceInfo[]> {
   } catch {
     return [];
   }
+}
+
+async function getMacDiskSpace(): Promise<DiskSpaceInfo[]> {
+  try {
+    // macOS/BSD `df` does not support GNU `-T`, so keep this path
+    // separate from Linux. `-P -k` gives stable POSIX columns:
+    //   Filesystem  1024-blocks  Used  Available  Capacity  Mounted on
+    const { stdout } = await execFileAsync("df", ["-P", "-k"], { timeout: 10_000 });
+    return parseMacDfOutput(stdout, Date.now());
+  } catch {
+    return [];
+  }
+}
+
+function diskSpaceFromKb(
+  drive: string,
+  totalKb: number,
+  usedKb: number,
+  freeKb: number,
+  timestamp: number,
+): DiskSpaceInfo | null {
+  if (!drive || totalKb <= 0) return null;
+  return {
+    drive,
+    totalBytes: totalKb * 1024,
+    freeBytes: freeKb * 1024,
+    usedBytes: usedKb * 1024,
+    usedPercent: (usedKb / totalKb) * 100,
+    timestamp,
+  };
+}
+
+export function parseMacDfOutput(stdout: string, timestamp = Date.now()): DiskSpaceInfo[] {
+  const lines = stdout.trim().split(/\r?\n/).slice(1);
+  const drives: DiskSpaceInfo[] = [];
+
+  for (const line of lines) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 6) continue;
+
+    const filesystem = parts[0] ?? "";
+    const totalKb = parseInt(parts[1] ?? "0", 10);
+    const usedKb = parseInt(parts[2] ?? "0", 10);
+    const freeKb = parseInt(parts[3] ?? "0", 10);
+    const mount = parts.slice(5).join(" ");
+
+    if (!isMacUserStorage(filesystem, mount)) continue;
+
+    const disk = diskSpaceFromKb(mount, totalKb, usedKb, freeKb, timestamp);
+    if (disk) drives.push(disk);
+  }
+
+  return drives;
+}
+
+function isMacUserStorage(filesystem: string, mount: string): boolean {
+  if (!mount || mount === "/dev") return false;
+  // Root is the correct scan target on modern APFS Macs; the paired
+  // /System/Volumes/Data mount is deliberately hidden to avoid showing
+  // users two cards for what Finder presents as one startup disk.
+  if (mount === "/") return true;
+  if (mount.startsWith("/System/Volumes/")) return false;
+  if (mount === "/private/var/vm" || mount.includes("/.MobileBackups")) return false;
+  // External disks and SMB/NFS shares are normally presented here.
+  if (mount.startsWith("/Volumes/")) return true;
+  // Conservative fallback for direct device mounts that do not follow
+  // the /Volumes convention.
+  return filesystem.startsWith("/dev/");
 }
