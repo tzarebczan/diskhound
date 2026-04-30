@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.15 — 2026-04-30
+
+Customizable widget layout + sparkline alignment fix.
+
+### Layout menu
+
+New layout button in the widget's title bar (between the pin
+and the open-main / close pair) opens a small popover with one
+toggle per section:
+
+- **Detail panel** — when off, tile clicks become no-ops and
+  the click-in detail surface never renders. Lets users
+  condense the widget down to just a thin always-on-top
+  monitor sliver.
+- **Disk I/O** — toggle the live read/write throughput section.
+- **Latest scan** — toggle the scan-progress / view-changes
+  section.
+- **Drives** — toggle the per-drive pressure list.
+
+Defaults are all-on, with the **CPU detail panel auto-expanded
+on first launch** so a fresh widget shows useful top-process
+data immediately. The user's last-active detail is persisted to
+`localStorage` (key `diskhound:widget-active-detail`) along
+with the layout (`diskhound:widget-layout`), so close + reopen
+restores the previous state.
+
+Popover behavior: click outside to dismiss, `Esc` to close,
+click the layout button again to toggle. Toggles use a custom
+amber switch with a real underlying `<input type="checkbox">`
+so keyboard / screen-reader semantics are preserved.
+
+When `Detail panel` is turned off while a panel is open, the
+panel collapses immediately (so re-enabling it doesn't surprise
+the user with stale state re-appearing).
+
+### Sparkline alignment fix
+
+The hero tile's value-row was `align-items: baseline`, which
+positioned the 16 px sparkline SVG so its bottom touched the
+value's text baseline — at high stable values (e.g. GPU at
+100%) the polyline drew across the digits. Switched to
+`align-items: center`, added `min-width: 0` + ellipsis to the
+value column so flex shrinking is well-defined when "100%" /
+"n/a" / "—%" stretch the value's natural width. No more
+overlap.
+
 ## 0.5.14 — 2026-04-30
 
 System Widget pivots to standalone: tile clicks expand an inline

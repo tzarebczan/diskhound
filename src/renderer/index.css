@@ -7114,6 +7114,125 @@ body.system-widget-body #app {
   background: var(--red-glow);
 }
 
+/* ── Layout customization popover ─────────────────────── */
+/* The layout button anchors a small floating panel beneath
+ * itself with one toggle row per section. The anchor is
+ * `position: relative` so the popover positions to it; pointer
+ * events outside the anchor close the menu (handled in JS). */
+.system-widget-layout-anchor {
+  position: relative;
+  display: inline-flex;
+  -webkit-app-region: no-drag;
+}
+.system-widget-layout-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 10;
+  width: 224px;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-raised);
+  box-shadow:
+    0 8px 24px rgba(0, 0, 0, 0.45),
+    0 1px 0 rgba(255, 255, 255, 0.04) inset;
+  /* Reset the dragging context so the user can interact with
+   * the toggles even though the parent titlebar is the drag
+   * region. */
+  -webkit-app-region: no-drag;
+  user-select: none;
+}
+:root.light .system-widget-layout-popover {
+  box-shadow:
+    0 8px 24px rgba(15, 23, 42, 0.18),
+    0 1px 0 rgba(255, 255, 255, 0.7) inset;
+}
+.system-widget-layout-head {
+  padding: 4px 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.system-widget-layout-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 6px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background 0.12s;
+}
+.system-widget-layout-toggle:hover {
+  background: var(--bg-row-hover);
+}
+.system-widget-layout-toggle-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+.system-widget-layout-toggle-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text);
+}
+.system-widget-layout-toggle-sub {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-tertiary);
+}
+/* Toggle switch — custom rendered (the native <input> is
+ * positioned absolute + opacity 0 to keep keyboard / a11y
+ * semantics, while the visible track + thumb is CSS). */
+.system-widget-layout-toggle-switch {
+  position: relative;
+  flex-shrink: 0;
+  width: 26px;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  transition: background 0.15s;
+}
+:root.light .system-widget-layout-toggle-switch {
+  background: rgba(15, 23, 42, 0.18);
+}
+.system-widget-layout-toggle-switch.on {
+  background: var(--amber);
+}
+.system-widget-layout-toggle-switch input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+.system-widget-layout-toggle-switch:focus-within {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+.system-widget-layout-toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--text);
+  transition: transform 0.15s;
+}
+.system-widget-layout-toggle-switch.on .system-widget-layout-toggle-thumb {
+  transform: translateX(12px);
+  background: var(--bg-raised);
+}
+
 /* ── Content ──────────────────────────────────────────── */
 .system-widget-content {
   min-height: 0;
@@ -7251,6 +7370,14 @@ body.system-widget-body #app {
    * shift the layout half a pixel — Cascadia Mono handles
    * this even without `tnum`, but be explicit. */
   font-variant-numeric: tabular-nums;
+  /* min-width: 0 lets the value shrink + truncate inside the
+   * value-row's flex layout when the tile is narrow. Without
+   * it a wide value ("100%") could push the sparkline out of
+   * view at narrow tile widths. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .system-widget-stat-track {
   height: 4px;
@@ -7279,11 +7406,15 @@ body.system-widget-body #app {
  * places. */
 .system-widget-stat.red   .system-widget-stat-fill { background: linear-gradient(90deg, var(--orange), var(--red)); }
 
-/* Value + sparkline row. The sparkline sits to the right of the
- * value, baseline-aligned, in the tile's accent color. */
+/* Value + sparkline row. Baseline alignment was overlapping the
+ * polyline with the value's digits at certain trace heights
+ * (a high-stable GPU at 100 % had its line drawn across the
+ * "100%" text baseline). Center-align both items vertically and
+ * use min-width: 0 on the value so flex shrinking is well-
+ * defined when "100%" / "n/a" / "—%" stretch the value column. */
 .system-widget-stat-value-row {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
@@ -7292,7 +7423,6 @@ body.system-widget-body #app {
   flex-shrink: 0;
   width: 60px;
   height: 16px;
-  align-self: center;
   /* Slightly dimmed so the absolute value reads as primary and
    * the trace as secondary information. */
   opacity: 0.75;

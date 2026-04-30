@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type {
   AppSettings,
@@ -41,6 +41,83 @@ const BASELINE_GRACE_MS = 4_000;
 const STALE_THRESHOLD_MS = 30_000;
 const HISTORY_CAP = 20;
 const DETAIL_TOP_N = 5;
+
+/** localStorage keys for widget UI state. Keep them
+ *  namespaced so the main app's window.localStorage doesn't
+ *  collide if anything ever shares a key. */
+const STORAGE_LAYOUT_KEY = "diskhound:widget-layout";
+const STORAGE_DETAIL_KEY = "diskhound:widget-active-detail";
+
+/**
+ * Per-section visibility toggles. Lets the user condense the
+ * widget down to just the hero tiles for a thin always-on-top
+ * sliver, or hide the detail-panel surface entirely so tile
+ * clicks become no-ops. Persisted to localStorage so the
+ * layout choice survives close/reopen cycles.
+ */
+interface WidgetLayout {
+  /** Whether tile clicks expand an inline detail panel below.
+   *  When false, tiles render passive (no hover lift, no click)
+   *  and the detail panel never shows. */
+  showDetail: boolean;
+  showDiskIo: boolean;
+  showLatestScan: boolean;
+  showDrives: boolean;
+}
+
+const DEFAULT_LAYOUT: WidgetLayout = {
+  showDetail: true,
+  showDiskIo: true,
+  showLatestScan: true,
+  showDrives: true,
+};
+
+function loadStoredLayout(): WidgetLayout {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_LAYOUT_KEY);
+    if (!raw) return DEFAULT_LAYOUT;
+    const parsed = JSON.parse(raw) as Partial<WidgetLayout>;
+    // Spread DEFAULT first so new fields added in future
+    // releases pick up sensible defaults without invalidating
+    // the user's existing preferences.
+    return {
+      ...DEFAULT_LAYOUT,
+      ...(typeof parsed.showDetail === "boolean" ? { showDetail: parsed.showDetail } : {}),
+      ...(typeof parsed.showDiskIo === "boolean" ? { showDiskIo: parsed.showDiskIo } : {}),
+      ...(typeof parsed.showLatestScan === "boolean" ? { showLatestScan: parsed.showLatestScan } : {}),
+      ...(typeof parsed.showDrives === "boolean" ? { showDrives: parsed.showDrives } : {}),
+    };
+  } catch {
+    return DEFAULT_LAYOUT;
+  }
+}
+
+function saveLayout(next: WidgetLayout): void {
+  try {
+    window.localStorage.setItem(STORAGE_LAYOUT_KEY, JSON.stringify(next));
+  } catch {
+    // Quota / private mode — non-fatal, layout just resets next launch.
+  }
+}
+
+function loadStoredDetail(): DetailType | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_DETAIL_KEY);
+    if (raw === "memory" || raw === "cpu" || raw === "gpu") return raw;
+    if (raw === "null") return null;
+  } catch { /* fall through */ }
+  // First launch (no storage value): default to CPU detail
+  // expanded — gives users an immediately-useful view of
+  // top processes without requiring a click. They can
+  // dismiss it and the dismissal persists.
+  return "cpu";
+}
+
+function saveDetail(value: DetailType | null): void {
+  try {
+    window.localStorage.setItem(STORAGE_DETAIL_KEY, value === null ? "null" : value);
+  } catch { /* non-fatal */ }
+}
 
 function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
   if (theme === "light") return "light";
@@ -148,7 +225,16 @@ export function SystemWidget() {
   // because the DRIVES section below the tiles is already its
   // natural expansion — duplicating it as a click-in panel
   // would just repeat data.
-  const [activeDetail, setActiveDetail] = useState<DetailType | null>(null);
+  // Persists across close/reopen via localStorage; first
+  // launch defaults to CPU expanded so the widget shows useful
+  // process data immediately.
+  const [activeDetail, setActiveDetail] = useState<DetailType | null>(loadStoredDetail);
+
+  // Per-section visibility — also persisted. Layout button in
+  // the title bar opens a popover where the user can toggle
+  // each section + the detail-panel surface itself.
+  const [layout, setLayout] = useState<WidgetLayout>(loadStoredLayout);
+  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
 
   const [diskHistory, setDiskHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
@@ -186,6 +272,28 @@ export function SystemWidget() {
     const id = window.setInterval(() => setNow(Date.now()), 5_000);
     return () => window.clearInterval(id);
   }, []);
+
+  // Persist layout + active-detail to localStorage on any
+  // change. Cheap (small JSON, throttled by render rate) and
+  // means the user's last layout is restored next time the
+  // widget opens — they don't have to re-toggle the same
+  // sections every session.
+  useEffect(() => {
+    saveLayout(layout);
+  }, [layout]);
+  useEffect(() => {
+    saveDetail(activeDetail);
+  }, [activeDetail]);
+
+  // When the user turns the detail surface OFF in the layout
+  // menu, also collapse any currently-open detail. Otherwise
+  // toggling showDetail back on would surprise the user with
+  // a stale activeDetail value re-appearing.
+  useEffect(() => {
+    if (!layout.showDetail && activeDetail !== null) {
+      setActiveDetail(null);
+    }
+  }, [layout.showDetail, activeDetail]);
 
   // ── Sampler refresh helpers ───────────────────────────────
   const refreshDiskAndScan = useCallback(async () => {
@@ -495,7 +603,15 @@ export function SystemWidget() {
   if (!hasFirstSample) {
     return (
       <div className="system-widget-shell">
-        <Titlebar pinned={pinned} onTogglePin={() => void setPinnedMode()} />
+        <Titlebar
+          pinned={pinned}
+          onTogglePin={() => void setPinnedMode()}
+          layout={layout}
+          onChangeLayout={setLayout}
+          layoutMenuOpen={layoutMenuOpen}
+          onToggleLayoutMenu={() => setLayoutMenuOpen((v) => !v)}
+          onCloseLayoutMenu={() => setLayoutMenuOpen(false)}
+        />
         <main className="system-widget-content system-widget-content-loading">
           <div className="system-widget-skeleton">
             <div className="system-widget-skeleton-pulse" aria-hidden="true" />
@@ -508,7 +624,15 @@ export function SystemWidget() {
 
   return (
     <div className="system-widget-shell">
-      <Titlebar pinned={pinned} onTogglePin={() => void setPinnedMode()} />
+      <Titlebar
+        pinned={pinned}
+        onTogglePin={() => void setPinnedMode()}
+        layout={layout}
+        onChangeLayout={setLayout}
+        layoutMenuOpen={layoutMenuOpen}
+        onToggleLayoutMenu={() => setLayoutMenuOpen((v) => !v)}
+        onCloseLayoutMenu={() => setLayoutMenuOpen(false)}
+      />
 
       <main className="system-widget-content">
         {isStale && (
@@ -540,9 +664,11 @@ export function SystemWidget() {
             percent={memoryPct ?? 0}
             accent="blue"
             history={memoryHistory}
-            active={activeDetail === "memory"}
-            onClick={() => toggleDetail("memory")}
-            ariaLabel={`Memory ${pct(memoryPct)} used. Click to ${activeDetail === "memory" ? "hide" : "show"} top processes.`}
+            active={layout.showDetail && activeDetail === "memory"}
+            onClick={layout.showDetail ? () => toggleDetail("memory") : undefined}
+            ariaLabel={layout.showDetail
+              ? `Memory ${pct(memoryPct)} used. Click to ${activeDetail === "memory" ? "hide" : "show"} top processes.`
+              : `Memory ${pct(memoryPct)} used.`}
           />
           <StatTile
             kicker="CPU"
@@ -551,9 +677,11 @@ export function SystemWidget() {
             percent={cpuPercent ?? 0}
             accent="green"
             history={cpuHistory}
-            active={activeDetail === "cpu"}
-            onClick={() => toggleDetail("cpu")}
-            ariaLabel={`CPU ${pct(cpuPercent)} active. Click to ${activeDetail === "cpu" ? "hide" : "show"} top processes.`}
+            active={layout.showDetail && activeDetail === "cpu"}
+            onClick={layout.showDetail ? () => toggleDetail("cpu") : undefined}
+            ariaLabel={layout.showDetail
+              ? `CPU ${pct(cpuPercent)} active. Click to ${activeDetail === "cpu" ? "hide" : "show"} top processes.`
+              : `CPU ${pct(cpuPercent)} active.`}
           />
           {gpuAvailable && (
             <StatTile
@@ -564,14 +692,14 @@ export function SystemWidget() {
               accent="teal"
               dimmed={gpu?.unavailable}
               history={gpuHistory}
-              active={activeDetail === "gpu"}
-              onClick={gpu?.unavailable ? undefined : () => toggleDetail("gpu")}
-              ariaLabel={`GPU ${gpu?.unavailable ? "not available" : pct(gpuPercent)}. ${gpu?.unavailable ? "" : `Click to ${activeDetail === "gpu" ? "hide" : "show"} top processes.`}`}
+              active={layout.showDetail && activeDetail === "gpu"}
+              onClick={layout.showDetail && !gpu?.unavailable ? () => toggleDetail("gpu") : undefined}
+              ariaLabel={`GPU ${gpu?.unavailable ? "not available" : pct(gpuPercent)}. ${layout.showDetail && !gpu?.unavailable ? `Click to ${activeDetail === "gpu" ? "hide" : "show"} top processes.` : ""}`}
             />
           )}
         </section>
 
-        {activeDetail === "memory" && (
+        {layout.showDetail && activeDetail === "memory" && (
           <DetailPanel
             title="Top processes by memory"
             accent="blue"
@@ -580,7 +708,7 @@ export function SystemWidget() {
             onClose={() => setActiveDetail(null)}
           />
         )}
-        {activeDetail === "cpu" && (
+        {layout.showDetail && activeDetail === "cpu" && (
           <DetailPanel
             title="Top processes by CPU"
             accent="green"
@@ -589,7 +717,7 @@ export function SystemWidget() {
             onClose={() => setActiveDetail(null)}
           />
         )}
-        {activeDetail === "gpu" && (
+        {layout.showDetail && activeDetail === "gpu" && (
           <DetailPanel
             title="Top processes by GPU"
             accent="teal"
@@ -599,6 +727,7 @@ export function SystemWidget() {
           />
         )}
 
+        {layout.showDiskIo && (
         <section className="system-widget-section">
           <SectionHead label="Disk I/O" value={`${formatBytes(diskRate)}/s`} />
           <div className="system-widget-io-bars">
@@ -622,7 +751,9 @@ export function SystemWidget() {
             </div>
           ) : null}
         </section>
+        )}
 
+        {layout.showLatestScan && (
         <section className={`system-widget-section system-widget-scan ${scan?.status ?? "idle"}`}>
           <SectionHead label={scanTitle} value={scanRightLabel} />
           <div className="system-widget-scan-path" title={scanDetail}>{scanDetail}</div>
@@ -657,7 +788,9 @@ export function SystemWidget() {
             />
           </div>
         </section>
+        )}
 
+        {layout.showDrives && (
         <section className="system-widget-section">
           <SectionHead label="Drives" value={`${formatBytes(totalDisk.freeBytes)} free`} />
           <div className="system-widget-drive-list">
@@ -690,6 +823,7 @@ export function SystemWidget() {
             )}
           </div>
         </section>
+        )}
 
         {samplerIssues.length > 0 && (
           <section className="system-widget-warnings">
@@ -710,8 +844,17 @@ export function SystemWidget() {
 function Titlebar(props: {
   pinned: boolean;
   onTogglePin: () => void;
+  layout: WidgetLayout;
+  onChangeLayout: (next: WidgetLayout) => void;
+  layoutMenuOpen: boolean;
+  onToggleLayoutMenu: () => void;
+  onCloseLayoutMenu: () => void;
 }) {
-  const { pinned, onTogglePin } = props;
+  const {
+    pinned, onTogglePin,
+    layout, onChangeLayout,
+    layoutMenuOpen, onToggleLayoutMenu, onCloseLayoutMenu,
+  } = props;
   return (
     <header className="system-widget-titlebar">
       <DragGrip />
@@ -729,6 +872,18 @@ function Titlebar(props: {
         >
           <PinIcon active={pinned} />
         </button>
+        {/* Layout customization. Anchored to its own button so
+          * the popover positions naturally beneath it. The button
+          * stays visually grouped with `pin` (both are
+          * widget-internal controls) and sits BEFORE the divider
+          * so the open-main / close pair stays fenced off. */}
+        <LayoutButton
+          open={layoutMenuOpen}
+          onToggle={onToggleLayoutMenu}
+          onClose={onCloseLayoutMenu}
+          layout={layout}
+          onChangeLayout={onChangeLayout}
+        />
         <span className="system-widget-actions-divider" aria-hidden="true" />
         <button
           type="button"
@@ -753,6 +908,130 @@ function Titlebar(props: {
         </button>
       </div>
     </header>
+  );
+}
+
+/**
+ * Layout button + popover. The button toggles a small floating
+ * panel anchored beneath it; the panel has one toggle row per
+ * section, plus the detail-panel master toggle. Click outside,
+ * Esc, or click the button again to dismiss.
+ *
+ * Click-outside is wired via a document-level pointerdown
+ * listener that fires only while the menu is open. The
+ * `containerRef` excludes clicks INSIDE the button + popover so
+ * the user can interact with the popover's toggles without
+ * dismissing it.
+ */
+function LayoutButton(props: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  layout: WidgetLayout;
+  onChangeLayout: (next: WidgetLayout) => void;
+}) {
+  const { open, onToggle, onClose, layout, onChangeLayout } = props;
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null;
+      if (target && containerRef.current && !containerRef.current.contains(target)) {
+        onClose();
+      }
+    };
+    const onDocKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    document.addEventListener("pointerdown", onDocPointerDown, true);
+    document.addEventListener("keydown", onDocKey, true);
+    return () => {
+      document.removeEventListener("pointerdown", onDocPointerDown, true);
+      document.removeEventListener("keydown", onDocKey, true);
+    };
+  }, [open, onClose]);
+
+  const set = (patch: Partial<WidgetLayout>) => {
+    onChangeLayout({ ...layout, ...patch });
+  };
+
+  return (
+    <div className="system-widget-layout-anchor" ref={containerRef}>
+      <button
+        type="button"
+        className={`system-widget-icon-btn ${open ? "active" : ""}`}
+        title="Customize layout"
+        aria-expanded={open}
+        aria-haspopup="true"
+        onClick={onToggle}
+      >
+        {/* Three stacked rectangles, middle one filled — reads as
+          * "configure which sections show" without overloading
+          * the existing settings-gear convention. */}
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round">
+          <rect x="2"   y="2"   width="10" height="2.4" />
+          <rect x="2"   y="5.8" width="10" height="2.4" fill="currentColor" />
+          <rect x="2"   y="9.6" width="10" height="2.4" />
+        </svg>
+      </button>
+      {open && (
+        <div className="system-widget-layout-popover" role="menu">
+          <div className="system-widget-layout-head">Sections</div>
+          <LayoutToggleRow
+            label="Detail panel"
+            sub="Click tiles to expand top processes"
+            checked={layout.showDetail}
+            onChange={(v) => set({ showDetail: v })}
+          />
+          <LayoutToggleRow
+            label="Disk I/O"
+            sub="Live read/write throughput"
+            checked={layout.showDiskIo}
+            onChange={(v) => set({ showDiskIo: v })}
+          />
+          <LayoutToggleRow
+            label="Latest scan"
+            sub="Scan progress + view-changes link"
+            checked={layout.showLatestScan}
+            onChange={(v) => set({ showLatestScan: v })}
+          />
+          <LayoutToggleRow
+            label="Drives"
+            sub="Per-drive free-space pressure"
+            checked={layout.showDrives}
+            onChange={(v) => set({ showDrives: v })}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LayoutToggleRow(props: {
+  label: string;
+  sub: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  const { label, sub, checked, onChange } = props;
+  return (
+    <label className="system-widget-layout-toggle">
+      <div className="system-widget-layout-toggle-text">
+        <span className="system-widget-layout-toggle-label">{label}</span>
+        <span className="system-widget-layout-toggle-sub">{sub}</span>
+      </div>
+      <span className={`system-widget-layout-toggle-switch ${checked ? "on" : "off"}`} aria-hidden="true">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange((e.target as HTMLInputElement).checked)}
+        />
+        <span className="system-widget-layout-toggle-thumb" />
+      </span>
+    </label>
   );
 }
 
