@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.5.14 — 2026-04-30
+
+System Widget pivots to standalone: tile clicks expand an inline
+detail panel in the widget instead of jumping to the main app.
+Plus an explicit "View changes →" affordance in the scan
+section.
+
+### Tile clicks expand inline (no more main-app navigation)
+
+The 0.5.13 click-throughs took over the user's main window when
+they clicked a tile, which hijacked focus mid-investigation.
+0.5.14 keeps the widget standalone — clicking the MEMORY, CPU,
+or GPU tile expands an **inline detail panel** between the hero
+tiles and the Disk I/O section showing the top 5 processes for
+that metric:
+
+- **Memory**: top 5 by RSS bytes
+- **CPU**: top 5 by current CPU %
+- **GPU**: top 5 by GPU utilization %
+
+Each row: process name, accent-colored mini-bar (relative to
+the leader), value column. Accent gradient matches the tile's
+color so the visual link between trigger and panel is obvious.
+Active tile gets an inset border-bottom highlight in its accent
+color, reading as one continuous "expanded card" with the
+panel below.
+
+The DISK tile stays passive — the DRIVES section already serves
+as its natural detail (no point showing the same data twice).
+Tile affordance changed from "↗" (open elsewhere) to "▾" (expand
+in place), flipping to "▴" while open.
+
+`Esc` collapses an open detail before closing the widget; second
+`Esc` closes the window. Click the same tile again, or the
+panel's × button, to collapse.
+
+### "View changes →" button after scan completes
+
+Inline button in the SCAN section, visible only when
+`scan.status === "done"`. The widget's only navigate-to-main
+affordance — explicit, opt-in, clearly scoped to "show me what
+changed since last scan." Calls the existing
+`focusMainWithView({ view: "changes" })` IPC, which brings the
+main window forward and switches to the Changes tab.
+
+Sections (Disk I/O, Scan, Drives) are otherwise passive — no
+more whole-card click-throughs that 0.5.13 had. Drive rows are
+also passive again (were `<button>` in 0.5.13, divs in 0.5.14).
+
+### Scan-running elapsed time
+
+Live elapsed counter in the SCAN stats line while a scan is
+running: `849 GB · 7.2M files · 1.3M dirs · 2m 14s elapsed`.
+Re-evaluated on the widget's `now` interval (every 5 s) so the
+timer doesn't freeze between scan-snapshot pushes from main.
+
+### Misc
+
+- "+ N more drives" footer is now a static label instead of a
+  click-through. Users with 5+ drives can hit the existing
+  "open main window" titlebar button to see the full picker —
+  consistent with the standalone-widget pivot.
+- StatTile now renders as `<button>` only when clickable; passive
+  tiles render as `<div>` so screen readers / keyboards don't
+  tab into surfaces that do nothing on activate.
+
 ## 0.5.13 — 2026-04-30
 
 System Widget: click-through tiles, sparklines, stale callout,

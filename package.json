@@ -2,7 +2,7 @@
   "name": "diskhound",
   "private": true,
   "type": "module",
-  "version": "0.5.13",
+  "version": "0.5.14",
   "description": "Fast disk space analyzer — find and clean up large files",
   "author": "DiskHound",
   "homepage": "https://github.com/tzarebczan/diskhound",

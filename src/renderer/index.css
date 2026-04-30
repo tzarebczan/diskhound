@@ -7174,24 +7174,61 @@ body.system-widget-body #app {
   outline: 2px solid var(--amber);
   outline-offset: 1px;
 }
-/* Tiny "↗" hover affordance in the corner — invisible by default,
- * fades in when the user hovers. Signals "this is clickable"
- * without being permanently visible noise. */
+/* Tiny "▾" hover affordance — signals "click to expand detail"
+ * (replaces the 0.5.13 "↗" which was suggesting "open elsewhere"
+ * back when tile clicks navigated to main). Inline in the tile,
+ * faded by default, brighter on hover; flips to ▴ when the
+ * tile's detail panel is currently open. Hidden on the DISK
+ * tile (passive — DRIVES section is its natural detail). */
 .system-widget-stat::after {
-  content: "↗";
+  content: "▾";
   position: absolute;
   top: 6px;
   right: 9px;
-  font-size: 10px;
+  font-size: 9px;
   line-height: 1;
   color: var(--text-muted);
   opacity: 0;
-  transition: opacity 0.15s;
+  transition: opacity 0.15s, transform 0.15s;
   pointer-events: none;
 }
 .system-widget-stat:hover::after,
 .system-widget-stat:focus-visible::after {
   opacity: 0.7;
+}
+.system-widget-stat.active::after {
+  content: "▴";
+  opacity: 1;
+}
+/* Active state: the tile's detail panel is currently visible.
+ * Border-bottom flushes with the panel's top edge in the
+ * accent color so the visual link reads at a glance. */
+.system-widget-stat.active {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  border-bottom-color: transparent;
+}
+.system-widget-stat.amber.active { box-shadow: inset 0 -2px 0 var(--amber); }
+.system-widget-stat.blue.active  { box-shadow: inset 0 -2px 0 var(--blue); }
+.system-widget-stat.green.active { box-shadow: inset 0 -2px 0 var(--green); }
+.system-widget-stat.teal.active  { box-shadow: inset 0 -2px 0 var(--teal); }
+.system-widget-stat.red.active   { box-shadow: inset 0 -2px 0 var(--red); }
+/* Passive tiles: rendered as <div>, not <button>. No hover
+ * lift, no cursor pointer, no expand-affordance. The DISK tile
+ * uses this — its detail is the DRIVES section below, not a
+ * click-in panel. */
+.system-widget-stat.passive {
+  cursor: default;
+}
+.system-widget-stat.passive:hover {
+  background: rgba(255, 255, 255, 0.035);
+  border-color: var(--border);
+}
+:root.light .system-widget-stat.passive:hover {
+  background: rgba(255, 255, 255, 0.82);
+}
+.system-widget-stat.passive::after {
+  content: none;
 }
 .system-widget-stat.dimmed { opacity: 0.55; }
 .system-widget-stat.dimmed:hover { opacity: 0.7; }
@@ -7296,49 +7333,12 @@ body.system-widget-body #app {
 :root.light .system-widget-section {
   background: rgba(255, 255, 255, 0.82);
 }
-/* Click-through wrapper variant. Stays visually identical to a
- * passive section card unless hovered/focused; tiny "↗" appears
- * on hover for the same reason as on the stat tiles. */
-.system-widget-section-clickable {
-  display: block;
-  width: 100%;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  position: relative;
-  transition: background 0.12s, border-color 0.12s, transform 0.08s;
-}
-.system-widget-section-clickable:hover {
-  background: rgba(255, 255, 255, 0.06);
-  border-color: var(--border-focus);
-}
-:root.light .system-widget-section-clickable:hover {
-  background: rgba(255, 255, 255, 0.95);
-}
-.system-widget-section-clickable:active {
-  transform: translateY(1px);
-}
-.system-widget-section-clickable:focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: 1px;
-}
-.system-widget-section-clickable::after {
-  content: "↗";
-  position: absolute;
-  top: 8px;
-  right: 11px;
-  font-size: 10px;
-  line-height: 1;
-  color: var(--text-muted);
-  opacity: 0;
-  transition: opacity 0.15s;
-  pointer-events: none;
-}
-.system-widget-section-clickable:hover::after,
-.system-widget-section-clickable:focus-visible::after {
-  opacity: 0.7;
-}
+/* Sections (Disk I/O, Scan, Drives) are passive in 0.5.14. The
+ * widget is standalone — the only navigate-to-main affordance is
+ * the explicit "View changes →" button in the SCAN section, not
+ * the whole-card click-through that 0.5.13 had. The
+ * .system-widget-section-clickable class was deleted with that
+ * pivot. */
 .system-widget-section-head {
   display: flex;
   align-items: baseline;
@@ -7488,30 +7488,12 @@ body.system-widget-body #app {
   display: grid;
   gap: 9px;
 }
-/* Each drive is a click-through button → focuses the main app's
- * Overview with that drive set as the scan root. Reset native
- * button styling so the visual matches the prior passive row. */
+/* Drive rows are passive (widget is standalone in 0.5.14). The
+ * 0.5.13 button-row treatment is gone — clicking a drive in the
+ * widget no longer hijacks the main window. */
 .system-widget-drive-row {
   display: grid;
   gap: 5px;
-  width: 100%;
-  padding: 4px 6px;
-  margin: -4px -6px;
-  border: none;
-  border-radius: var(--radius-md);
-  background: transparent;
-  text-align: left;
-  font: inherit;
-  color: inherit;
-  cursor: pointer;
-  transition: background 0.12s;
-}
-.system-widget-drive-row:hover {
-  background: var(--bg-row-hover);
-}
-.system-widget-drive-row:focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: 1px;
 }
 .system-widget-drive-label {
   display: flex;
@@ -7534,28 +7516,19 @@ body.system-widget-body #app {
 .system-widget-drive-fill.ok       { background: linear-gradient(90deg, var(--green), var(--teal)); }
 .system-widget-drive-fill.warn     { background: linear-gradient(90deg, var(--amber), var(--orange)); }
 .system-widget-drive-fill.critical { background: linear-gradient(90deg, var(--orange), var(--red)); }
-.system-widget-drive-more {
-  width: 100%;
+/* "+ N more drives" footer — static text in 0.5.14 (was a
+ * click-through to main in 0.5.13; widget is standalone now).
+ * The "open main window" titlebar button is the canonical path
+ * to the full picker for users with 5+ drives. */
+.system-widget-drive-more-static {
   margin-top: 2px;
-  padding: 7px 8px;
-  text-align: left;
+  padding: 6px 8px;
   border: 1px dashed var(--border);
   border-radius: var(--radius-md);
-  background: transparent;
   font-family: var(--font-mono);
   font-size: 10.5px;
   color: var(--text-tertiary);
-  cursor: pointer;
-  transition: color 0.12s, border-color 0.12s, background 0.12s;
-}
-.system-widget-drive-more:hover {
-  color: var(--text);
-  border-color: var(--border-focus);
-  background: var(--bg-row-hover);
-}
-.system-widget-drive-more:focus-visible {
-  outline: 2px solid var(--amber);
-  outline-offset: 1px;
+  text-align: center;
 }
 
 .system-widget-empty {
@@ -7598,6 +7571,161 @@ body.system-widget-body #app {
 @keyframes system-widget-stale-pulse {
   0%, 100% { opacity: 1; }
   50%      { opacity: 0.4; }
+}
+
+/* ── Inline detail panel ──────────────────────────────────
+ *
+ * Rendered between the hero tiles and the Disk I/O section
+ * when a clickable tile (Memory / CPU / GPU) is active. Shows
+ * a top-N process list with name + percent-of-leader bar +
+ * value column. Accent color matches the tile that triggered
+ * it so the visual link reads at a glance.
+ *
+ * Continuous with the active tile's bottom edge (no gap, no
+ * top corner radius) so the two read as one expanded card. */
+.system-widget-detail {
+  margin-top: -8px;       /* close the gap to the tiles row */
+  border: 1px solid var(--border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  padding: 10px 12px 11px;
+  background: rgba(255, 255, 255, 0.04);
+  position: relative;
+}
+:root.light .system-widget-detail {
+  background: rgba(255, 255, 255, 0.85);
+}
+/* Accent strip across the top of the detail panel — tints the
+ * panel toward whichever tile opened it. Subtle gradient
+ * matching the tile's bar fill. */
+.system-widget-detail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--detail-accent, var(--text-muted));
+}
+.system-widget-detail.amber { --detail-accent: linear-gradient(90deg, var(--amber), var(--orange)); }
+.system-widget-detail.blue  { --detail-accent: linear-gradient(90deg, var(--blue),  var(--teal)); }
+.system-widget-detail.green { --detail-accent: linear-gradient(90deg, var(--green), var(--teal)); }
+.system-widget-detail.teal  { --detail-accent: linear-gradient(90deg, var(--teal),  var(--blue)); }
+.system-widget-detail.red   { --detail-accent: linear-gradient(90deg, var(--orange), var(--red)); }
+
+.system-widget-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.system-widget-detail-close {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.system-widget-detail-close:hover {
+  color: var(--text);
+  border-color: var(--border-focus);
+  background: var(--bg-row-hover);
+}
+.system-widget-detail-close:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.system-widget-detail-list {
+  display: grid;
+  gap: 5px;
+}
+.system-widget-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(70px, 90px) minmax(54px, auto);
+  gap: 8px;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.system-widget-detail-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.system-widget-detail-bar {
+  height: 4px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.07);
+}
+:root.light .system-widget-detail-bar {
+  background: rgba(15, 23, 42, 0.07);
+}
+.system-widget-detail-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+.system-widget-detail.amber .system-widget-detail-fill { background: linear-gradient(90deg, var(--amber), var(--orange)); }
+.system-widget-detail.blue  .system-widget-detail-fill { background: linear-gradient(90deg, var(--blue),  var(--teal)); }
+.system-widget-detail.green .system-widget-detail-fill { background: linear-gradient(90deg, var(--green), var(--teal)); }
+.system-widget-detail.teal  .system-widget-detail-fill { background: linear-gradient(90deg, var(--teal),  var(--blue)); }
+.system-widget-detail.red   .system-widget-detail-fill { background: linear-gradient(90deg, var(--orange), var(--red)); }
+
+.system-widget-detail-value {
+  text-align: right;
+  color: var(--text-secondary);
+}
+.system-widget-detail-empty {
+  padding: 10px 4px;
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+/* "View changes →" button — the only navigate-to-main
+ * affordance left in the widget. Inline in the SCAN section
+ * after a scan completes; deliberately small and quiet so it
+ * reads as a follow-up action, not a primary CTA. */
+.system-widget-scan-action {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 8px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--green);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.system-widget-scan-action:hover {
+  color: var(--text);
+  border-color: var(--green);
+  background: var(--green-glow);
+}
+.system-widget-scan-action:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
 }
 
 /* ── Sampler error stack ──────────────────────────────── */
@@ -7741,8 +7869,7 @@ body.system-widget-body #app {
   }
   /* Hover-↗ glyph also gets cramped at this width; the rows
    * are still clickable, just no decorative hint. */
-  .system-widget-stat::after,
-  .system-widget-section-clickable::after {
+  .system-widget-stat::after {
     display: none;
   }
 }

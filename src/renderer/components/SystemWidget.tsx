@@ -2,12 +2,13 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "prea
 
 import type {
   AppSettings,
-  AppView,
   DiskIoProcessInfo,
   DiskIoSnapshot,
   DiskSpaceInfo,
   GeneralSettings,
+  GpuProcessInfo,
   GpuSnapshot,
+  ProcessInfo,
   ScanSnapshot,
   SystemMemorySnapshot,
 } from "../../shared/contracts";
@@ -17,29 +18,29 @@ import { nativeApi } from "../nativeApi";
 /**
  * DiskHound Monitor — always-on-top floating widget.
  *
+ * Standalone: tile clicks expand inline detail panels in the
+ * widget (top-N processes for MEM/CPU/GPU). The DRIVES section
+ * is the natural detail for the DISK tile so DISK stays passive.
+ * The only navigate-to-main affordance is the explicit "View
+ * changes →" button in the SCAN section after a scan completes
+ * — the rest of the widget never steals the user's main-window
+ * focus.
+ *
  * Refresh cadences are deliberately staggered so a slow sampler
- * (PowerShell Get-Counter on a cold WDDM stack can take 1.5 s) never
- * blocks a faster one. Each cadence uses Promise.allSettled at the
- * call site so a single failing sampler degrades to a per-tile
- * empty state instead of taking the whole widget down.
+ * (PowerShell Get-Counter on a cold WDDM stack can take 1.5 s)
+ * never blocks a faster one. Each cadence uses
+ * Promise.allSettled at the call site so a single failing
+ * sampler degrades to a per-tile empty state instead of taking
+ * the whole widget down.
  */
 const DISK_REFRESH_MS = 10_000;
 const MEMORY_REFRESH_MS = 4_000;
 const DISK_IO_REFRESH_MS = 3_000;
 const GPU_REFRESH_MS = 7_500;
-/** Hide the "first sample…" placeholder text for this long after
- *  mount so the widget's first paint isn't hostile. */
 const BASELINE_GRACE_MS = 4_000;
-/** Show a stale-data pill at the top when the memory sample is
- *  older than this. The slowest live sampler (disk/scan, 10 s)
- *  drives the threshold — anything older than ~3× that means
- *  the widget has lost the heartbeat. */
 const STALE_THRESHOLD_MS = 30_000;
-/** Sparkline ring-buffer cap. 20 points × per-metric cadence
- *  gives 60-200 s of trend per tile, which is the right horizon
- *  for "is this getting worse right now?" — long enough to read
- *  the slope, short enough that the line stays current. */
 const HISTORY_CAP = 20;
+const DETAIL_TOP_N = 5;
 
 function resolveThemePreference(theme: GeneralSettings["theme"]): "dark" | "light" {
   if (theme === "light") return "light";
@@ -65,9 +66,6 @@ function rootDrive(rootPath: string | null | undefined, drives: DiskSpaceInfo[])
   return drives.find((d) => lower.startsWith(d.drive.toLowerCase())) ?? null;
 }
 
-/** Match the DriveCard pressure thresholds in the main app
- *  (DiskPicker.tsx) so a 92 %-full drive reads "critical" in
- *  both places. */
 function pressureClass(usedPercent: number | null | undefined): "ok" | "warn" | "critical" {
   if (typeof usedPercent !== "number" || !Number.isFinite(usedPercent)) return "ok";
   if (usedPercent > 90) return "critical";
@@ -75,12 +73,6 @@ function pressureClass(usedPercent: number | null | undefined): "ok" | "warn" | 
   return "ok";
 }
 
-/** Map drive pressure → tile accent color. Critical (>90 %)
- *  reads RED in the hero tile, matching the per-drive bar
- *  below it. Previously the DISK tile was hard-coded to amber
- *  regardless of the actual percentage, which created the
- *  awkward "92 % shown in amber while the same drive's bar
- *  below shows red" inconsistency. */
 function diskPressureAccent(usedPercent: number | null | undefined): TileAccent {
   switch (pressureClass(usedPercent)) {
     case "critical": return "red";
@@ -89,9 +81,6 @@ function diskPressureAccent(usedPercent: number | null | undefined): TileAccent 
   }
 }
 
-/** Categorise a disk-I/O process by direction. If reads dominate
- *  ≥5× over writes (or vice versa) we collapse to a single
- *  label; otherwise show both. */
 function ioDirectionLabel(p: DiskIoProcessInfo): { prefix: string; rate: number } {
   const r = Math.max(0, p.readBytesPerSec);
   const w = Math.max(0, p.writeBytesPerSec);
@@ -112,11 +101,34 @@ function formatStaleAge(seconds: number): string {
   return `${hours}h ${minutes % 60}m ago`;
 }
 
+/** Compact elapsed-time formatter for the running-scan stats line.
+ *  Drops leading zeroes — a 12 s scan reads "12s", a 2-minute
+ *  scan "2m 14s", an hour-plus scan "1h 03m". */
+function formatScanElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    const remSec = seconds % 60;
+    return `${minutes}m ${remSec.toString().padStart(2, "0")}s`;
+  }
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${(minutes % 60).toString().padStart(2, "0")}m`;
+}
+
 type TileAccent = "amber" | "blue" | "green" | "teal" | "red";
+type DetailType = "memory" | "cpu" | "gpu";
 
 interface SamplerIssue {
   source: "memory" | "diskIo" | "gpu";
   message: string;
+}
+
+interface DetailRow {
+  key: string | number;
+  name: string;
+  value: string;
+  /** 0–100 — drives the per-row mini-bar's relative width. */
+  pct: number;
 }
 
 export function SystemWidget() {
@@ -128,14 +140,16 @@ export function SystemWidget() {
   const [pinned, setPinned] = useState(true);
   const [hasFirstSample, setHasFirstSample] = useState(false);
   const [mountedAt] = useState<number>(() => Date.now());
-  // Re-evaluated periodically so the stale pill ages even
-  // between sampler ticks. Cheap to update — the main render
-  // is already gated on snapshot changes for the data tiles.
   const [now, setNow] = useState<number>(() => Date.now());
 
-  // Per-metric ring buffers for the sparklines. Each metric
-  // appends its latest 0-100 value when its sampler returns;
-  // sparkline component reads tail-N for the trace.
+  // Inline detail panel — null when collapsed. Click a hero
+  // tile to open its detail; click the same tile again (or the
+  // panel's close button) to collapse. DISK has no detail
+  // because the DRIVES section below the tiles is already its
+  // natural expansion — duplicating it as a click-in panel
+  // would just repeat data.
+  const [activeDetail, setActiveDetail] = useState<DetailType | null>(null);
+
   const [diskHistory, setDiskHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
@@ -168,10 +182,6 @@ export function SystemWidget() {
     });
   }, [applySettingsToTheme]);
 
-  // Periodic `now` refresh purely so the stale-pill age ticks
-  // between sampler updates. 5 s cadence is fine — staleness
-  // accumulates slowly by definition. No re-render cost when the
-  // pill is hidden (it's gated on isStale below).
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now()), 5_000);
     return () => window.clearInterval(id);
@@ -259,6 +269,13 @@ export function SystemWidget() {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
+        // First Esc collapses an open detail panel; second Esc
+        // closes the widget. Less surprising than blowing the
+        // window away mid-investigation.
+        if (activeDetail) {
+          setActiveDetail(null);
+          return;
+        }
         void nativeApi.closeSystemWidget();
         return;
       }
@@ -270,7 +287,7 @@ export function SystemWidget() {
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [refreshAll]);
+  }, [activeDetail, refreshAll]);
 
   // ── Derived metrics ───────────────────────────────────────
   const totalDisk = useMemo(() => {
@@ -335,18 +352,12 @@ export function SystemWidget() {
         : "";
 
   // ── Sparkline ring-buffer updates ─────────────────────────
-  // Each metric pushes when its underlying snapshot changes.
-  // Gating on `drives` / `memory` / `diskIo` / `gpu` (rather
-  // than on the derived percent) keeps us from double-pushing
-  // the same value across renders that don't carry new data.
   useEffect(() => {
     if (drives.length === 0) return;
     const value = activeDrive?.usedPercent ?? totalDisk.usedPercent;
     if (typeof value === "number" && Number.isFinite(value)) {
       setDiskHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), value]);
     }
-    // activeDrive depends on drives + scan?.rootPath; both changing
-    // legitimately moves the "active" drive, which we want to record.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drives, scan?.rootPath]);
   useEffect(() => {
@@ -370,13 +381,57 @@ export function SystemWidget() {
     setGpuHistory((h) => [...h.slice(-(HISTORY_CAP - 1)), value]);
   }, [gpu]);
 
+  // ── Detail-panel data ─────────────────────────────────────
+  // Computed eagerly so `activeDetail` toggles produce no
+  // visible delay. Each accessor returns top-N rows for its
+  // category, sorted by the relevant metric.
+  const memoryDetail = useMemo<DetailRow[]>(() => {
+    if (!memory) return [];
+    const top = memory.processes
+      .slice()
+      .sort((a, b) => b.memoryBytes - a.memoryBytes)
+      .slice(0, DETAIL_TOP_N);
+    const max = top[0]?.memoryBytes ?? 1;
+    return top.map((p: ProcessInfo) => ({
+      key: p.pid,
+      name: shortProcessName(p.name),
+      value: formatBytes(p.memoryBytes),
+      pct: max > 0 ? (p.memoryBytes / max) * 100 : 0,
+    }));
+  }, [memory]);
+
+  const cpuDetail = useMemo<DetailRow[]>(() => {
+    if (!memory) return [];
+    const top = memory.processes
+      .filter((p) => typeof p.cpuPercent === "number" && (p.cpuPercent ?? 0) > 0)
+      .slice()
+      .sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0))
+      .slice(0, DETAIL_TOP_N);
+    const max = top[0]?.cpuPercent ?? 1;
+    return top.map((p: ProcessInfo) => ({
+      key: p.pid,
+      name: shortProcessName(p.name),
+      value: pct(p.cpuPercent),
+      pct: max > 0 ? ((p.cpuPercent ?? 0) / max) * 100 : 0,
+    }));
+  }, [memory]);
+
+  const gpuDetail = useMemo<DetailRow[]>(() => {
+    if (!gpu || gpu.unavailable) return [];
+    const top = gpu.processes
+      .slice()
+      .sort((a, b) => b.utilizationPercent - a.utilizationPercent)
+      .slice(0, DETAIL_TOP_N);
+    const max = top[0]?.utilizationPercent ?? 1;
+    return top.map((p: GpuProcessInfo) => ({
+      key: p.pid,
+      name: shortProcessName(p.name),
+      value: pct(p.utilizationPercent),
+      pct: max > 0 ? (p.utilizationPercent / max) * 100 : 0,
+    }));
+  }, [gpu]);
+
   // ── Stale callout ─────────────────────────────────────────
-  // Memory is the fastest sampler (4 s cadence) and the one
-  // that drives the rest of the widget's "alive" feel — if its
-  // sampledAt drifts >30 s we tell the user. Below the
-  // threshold the pill is hidden entirely so normal operation
-  // is silent (per the "don't add noise that's always true"
-  // principle from the previous round of polish).
   const memoryAge = memory ? Math.max(0, Math.round((now - memory.sampledAt) / 1000)) : 0;
   const isStale = memory != null && (now - memory.sampledAt) > STALE_THRESHOLD_MS;
 
@@ -416,6 +471,12 @@ export function SystemWidget() {
     : scan?.status === "done" || scan?.status === "error"
       ? 100
       : 0;
+  // Live-elapsed for running scans. Re-evaluated on each `now`
+  // tick (every 5 s) so the timer doesn't freeze between
+  // scan-snapshot pushes.
+  const scanElapsedSec = scan?.status === "running" && scan.startedAt
+    ? Math.max(0, Math.floor((now - scan.startedAt) / 1000))
+    : null;
 
   const setPinnedMode = async () => {
     const next = !pinned;
@@ -424,13 +485,8 @@ export function SystemWidget() {
     setPinned(actual);
   };
 
-  // ── Click-through helper ──────────────────────────────────
-  // Single entry point — the widget brings the main window
-  // forward AND tells its renderer which tab to switch to. The
-  // main process IPC handler does both atomically (focus +
-  // emit-navigate); App.tsx subscribes once on mount.
-  const navigate = useCallback((view: AppView, scanRoot?: string) => {
-    void nativeApi.focusMainWithView({ view, ...(scanRoot ? { scanRoot } : {}) });
+  const toggleDetail = useCallback((type: DetailType) => {
+    setActiveDetail((prev) => (prev === type ? null : type));
   }, []);
 
   const heroTileCount = gpuAvailable ? 4 : 3;
@@ -439,10 +495,7 @@ export function SystemWidget() {
   if (!hasFirstSample) {
     return (
       <div className="system-widget-shell">
-        <Titlebar
-          pinned={pinned}
-          onTogglePin={() => void setPinnedMode()}
-        />
+        <Titlebar pinned={pinned} onTogglePin={() => void setPinnedMode()} />
         <main className="system-widget-content system-widget-content-loading">
           <div className="system-widget-skeleton">
             <div className="system-widget-skeleton-pulse" aria-hidden="true" />
@@ -455,10 +508,7 @@ export function SystemWidget() {
 
   return (
     <div className="system-widget-shell">
-      <Titlebar
-        pinned={pinned}
-        onTogglePin={() => void setPinnedMode()}
-      />
+      <Titlebar pinned={pinned} onTogglePin={() => void setPinnedMode()} />
 
       <main className="system-widget-content">
         {isStale && (
@@ -469,6 +519,11 @@ export function SystemWidget() {
         )}
 
         <section className={`system-widget-tiles tiles-${heroTileCount}`}>
+          {/* DISK is passive — the DRIVES section below is its
+            * natural detail. Making it click-expand would just
+            * duplicate that data. Visual: cursor-default + no
+            * hover lift; passes `onClick={undefined}` to the
+            * tile component to render as a non-interactive div. */}
           <StatTile
             kicker="Disk"
             value={diskValue}
@@ -476,8 +531,7 @@ export function SystemWidget() {
             percent={diskPct}
             accent={diskPressureAccent(diskPct)}
             history={diskHistory}
-            onClick={() => navigate("overview", activeDrive?.drive)}
-            ariaLabel={`Disk ${diskValue} used. Click to open the main app's Overview.`}
+            ariaLabel={`Disk ${diskValue} used.`}
           />
           <StatTile
             kicker="Memory"
@@ -486,8 +540,9 @@ export function SystemWidget() {
             percent={memoryPct ?? 0}
             accent="blue"
             history={memoryHistory}
-            onClick={() => navigate("memory")}
-            ariaLabel={`Memory ${pct(memoryPct)} used. Click to open the Processes tab.`}
+            active={activeDetail === "memory"}
+            onClick={() => toggleDetail("memory")}
+            ariaLabel={`Memory ${pct(memoryPct)} used. Click to ${activeDetail === "memory" ? "hide" : "show"} top processes.`}
           />
           <StatTile
             kicker="CPU"
@@ -496,8 +551,9 @@ export function SystemWidget() {
             percent={cpuPercent ?? 0}
             accent="green"
             history={cpuHistory}
-            onClick={() => navigate("memory")}
-            ariaLabel={`CPU ${pct(cpuPercent)} active. Click to open the Processes tab.`}
+            active={activeDetail === "cpu"}
+            onClick={() => toggleDetail("cpu")}
+            ariaLabel={`CPU ${pct(cpuPercent)} active. Click to ${activeDetail === "cpu" ? "hide" : "show"} top processes.`}
           />
           {gpuAvailable && (
             <StatTile
@@ -508,16 +564,42 @@ export function SystemWidget() {
               accent="teal"
               dimmed={gpu?.unavailable}
               history={gpuHistory}
-              onClick={() => navigate("memory")}
-              ariaLabel={`GPU ${gpu?.unavailable ? "not available" : pct(gpuPercent)}. Click to open the Processes tab.`}
+              active={activeDetail === "gpu"}
+              onClick={gpu?.unavailable ? undefined : () => toggleDetail("gpu")}
+              ariaLabel={`GPU ${gpu?.unavailable ? "not available" : pct(gpuPercent)}. ${gpu?.unavailable ? "" : `Click to ${activeDetail === "gpu" ? "hide" : "show"} top processes.`}`}
             />
           )}
         </section>
 
-        <ClickableSection
-          onClick={() => navigate("diskIo")}
-          ariaLabel="Open the Disk I/O tab in the main app"
-        >
+        {activeDetail === "memory" && (
+          <DetailPanel
+            title="Top processes by memory"
+            accent="blue"
+            rows={memoryDetail}
+            emptyMessage="No memory data yet."
+            onClose={() => setActiveDetail(null)}
+          />
+        )}
+        {activeDetail === "cpu" && (
+          <DetailPanel
+            title="Top processes by CPU"
+            accent="green"
+            rows={cpuDetail}
+            emptyMessage={memory ? "Nothing using CPU right now." : "No CPU data yet."}
+            onClose={() => setActiveDetail(null)}
+          />
+        )}
+        {activeDetail === "gpu" && (
+          <DetailPanel
+            title="Top processes by GPU"
+            accent="teal"
+            rows={gpuDetail}
+            emptyMessage={gpu?.unavailable ? "GPU sampling unavailable." : "Nothing using the GPU right now."}
+            onClose={() => setActiveDetail(null)}
+          />
+        )}
+
+        <section className="system-widget-section">
           <SectionHead label="Disk I/O" value={`${formatBytes(diskRate)}/s`} />
           <div className="system-widget-io-bars">
             <FlowBar label="read"  value={diskIo?.totalReadBytesPerSec ?? 0}  total={Math.max(1, diskRate)} tone="blue" />
@@ -539,13 +621,9 @@ export function SystemWidget() {
               <span>{diskIo?.hasRateBaseline ? "idle" : "first sample…"}</span>
             </div>
           ) : null}
-        </ClickableSection>
+        </section>
 
-        <ClickableSection
-          onClick={() => navigate("changes")}
-          ariaLabel="Open the Changes tab in the main app"
-          className={`system-widget-scan ${scan?.status ?? "idle"}`}
-        >
+        <section className={`system-widget-section system-widget-scan ${scan?.status ?? "idle"}`}>
           <SectionHead label={scanTitle} value={scanRightLabel} />
           <div className="system-widget-scan-path" title={scanDetail}>{scanDetail}</div>
           {scan && scan.status !== "idle" && (
@@ -553,7 +631,24 @@ export function SystemWidget() {
               <span>{formatBytes(scan.bytesSeen)}</span>
               <span>{formatCount(scan.filesVisited)} files</span>
               <span>{formatCount(scan.directoriesVisited)} dirs</span>
+              {scanElapsedSec !== null && (
+                <span>{formatScanElapsed(scanElapsedSec)} elapsed</span>
+              )}
             </div>
+          )}
+          {scan?.status === "done" && scan.rootPath && (
+            // The only navigate-to-main affordance in the widget.
+            // Explicit, opt-in: clicking opens the Changes tab in
+            // main with the existing focusMainWithView IPC. The
+            // rest of the widget stays standalone.
+            <button
+              type="button"
+              className="system-widget-scan-action"
+              onClick={() => void nativeApi.focusMainWithView({ view: "changes" })}
+              title="Open the Changes tab in the main app"
+            >
+              View changes →
+            </button>
           )}
           <div className="system-widget-scan-track" aria-hidden="true">
             <div
@@ -561,7 +656,7 @@ export function SystemWidget() {
               style={{ width: `${scanFillPercent}%` }}
             />
           </div>
-        </ClickableSection>
+        </section>
 
         <section className="system-widget-section">
           <SectionHead label="Drives" value={`${formatBytes(totalDisk.freeBytes)} free`} />
@@ -569,13 +664,7 @@ export function SystemWidget() {
             {drives.slice(0, 4).map((drive) => {
               const cls = pressureClass(drive.usedPercent);
               return (
-                <button
-                  type="button"
-                  className="system-widget-drive-row"
-                  key={drive.drive}
-                  onClick={() => navigate("overview", drive.drive)}
-                  title={`${drive.drive} ${formatBytes(drive.freeBytes)} free of ${formatBytes(drive.totalBytes)} · ${pct(drive.usedPercent)} used · click to focus in main`}
-                >
+                <div className="system-widget-drive-row" key={drive.drive}>
                   <div className="system-widget-drive-label">
                     <span>{drive.drive}</span>
                     <span>{formatBytes(drive.freeBytes)} free</span>
@@ -586,19 +675,18 @@ export function SystemWidget() {
                       style={{ width: `${Math.max(2, Math.min(100, drive.usedPercent))}%` }}
                     />
                   </div>
-                </button>
+                </div>
               );
             })}
             {drives.length === 0 && <div className="system-widget-empty">Waiting for drive telemetry.</div>}
             {drives.length > 4 && (
-              <button
-                type="button"
-                className="system-widget-drive-more"
-                onClick={() => navigate("overview")}
-                title="Open the main app to see all drives"
-              >
-                + {drives.length - 4} more {drives.length - 4 === 1 ? "drive" : "drives"} →
-              </button>
+              // Static count footer — no longer a click-through
+              // (widget is standalone). Users with 5+ drives can
+              // hit the "open main window" titlebar button to
+              // see the full list in the picker.
+              <div className="system-widget-drive-more-static">
+                + {drives.length - 4} more {drives.length - 4 === 1 ? "drive" : "drives"} (open main window for full list)
+              </div>
             )}
           </div>
         </section>
@@ -715,29 +803,54 @@ function SectionHead({ label, value }: { label: string; value: string }) {
 }
 
 /**
- * Section card whose entire surface is a click-through into a
- * specific main-app tab. Renders as a `<button>` so it's
- * keyboard-focusable and announces correctly to screen readers.
- * Hover state lifts the background a touch and reveals a small
- * "↗" affordance in the corner. Section content is passed as
- * children so each call site can keep its bespoke layout.
+ * Inline detail panel rendered between the hero tiles and the
+ * DISK I/O section when a clickable tile is active. Shows a
+ * top-N list of processes (or whatever rows the caller passes).
+ *
+ * Accent color matches the originating tile so the visual link
+ * between trigger and panel reads at a glance — clicking the
+ * green CPU tile produces a green-accented detail panel.
  */
-function ClickableSection(props: {
-  onClick: () => void;
-  ariaLabel: string;
-  className?: string;
-  children: preact.ComponentChildren;
+function DetailPanel(props: {
+  title: string;
+  accent: TileAccent;
+  rows: DetailRow[];
+  emptyMessage: string;
+  onClose: () => void;
 }) {
-  const { onClick, ariaLabel, className, children } = props;
+  const { title, accent, rows, emptyMessage, onClose } = props;
   return (
-    <button
-      type="button"
-      className={`system-widget-section system-widget-section-clickable ${className ?? ""}`}
-      onClick={onClick}
-      aria-label={ariaLabel}
-    >
-      {children}
-    </button>
+    <section className={`system-widget-detail ${accent}`}>
+      <div className="system-widget-detail-head">
+        <span>{title}</span>
+        <button
+          type="button"
+          className="system-widget-detail-close"
+          aria-label="Close detail"
+          title="Close (Esc)"
+          onClick={onClose}
+        >
+          <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+            <path d="M2.5 2.5l5 5M7.5 2.5l-5 5" />
+          </svg>
+        </button>
+      </div>
+      {rows.length === 0 ? (
+        <div className="system-widget-detail-empty">{emptyMessage}</div>
+      ) : (
+        <div className="system-widget-detail-list">
+          {rows.map((row) => (
+            <div className="system-widget-detail-row" key={row.key}>
+              <span className="system-widget-detail-name" title={row.name}>{row.name}</span>
+              <div className="system-widget-detail-bar" aria-hidden="true">
+                <div className="system-widget-detail-fill" style={{ width: `${row.pct}%` }} />
+              </div>
+              <span className="system-widget-detail-value">{row.value}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -749,18 +862,68 @@ function StatTile(props: {
   accent: TileAccent;
   dimmed?: boolean;
   history: number[];
-  onClick: () => void;
+  active?: boolean;
+  onClick?: () => void;
   ariaLabel: string;
 }) {
-  const { kicker, value, sub, percent, accent, dimmed = false, history, onClick, ariaLabel } = props;
+  const { kicker, value, sub, percent, accent, dimmed = false, history, active = false, onClick, ariaLabel } = props;
   const clamped = Math.max(0, Math.min(100, Number.isFinite(percent) ? percent : 0));
+  const className = [
+    "system-widget-stat",
+    accent,
+    dimmed && "dimmed",
+    active && "active",
+    !onClick && "passive",
+  ].filter(Boolean).join(" ");
+
+  // Render as `<button>` only when clickable. Passive tiles
+  // become a `<div>` so screen readers / keyboards don't tab
+  // into something that does nothing on activate.
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        className={className}
+        onClick={onClick}
+        aria-pressed={active}
+        aria-label={ariaLabel}
+      >
+        <StatTileBody
+          kicker={kicker}
+          value={value}
+          sub={sub}
+          clamped={clamped}
+          history={history}
+          accent={accent}
+        />
+      </button>
+    );
+  }
   return (
-    <button
-      type="button"
-      className={`system-widget-stat ${accent} ${dimmed ? "dimmed" : ""}`}
-      onClick={onClick}
-      aria-label={ariaLabel}
-    >
+    <div className={className} aria-label={ariaLabel}>
+      <StatTileBody
+        kicker={kicker}
+        value={value}
+        sub={sub}
+        clamped={clamped}
+        history={history}
+        accent={accent}
+      />
+    </div>
+  );
+}
+
+function StatTileBody(props: {
+  kicker: string;
+  value: string;
+  sub: string;
+  clamped: number;
+  history: number[];
+  accent: TileAccent;
+}) {
+  const { kicker, value, sub, clamped, history, accent } = props;
+  return (
+    <>
       <div className="system-widget-stat-kicker">{kicker}</div>
       <div className="system-widget-stat-value-row">
         <span className="system-widget-stat-value">{value}</span>
@@ -769,25 +932,13 @@ function StatTile(props: {
       <div className="system-widget-stat-track" aria-hidden="true">
         <div className="system-widget-stat-fill" style={{ width: `${clamped}%` }} />
       </div>
-      <div className="system-widget-stat-sub" title={sub}>{sub || " "}</div>
-    </button>
+      <div className="system-widget-stat-sub" title={sub}>{sub || " "}</div>
+    </>
   );
 }
 
-/**
- * Inline SVG sparkline. 60 × 16 px, fixed scale 0-100 (every
- * metric is a percent so we don't need to compute min/max — the
- * absolute "where am I in 0-100?" is the right framing). Returns
- * null below 2 points because a single dot reads as noise.
- *
- * Stroke uses the tile's accent color via `currentColor`. No
- * fill — a flat polyline is enough; an area fill would compete
- * with the progress bar below it for the "how full?" signal.
- */
 function Sparkline({ values, accent }: { values: number[]; accent: TileAccent }) {
   if (values.length < 2) {
-    // Reserve the space so tiles with and without history don't
-    // bounce in width as samples accumulate.
     return <span className="system-widget-sparkline system-widget-sparkline-empty" aria-hidden="true" />;
   }
   const W = 60;
@@ -798,8 +949,6 @@ function Sparkline({ values, accent }: { values: number[]; accent: TileAccent })
     .map((v, i) => {
       const x = i * stepX;
       const clamped = Math.max(0, Math.min(max, v));
-      // 1 px inset top + bottom so the stroke doesn't get clipped
-      // at the edges.
       const y = H - 1 - (clamped / max) * (H - 2);
       return `${x.toFixed(1)},${y.toFixed(1)}`;
     })
