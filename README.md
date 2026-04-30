@@ -54,9 +54,11 @@ WinDirStat was the gold standard for a decade. DiskHound is what it would be tod
 - 🛎️ **Drive monitoring** — periodic free-space polling with delta alerts when space drops meaningfully. Rolling history of drive-level events is persisted.
 - ⚙️ **Processes viewer** — real-time memory + CPU sampling for every process, with icons pulled from each executable. **Four views**: List, Treemap, scrolling CPU Heatmap (time on X, process on Y), and details.
 - 🎮 **GPU viewer** — per-process GPU utilisation + VRAM pulled from Windows `\GPU Engine(*)` / `\GPU Process Memory(*)` performance counters. Adapter overview (3D / Compute / Decode / Encode stats).
+- 💽 **Disk I/O viewer** — per-process read / write throughput with sortable columns and a live total. Windows uses `Win32_PerfFormattedData_PerfProc_Process`; Linux derives rates from `/proc/<pid>/io` deltas; macOS surfaces a clear "unavailable" state because Apple doesn't expose unprivileged per-process counters.
+- 🪟 **System Widget** (`Ctrl+Shift+W`) — frameless always-on-top mini-window showing live disk capacity, disk I/O, CPU, GPU (Windows), memory, scan status, and per-drive pressure. Pin/unpin, drag anywhere on the title bar, remembers its size + position. Triggered from the header, the tray menu, or the keyboard shortcut.
 - 🔐 **One-UAC fast-scan mode** — Settings → Performance → "Always run as admin" registers a Scheduled Task bound to the current user's SID, so the normal shortcut auto-elevates with **zero additional prompts**.
 - 🌓 **Dark & light themes** — with system preference detection. Toggle from the status bar.
-- ⌨️ **Keyboard navigation** — arrow keys in the file list, Enter to open, Delete to trash, Ctrl+F to search.
+- ⌨️ **Keyboard navigation** — arrow keys in the file list, Enter to open, Delete to trash, Ctrl+F to search, `Ctrl+Shift+W` to open the System Widget.
 - 🔄 **Auto-update** — via `electron-updater` with GitHub Releases. UAC elevation supported for system-wide installs.
 
 ## Install

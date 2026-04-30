@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.5.11 — 2026-04-30
+
+Settings push, repurposed cleanup toggle, Disk I/O hardening,
+README catch-up.
+
+### Settings broadcast IPC (replaces widget poll)
+
+The System Widget previously polled `getSettings` every 12 s to
+catch theme flips made in the main app. Now the main process
+pushes settings updates to every renderer window via a new
+`diskhound:settings-updated` IPC channel — a theme switch in main
+reaches the widget within ~1 ms instead of up to 12 s. Feels alive,
+costs less.
+
+The mechanism is `settingsStore.subscribe(listener)`: the store
+fires after every successful `set` / `update`, main.ts wires that
+to `BrowserWindow.webContents.send` for every renderer. Any code
+path that mutates settings (the affinity-rule engine recording
+`lastAppliedAt`, monitoring schedule changes, future tabs) flows
+through the same broadcast automatically — callers don't need to
+remember to publish.
+
+Preload exposes `nativeApi.onSettingsUpdated((settings) => ...)`.
+
+### Cleanup setting repurposed: `confirmPermanentDelete`
+
+The `cleanup.safeDeleteToTrash` toggle has been functionally
+dead since 0.5.8 (Largest Files always shows the Del button now).
+Renamed to `confirmPermanentDelete` and given new meaning: when
+true (default), per-row "Del" buttons across the app pop a
+confirmation dialog before permanently deleting; when false, they
+fire immediately for power users who know what they're doing.
+Bulk operations ("Delete selected") always confirm regardless —
+multi-target actions deserve friction even if the per-row knob is
+off.
+
+Migration: the normalizer reads the old `safeDeleteToTrash` key
+as a fallback when `confirmPermanentDelete` is absent. Polarity
+is identical (true = safer / show confirm), so existing
+settings.json files keep their preference automatically.
+
+Touched: FileList, Overview's FeaturedFileCard, Treemap context
+menu, DuplicatesView's per-copy Del button. All four collapse to
+the same pattern: always render the button, gate the inline
+`confirm()` on the new setting.
+
+### Disk I/O view hardening
+
+- `DiskIoView.refresh` now guards against a null snapshot from the
+  IPC bridge (Vite HMR / first paint can transiently resolve null
+  through the lazy proxy). Previously a bridge hiccup mid-session
+  could clobber a perfectly good cached snapshot and blank the
+  tab.
+- First-load effect: only swap the snapshot when the fresh sample
+  is non-null; loading state still flips off either way so the
+  spinner doesn't persist.
+
+### README
+
+- Added the System Widget feature description (incl.
+  `Ctrl+Shift+W` shortcut).
+- Added the Disk I/O viewer feature description with platform
+  notes (Windows / Linux supported, macOS unavailable).
+- Added `Ctrl+Shift+W` to the keyboard shortcuts callout.
+
 ## 0.5.10 — 2026-04-30
 
 First tagged release containing the **System Widget** + **Disk I/O

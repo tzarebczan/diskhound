@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from "preact/hooks";
 
 import type {
+  AppSettings,
   DiskIoProcessInfo,
   DiskIoSnapshot,
   DiskSpaceInfo,
@@ -25,10 +26,6 @@ const DISK_REFRESH_MS = 10_000;
 const MEMORY_REFRESH_MS = 4_000;
 const DISK_IO_REFRESH_MS = 3_000;
 const GPU_REFRESH_MS = 7_500;
-/** How often to re-read settings — covers theme flips made in the
- *  main window (the widget runs in a separate renderer so the
- *  in-window SETTINGS_UPDATED_EVENT bus doesn't reach it). */
-const SETTINGS_REFRESH_MS = 12_000;
 /** Hide the "baseline" / "first sample…" placeholder text for this
  *  long after mount so the widget's first paint isn't hostile. */
 const BASELINE_GRACE_MS = 4_000;
@@ -112,9 +109,10 @@ export function SystemWidget() {
     };
   }, []);
 
-  const applyTheme = useCallback(async () => {
-    const settings = await nativeApi.getSettings();
-    if (!settings) return;
+  // Apply theme + colorblind flags from a settings object. Pure
+  // (no IPC); the caller passes either the initial getSettings()
+  // payload or a push-broadcast payload.
+  const applySettingsToTheme = useCallback((settings: AppSettings) => {
     const root = document.documentElement;
     const next = resolveThemePreference(settings.general.theme);
     root.classList.remove("dark", "light");
@@ -122,11 +120,20 @@ export function SystemWidget() {
     root.classList.toggle("colorblind", Boolean(settings.general.colorBlindMode));
   }, []);
 
+  // Initial read + push subscription. Replaces the prior 12 s
+  // poll: the main process now broadcasts `settings-updated` to
+  // every renderer window after every successful settings write
+  // (see `settingsStore.subscribe` in main.ts). A theme flip in
+  // the main app reaches the widget within a couple of ms instead
+  // of up to 12 s — feels alive, costs less.
   useEffect(() => {
-    void applyTheme();
-    const timer = window.setInterval(() => void applyTheme(), SETTINGS_REFRESH_MS);
-    return () => window.clearInterval(timer);
-  }, [applyTheme]);
+    void nativeApi.getSettings().then((settings) => {
+      if (settings) applySettingsToTheme(settings);
+    });
+    return nativeApi.onSettingsUpdated((settings) => {
+      applySettingsToTheme(settings);
+    });
+  }, [applySettingsToTheme]);
 
   // ── Sampler refresh helpers ───────────────────────────────
   const refreshDiskAndScan = useCallback(async () => {

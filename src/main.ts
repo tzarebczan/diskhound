@@ -112,6 +112,10 @@ const DISK_DELTA_CHANNEL = "diskhound:disk-delta";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+/** Broadcast from main to every renderer window after settings
+ *  are persisted. Replaces the widget's prior 12 s poll — see the
+ *  `settingsStore.subscribe` wiring in whenReady. */
+const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const rendererEntryUrl = process.env.VITE_DEV_SERVER_URL;
@@ -619,6 +623,25 @@ void app.whenReady().then(async () => {
     minWidth: 330,
     minHeight: 500,
     fileName: "widget-window-state.json",
+  });
+
+  // Broadcast settings changes to every renderer window. Replaces
+  // the widget's prior 12 s settings poll — theme flips made in
+  // the main app now propagate to the widget within a few ms via
+  // `diskhound:settings-updated` IPC. The store's subscribe() fires
+  // after every successful set/update, so callers don't need to
+  // remember to broadcast (e.g. the affinity-rule engine that
+  // updates `lastAppliedAt` from the main process automatically
+  // flows through here).
+  settingsStore.subscribe((settings) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (win.isDestroyed()) continue;
+      try {
+        win.webContents.send(SETTINGS_UPDATED_CHANNEL, settings);
+      } catch {
+        // Renderer might be unloading — best effort.
+      }
+    }
   });
 
   // Initialize disk monitor with persistent baseline storage

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord } from "../../shared/contracts";
 import { formatBytes, humanAge } from "../lib/format";
-import { useSafeDeleteOnly } from "../lib/hooks";
+import { useConfirmPermanentDelete } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import {
@@ -343,7 +343,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
-  const safeDeleteOnly = useSafeDeleteOnly();
+  const confirmDelete = useConfirmPermanentDelete();
 
   // Adjust position so menu doesn't overflow viewport
   const [pos, setPos] = useState({ x, y });
@@ -452,20 +452,18 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         </svg>
         Move to Recycle Bin
       </button>
-      {!safeDeleteOnly && (
-        <button
-          className="treemap-ctx-item treemap-ctx-danger"
-          onClick={() => {
-            if (!confirm(`Permanently delete ${file.name}?\n\nThis cannot be undone.`)) return;
-            void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete");
-          }}
-        >
-          <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
-            <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
-          </svg>
-          Delete permanently
-        </button>
-      )}
+      <button
+        className="treemap-ctx-item treemap-ctx-danger"
+        onClick={() => {
+          if (confirmDelete && !confirm(`Permanently delete ${file.name}?\n\nThis cannot be undone.`)) return;
+          void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete");
+        }}
+      >
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+          <path d="M3.5 3.5L10.5 10.5M10.5 3.5L3.5 10.5" />
+        </svg>
+        Delete permanently
+      </button>
     </div>
   );
 }

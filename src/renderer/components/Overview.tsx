@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
-import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
+import { useConfirmPermanentDelete, usePathActions } from "../lib/hooks";
 import {
   buildTreemapComposition,
   colorForExtension,
@@ -98,7 +98,7 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
-  const safeDeleteOnly = useSafeDeleteOnly();
+  const confirmDelete = useConfirmPermanentDelete();
 
   // Load the dense file list from the persisted full-file index whenever a
   // completed scan is available. Falls back to the in-memory top-N if the
@@ -335,14 +335,17 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
                         item={item}
                         rank={index + 1}
                         isBusy={busy.has(item.file.path)}
-                        safeDeleteOnly={safeDeleteOnly}
                         onReveal={() => void runAction(item.file.path, () => nativeApi.revealPath(item.file.path))}
                         onOpen={() => void runAction(item.file.path, () => nativeApi.openPath(item.file.path))}
                         onTrash={() => void runAction(item.file.path, () => nativeApi.trashPath(item.file.path))}
                         onDelete={() => {
-                          if (confirm(`Permanently delete ${item.file.name}?\n\nThis cannot be undone.`)) {
-                            void runAction(item.file.path, () => nativeApi.permanentlyDeletePath(item.file.path));
+                          // Per-row delete: gate the confirm dialog on the
+                          // user setting. Bulk paths in other views always
+                          // confirm regardless. See useConfirmPermanentDelete.
+                          if (confirmDelete && !confirm(`Permanently delete ${item.file.name}?\n\nThis cannot be undone.`)) {
+                            return;
                           }
+                          void runAction(item.file.path, () => nativeApi.permanentlyDeletePath(item.file.path));
                         }}
                         onMove={() => void handleEasyMove(item.file.path)}
                       />
@@ -559,11 +562,10 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   );
 }
 
-function FeaturedFileCard({ item, rank, isBusy, safeDeleteOnly, onReveal, onOpen, onTrash, onDelete, onMove }: {
+function FeaturedFileCard({ item, rank, isBusy, onReveal, onOpen, onTrash, onDelete, onMove }: {
   item: TreemapFeaturedItem;
   rank: number;
   isBusy: boolean;
-  safeDeleteOnly: boolean;
   onReveal: () => void;
   onOpen: () => void;
   onTrash: () => void;
@@ -600,7 +602,7 @@ function FeaturedFileCard({ item, rank, isBusy, safeDeleteOnly, onReveal, onOpen
         <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
         <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
         <button className="action-btn warn" disabled={isBusy} onClick={onTrash}>Trash</button>
-        {!safeDeleteOnly && <button className="action-btn danger" disabled={isBusy} onClick={onDelete}>Del</button>}
+        <button className="action-btn danger" disabled={isBusy} onClick={onDelete} title="Permanently delete (skips trash)">Del</button>
         <button className="action-btn" disabled={isBusy} onClick={onMove}>Move</button>
       </div>
     </div>

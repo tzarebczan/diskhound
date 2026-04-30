@@ -7,10 +7,24 @@ import { normalizeAppSettings, defaultSettings, type AppSettings } from "./contr
 
 const SETTINGS_FILE_NAME = "settings.json";
 
+export type SettingsListener = (settings: AppSettings) => void;
+
 export interface SettingsStore {
   get: () => AppSettings;
   set: (next: AppSettings) => Promise<void>;
   update: (transform: (current: AppSettings) => AppSettings) => Promise<AppSettings>;
+  /**
+   * Subscribe to post-persist change notifications. Fires after
+   * every successful `set` / `update`, with the normalized
+   * settings as they're now stored. main.ts wires this to a
+   * `BrowserWindow.webContents.send` broadcast so all renderer
+   * windows (main app + system widget) get push notifications
+   * instead of polling. Returns an unsubscribe handle.
+   *
+   * Listener exceptions are swallowed so one bad subscriber
+   * can't take the others (or the calling write path) down.
+   */
+  subscribe: (listener: SettingsListener) => () => void;
 }
 
 export async function createSettingsStore(): Promise<SettingsStore> {
@@ -32,16 +46,35 @@ export async function createSettingsStore(): Promise<SettingsStore> {
     await FS.writeFile(settingsPath, JSON.stringify(settings, null, 2), "utf8");
   };
 
+  const listeners = new Set<SettingsListener>();
+  const notify = (): void => {
+    for (const listener of listeners) {
+      try {
+        listener(current);
+      } catch {
+        // Best effort — keep other subscribers alive.
+      }
+    }
+  };
+
   return {
     get: () => current,
     set: async (next) => {
       current = normalizeAppSettings(next);
       await persist(current);
+      notify();
     },
     update: async (transform) => {
       current = normalizeAppSettings(transform(current));
       await persist(current);
+      notify();
       return current;
+    },
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
   };
 }

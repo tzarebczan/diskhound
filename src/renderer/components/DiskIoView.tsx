@@ -21,7 +21,12 @@ export function DiskIoView() {
 
   const refresh = useCallback(async () => {
     const snap = await nativeApi.getDiskIoSnapshot();
-    setSnapshot(snap);
+    // Guard against null: nativeApi's lazy proxy resolves null
+    // when the preload bridge isn't ready (Vite HMR window, first
+    // paint before contextBridge completes). Setting state to null
+    // would clobber a perfectly good cached snapshot and blank the
+    // tab. Keep the previous state until a real sample arrives.
+    if (snap) setSnapshot(snap);
     setLoading(false);
   }, []);
 
@@ -34,8 +39,10 @@ export function DiskIoView() {
         setLoading(false);
       }
       const fresh = await nativeApi.getDiskIoSnapshot();
-      if (!cancelled) {
+      if (!cancelled && fresh) {
         setSnapshot(fresh);
+      }
+      if (!cancelled) {
         setLoading(false);
       }
     })();

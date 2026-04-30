@@ -7,7 +7,7 @@ import type {
   ScanSnapshot,
 } from "../../shared/contracts";
 import { formatBytes, formatElapsed, humanAge } from "../lib/format";
-import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
+import { useConfirmPermanentDelete, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -38,7 +38,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const { busy, runAction, handleEasyMove } = usePathActions();
   const [sortMode, setSortMode] = useState<SortMode>("wasted");
-  const safeDeleteOnly = useSafeDeleteOnly();
+  const confirmDelete = useConfirmPermanentDelete();
   // Optional narrower scope — lets the user scan a subfolder of the
   // current disk snapshot rather than the whole root. Null = use
   // snapshot.rootPath as-is (the typical case).
@@ -434,7 +434,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             group={group}
             isExpanded={expanded.has(group.hash)}
             busy={busy}
-            safeDeleteOnly={safeDeleteOnly}
+            confirmDelete={confirmDelete}
             selectedPaths={selectedPaths}
             onToggle={() => toggleExpand(group.hash)}
             onKeepNewest={() => void keepOne(group, "newest")}
@@ -489,11 +489,11 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
 
 // ── Group card ─────────────────────────────────────────────
 
-function GroupCard({ group, isExpanded, busy, safeDeleteOnly, selectedPaths, onToggle, onKeepNewest, onKeepOldest, onReveal, onOpen, onTrash, onDelete, onMove, onToggleFileSelected, onToggleGroupSelected }: {
+function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onToggle, onKeepNewest, onKeepOldest, onReveal, onOpen, onTrash, onDelete, onMove, onToggleFileSelected, onToggleGroupSelected }: {
   group: DuplicateGroup;
   isExpanded: boolean;
   busy: Set<string>;
-  safeDeleteOnly: boolean;
+  confirmDelete: boolean;
   selectedPaths: Set<string>;
   onToggle: () => void;
   onKeepNewest: () => void;
@@ -608,11 +608,17 @@ function GroupCard({ group, isExpanded, busy, safeDeleteOnly, selectedPaths, onT
                     <button className="action-btn" disabled={isBusy} onClick={() => onReveal(file.path)}>Reveal</button>
                     <button className="action-btn" disabled={isBusy} onClick={() => onOpen(file.path)}>Open</button>
                     <button className="action-btn warn" disabled={isBusy} onClick={() => onTrash(file.path)}>Trash</button>
-                    {!safeDeleteOnly && (
-                      <button className="action-btn danger" disabled={isBusy} onClick={() => {
-                        if (confirm(`Permanently delete this copy?\n${file.path}`)) onDelete(file.path);
-                      }}>Del</button>
-                    )}
+                    <button
+                      className="action-btn danger"
+                      disabled={isBusy}
+                      title="Permanently delete this copy (skips trash)"
+                      onClick={() => {
+                        if (confirmDelete && !confirm(`Permanently delete this copy?\n${file.path}`)) return;
+                        onDelete(file.path);
+                      }}
+                    >
+                      Del
+                    </button>
                     <button className="action-btn" disabled={isBusy} onClick={() => onMove(file.path)}>Move</button>
                   </div>
                 </div>

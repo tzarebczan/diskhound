@@ -162,19 +162,29 @@ export function usePathActions() {
   } as const;
 }
 
-/** Load the safeDeleteToTrash setting once on mount. */
-export function useSafeDeleteOnly(): boolean {
-  const [safe, setSafe] = useState(true);
+/**
+ * Reactive read of the `confirmPermanentDelete` cleanup setting.
+ * FileList uses this to decide whether the per-row "Del" button
+ * pops a confirm dialog or fires immediately. Bulk delete always
+ * confirms regardless of this value (multi-target actions are a
+ * different scale of regret).
+ *
+ * Defaults to `true` until the first read returns — safer if the
+ * preload bridge dies mid-session and we can't read the real
+ * setting.
+ */
+export function useConfirmPermanentDelete(): boolean {
+  const [confirmDelete, setConfirmDelete] = useState(true);
 
   useEffect(() => {
     void nativeApi.getSettings().then((s) => {
-      if (s) setSafe(s.cleanup.safeDeleteToTrash);
+      if (s) setConfirmDelete(s.cleanup.confirmPermanentDelete);
     });
 
     const handleSettings = (event: Event) => {
       const detail = (event as CustomEvent<AppSettings>).detail;
       if (detail) {
-        setSafe(detail.cleanup.safeDeleteToTrash);
+        setConfirmDelete(detail.cleanup.confirmPermanentDelete);
       }
     };
 
@@ -184,5 +194,5 @@ export function useSafeDeleteOnly(): boolean {
     };
   }, []);
 
-  return safe;
+  return confirmDelete;
 }

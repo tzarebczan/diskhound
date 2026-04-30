@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
-import { usePathActions } from "../lib/hooks";
+import { useConfirmPermanentDelete, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -71,6 +71,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
   // We use our own local runAction below (so success+dismiss can also hide the row),
   // but pull the other helpers from the shared hook.
   const { busy, markBusy, clearBusy, handleEasyMove, handleEasyMoveBatch } = usePathActions();
+  const confirmDelete = useConfirmPermanentDelete();
   const [sortField, setSortField] = useState<SortField>("size");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [focusIndex, setFocusIndex] = useState(-1);
@@ -374,10 +375,12 @@ export function FileList({ snapshot, initialFilter }: Props) {
                 onMove={() => void handleEasyMove(file.path)}
                 onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { dismiss: true })}
                 onDelete={() => {
-                  const msg =
-                    `Permanently delete ${file.name}?\n\n` +
-                    `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
-                  if (!confirm(msg)) return;
+                  if (confirmDelete) {
+                    const msg =
+                      `Permanently delete ${file.name}?\n\n` +
+                      `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
+                    if (!confirm(msg)) return;
+                  }
                   void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { dismiss: true });
                 }}
               />

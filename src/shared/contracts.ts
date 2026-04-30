@@ -216,7 +216,20 @@ export interface CleanupSettings {
   autoDetectCaches: boolean;
   autoDetectOldDownloads: boolean;
   oldFileThresholdDays: number;
-  safeDeleteToTrash: boolean; // always use trash instead of permanent delete
+  /**
+   * When true (default), the per-row "Del" button on the Largest
+   * Files tab shows a confirmation dialog before permanently
+   * deleting a file. Bulk operations ("Delete selected") always
+   * confirm regardless — multi-target actions deserve friction
+   * even for power users.
+   *
+   * Renamed from `safeDeleteToTrash` in 0.5.11. Pre-0.5.11 the
+   * field hid the Del button entirely when true; 0.5.8 made the
+   * button always visible, leaving the toggle vestigial. The
+   * normalizer migrates the old value transparently — same
+   * boolean polarity (true = safer / show confirm).
+   */
+  confirmPermanentDelete: boolean;
 }
 
 // ── Monitoring / Delta Types ────────────────────────────────
@@ -974,6 +987,18 @@ export interface DiskhoundNativeApi {
    *  Renderer hooks wire this to a progress toast. `phase: "done"` is
    *  always the last event per operation. */
   onEasyMoveProgress: (listener: (progress: EasyMoveProgress) => void) => () => void;
+  /**
+   * Push notification of settings changes from the main process.
+   * Fires on every successful `updateSettings` call (and any other
+   * write path that goes through `settingsStore.set/update`, e.g.
+   * the affinity-rule engine recording `lastAppliedAt`). The
+   * payload is the post-normalize current settings.
+   *
+   * Cross-window: a setting changed in the main app reaches the
+   * widget renderer (and vice versa) within ~1 ms, replacing the
+   * widget's prior 12 s polling loop.
+   */
+  onSettingsUpdated: (listener: (settings: AppSettings) => void) => () => void;
 }
 
 // ── Defaults ────────────────────────────────────────────────
@@ -1014,7 +1039,7 @@ export function defaultSettings(): AppSettings {
       autoDetectCaches: true,
       autoDetectOldDownloads: true,
       oldFileThresholdDays: 90,
-      safeDeleteToTrash: true,
+      confirmPermanentDelete: true,
     },
     recentScans: [],
     affinityRules: [],
@@ -1143,7 +1168,16 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         3650,
         defaults.cleanup.oldFileThresholdDays,
       ),
-      safeDeleteToTrash: Boolean(merged.cleanup.safeDeleteToTrash),
+      // Migration: pre-0.5.11 settings used `safeDeleteToTrash`
+      // with the same boolean polarity. Read the old key as a
+      // fallback when the new one is absent so existing
+      // settings.json files keep their preference. Once the new
+      // value is written, the old key is dropped on next save.
+      confirmPermanentDelete: typeof (merged.cleanup as { confirmPermanentDelete?: unknown }).confirmPermanentDelete === "boolean"
+        ? Boolean((merged.cleanup as { confirmPermanentDelete?: boolean }).confirmPermanentDelete)
+        : typeof (merged.cleanup as { safeDeleteToTrash?: unknown }).safeDeleteToTrash === "boolean"
+          ? Boolean((merged.cleanup as { safeDeleteToTrash?: boolean }).safeDeleteToTrash)
+          : defaults.cleanup.confirmPermanentDelete,
     },
     recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])
       .filter((scan): scan is RecentScan =>

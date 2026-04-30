@@ -255,10 +255,11 @@ export function SettingsView() {
           min={1}
           max={3650}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, oldFileThresholdDays: v } })} />
-        <ToggleRow label="Always use Trash (never permanent delete)"
-          desc="Safer default for cleanup actions"
-          value={settings.cleanup.safeDeleteToTrash}
-          onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, safeDeleteToTrash: v } })} />
+        <ToggleRow
+          label="Confirm before permanent delete"
+          desc="Show a confirmation dialog before the per-row Delete (Del) button on the Largest Files tab removes a file. Bulk operations always confirm regardless."
+          value={settings.cleanup.confirmPermanentDelete}
+          onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, confirmPermanentDelete: v } })} />
       </div>
       </div>
     </div>

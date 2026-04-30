@@ -29,6 +29,7 @@ const EASY_MOVE_PROGRESS_CHANNEL = "diskhound:easy-move-progress";
 const NOTIFICATION_CHANNEL = "diskhound:notification";
 const DUPLICATE_PROGRESS_CHANNEL = "diskhound:duplicate-progress";
 const DUPLICATE_RESULT_CHANNEL = "diskhound:duplicate-result";
+const SETTINGS_UPDATED_CHANNEL = "diskhound:settings-updated";
 
 const api: DiskhoundNativeApi = {
   platform,
@@ -184,6 +185,13 @@ const api: DiskhoundNativeApi = {
     };
     ipcRenderer.on(EASY_MOVE_PROGRESS_CHANNEL, wrapped);
     return () => { ipcRenderer.removeListener(EASY_MOVE_PROGRESS_CHANNEL, wrapped); };
+  },
+  onSettingsUpdated: (listener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, settings: AppSettings) => {
+      listener(settings);
+    };
+    ipcRenderer.on(SETTINGS_UPDATED_CHANNEL, wrapped);
+    return () => { ipcRenderer.removeListener(SETTINGS_UPDATED_CHANNEL, wrapped); };
   },
 };
 
