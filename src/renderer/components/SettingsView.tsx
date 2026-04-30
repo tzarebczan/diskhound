@@ -12,6 +12,7 @@ import { formatBytes } from "../lib/format";
 import { nativeApi } from "../nativeApi";
 import { dispatchSettingsUpdated } from "../lib/uiEvents";
 import { toast } from "./Toasts";
+import { normPath } from "../../shared/pathUtils";
 
 export function SettingsView() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings());
@@ -167,11 +168,11 @@ export function SettingsView() {
           enabled={settings.monitoring.enabled}
           excludedDrives={settings.monitoring.excludedDrives}
           onToggleDrive={(drive) => {
-            const upper = drive.toUpperCase();
+            const key = normPath(drive, nativeApi.platform);
             const current = settings.monitoring.excludedDrives;
-            const isCurrentlyExcluded = current.some((d) => d.toUpperCase() === upper);
+            const isCurrentlyExcluded = current.some((d) => normPath(d, nativeApi.platform) === key);
             const next = isCurrentlyExcluded
-              ? current.filter((d) => d.toUpperCase() !== upper)
+              ? current.filter((d) => normPath(d, nativeApi.platform) !== key)
               : [...current, drive];
             void save({
               ...settings,
@@ -655,7 +656,7 @@ function MonitoringStatusPanel({
   excludedDrives: string[];
   onToggleDrive: (drive: string) => void;
 }) {
-  const excludedSet = new Set(excludedDrives.map((d) => d.toUpperCase()));
+  const excludedSet = new Set(excludedDrives.map((d) => normPath(d, nativeApi.platform)));
   return (
     <div className="monitoring-card">
       <div className="monitoring-card-header">
@@ -691,7 +692,7 @@ function MonitoringStatusPanel({
               </span>
             </div>
             {snapshot.drives.map((drive) => {
-              const isIncluded = !excludedSet.has(drive.drive.toUpperCase());
+              const isIncluded = !excludedSet.has(normPath(drive.drive, nativeApi.platform));
               return (
                 <label
                   key={drive.drive}

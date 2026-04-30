@@ -21,7 +21,9 @@ const GROUPS: ShortcutGroup[] = [
       { keys: ["Ctrl", "5"], desc: "Changes" },
       { keys: ["Ctrl", "6"], desc: "Easy Move" },
       { keys: ["Ctrl", "7"], desc: "Processes" },
-      { keys: ["Ctrl", "8"], desc: "Settings" },
+      { keys: ["Ctrl", "8"], desc: "Disk I/O" },
+      { keys: ["Ctrl", "9"], desc: "Settings" },
+      { keys: ["Ctrl", "Shift", "W"], desc: "System widget" },
     ],
   },
   {

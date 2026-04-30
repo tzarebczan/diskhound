@@ -22,6 +22,7 @@ import { nativeApi } from "./nativeApi";
 import { ChangesView } from "./components/ChangesView";
 import { DiskPicker } from "./components/DiskPicker";
 import { DuplicatesView } from "./components/DuplicatesView";
+import { DiskIoView } from "./components/DiskIoView";
 import { MemoryView } from "./components/MemoryView";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ShortcutHelp } from "./components/ShortcutHelp";
@@ -41,7 +42,8 @@ const TABS: { id: AppView; label: string; key: string }[] = [
   { id: "changes", label: "Changes", key: "5" },
   { id: "easyMove", label: "Easy Move", key: "6" },
   { id: "memory", label: "Processes", key: "7" },
-  { id: "settings", label: "Settings", key: "8" },
+  { id: "diskIo", label: "Disk I/O", key: "8" },
+  { id: "settings", label: "Settings", key: "9" },
 ];
 
 const SEARCHABLE_VIEWS: readonly AppView[] = ["files"];
@@ -575,6 +577,11 @@ export function App() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.ctrlKey || e.metaKey) {
+        if (e.shiftKey && e.key.toLowerCase() === "w") {
+          e.preventDefault();
+          void nativeApi.openSystemWidget();
+          return;
+        }
         const tab = TABS.find((t) => t.key === e.key);
         if (tab) { e.preventDefault(); setView(tab.id); }
         // Ctrl+F to open search
@@ -1015,6 +1022,14 @@ export function App() {
             </svg>
           </button>
 
+          <button className="header-icon-btn" onClick={() => void nativeApi.openSystemWidget()} title="Open system widget (Ctrl+Shift+W)">
+            <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.35">
+              <rect x="1.5" y="2" width="11" height="10" rx="1.6" />
+              <path d="M4 5.2h2.2M4 8.8h2.2M8 5.2h2M8 8.8h2" />
+              <path d="M1.5 4.2h11" opacity="0.7" />
+            </svg>
+          </button>
+
           <button className="header-icon-btn" onClick={() => { setShowPicker(false); setView("settings"); }} title="Settings">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z" />
@@ -1095,7 +1110,7 @@ export function App() {
 
         {/* ── Main View ── */}
         <div className="view-container">
-          {showPicker === null ? <StartupSplash /> : showPicker && view !== "memory" && view !== "settings" ? (
+          {showPicker === null ? <StartupSplash /> : showPicker && view !== "memory" && view !== "diskIo" && view !== "settings" ? (
             <DiskPicker
               onScanDrive={handleScanDrive}
               onScanFolder={handleScanFolder}
@@ -1127,6 +1142,7 @@ export function App() {
               {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
               {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
+              {view === "diskIo" && <ErrorBoundary name="Disk I/O"><DiskIoView /></ErrorBoundary>}
               {view === "settings" && <ErrorBoundary name="Settings"><SettingsView /></ErrorBoundary>}
             </>
           )}

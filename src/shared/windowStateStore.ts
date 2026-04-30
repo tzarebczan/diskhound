@@ -110,10 +110,11 @@ export async function createWindowStateStore(opts: {
   defaults: { width: number; height: number };
   minWidth: number;
   minHeight: number;
+  fileName?: string;
 }): Promise<WindowStateStore> {
   const { defaults, minWidth, minHeight } = opts;
   const dir = app.getPath("userData");
-  const filePath = Path.join(dir, FILE_NAME);
+  const filePath = Path.join(dir, opts.fileName ?? FILE_NAME);
 
   // ── Initial state from disk (or defaults) ─────────────────
   let bounds: WindowBounds = {

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
-import type { ExtensionBucket, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
-import { formatBytes, formatCount, formatElapsed, humanAge } from "../lib/format";
+import type { ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
 import { usePathActions, useSafeDeleteOnly } from "../lib/hooks";
 import {
   buildTreemapComposition,
@@ -96,6 +96,7 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   const [showFolders, setShowFolders] = useState<boolean>(getInitialShowFolders);
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
+  const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const safeDeleteOnly = useSafeDeleteOnly();
 
@@ -118,6 +119,18 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
     });
     return () => { cancelled = true; };
   }, [snapshot.status, snapshot.rootPath, snapshot.largestFiles.length]);
+
+  useEffect(() => {
+    if (snapshot.status !== "done" || !snapshot.rootPath) {
+      setLatestDiff(null);
+      return;
+    }
+    let cancelled = false;
+    void nativeApi.getLatestDiff(snapshot.rootPath).then((diff) => {
+      if (!cancelled) setLatestDiff(diff);
+    });
+    return () => { cancelled = true; };
+  }, [snapshot.status, snapshot.rootPath, snapshot.finishedAt]);
 
   // Preserve the last non-empty largestFiles across lite progress
   // snapshots. The scanner emits lite snapshots (empty top-N arrays)
@@ -214,6 +227,8 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
           </div>
         )}
       </div>
+
+      {latestDiff && <LatestScanSummary diff={latestDiff} />}
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
         <div className="overview-main">
@@ -597,6 +612,50 @@ function Metric({ value, label, accent }: { value: string; label: string; accent
     <div className="metric">
       <span className={`metric-value ${accent ? "accent" : ""}`}>{value}</span>
       <span className="metric-label">{label}</span>
+    </div>
+  );
+}
+
+function LatestScanSummary({ diff }: { diff: ScanDiffResult }) {
+  const grew = diff.totalBytesDelta > 0;
+  const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
+  const title = diff.totalBytesDelta === 0
+    ? "No size change since the previous scan"
+    : grew
+      ? `${bytesLabel} added since the previous scan`
+      : `${bytesLabel} freed since the previous scan`;
+  const topExtensions = diff.extensionDeltas
+    .slice()
+    .sort((a, b) => Math.abs(b.deltaBytes) - Math.abs(a.deltaBytes))
+    .slice(0, 3);
+  const topDirectories = diff.directoryDeltas
+    .slice()
+    .sort((a, b) => Math.abs(b.deltaBytes) - Math.abs(a.deltaBytes))
+    .slice(0, 2);
+
+  return (
+    <div className={`scan-summary-card ${grew ? "grew" : diff.totalBytesDelta < 0 ? "freed" : "flat"}`}>
+      <div className="scan-summary-main">
+        <div className="scan-summary-kicker">Latest scan summary</div>
+        <div className="scan-summary-title">{title}</div>
+        <div className="scan-summary-sub">
+          {diff.totalFilesDelta >= 0 ? "+" : ""}{formatCount(diff.totalFilesDelta)} files -{" "}
+          {diff.totalDirsDelta >= 0 ? "+" : ""}{formatCount(diff.totalDirsDelta)} folders -{" "}
+          compared with {relativeTime(diff.baselineScannedAt)}
+        </div>
+      </div>
+      <div className="scan-summary-chips">
+        {topExtensions.map((ext) => (
+          <span key={ext.extension} className={ext.deltaBytes >= 0 ? "scan-summary-chip grew" : "scan-summary-chip freed"}>
+            {ext.extension} {ext.deltaBytes >= 0 ? "+" : "-"}{formatBytes(Math.abs(ext.deltaBytes))}
+          </span>
+        ))}
+        {topDirectories.map((dir) => (
+          <span key={dir.path} className={dir.deltaBytes >= 0 ? "scan-summary-chip grew" : "scan-summary-chip freed"} title={dir.path}>
+            {basename(dir.path)} {dir.deltaBytes >= 0 ? "+" : "-"}{formatBytes(Math.abs(dir.deltaBytes))}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

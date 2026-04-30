@@ -553,6 +553,31 @@ export interface SystemMemorySnapshot {
 
 export type KillSignal = "soft" | "hard";
 
+export interface DiskIoProcessInfo {
+  pid: number;
+  name: string;
+  readBytesPerSec: number;
+  writeBytesPerSec: number;
+  totalBytesPerSec: number;
+  readBytesTotal: number | null;
+  writeBytesTotal: number | null;
+  exePath?: string | null;
+  commandLine?: string;
+}
+
+export interface DiskIoSnapshot {
+  processes: DiskIoProcessInfo[];
+  totalReadBytesPerSec: number;
+  totalWriteBytesPerSec: number;
+  sampledAt: number;
+  sampleElapsedMs: number;
+  hasRateBaseline: boolean;
+  unavailable?: boolean;
+  platformNote?: string;
+  errorMessage?: string;
+  isStale?: boolean;
+}
+
 // ── GPU ─────────────────────────────────────────────────────
 //
 // GPU stats are collected per-adapter and per-process from Windows
@@ -728,7 +753,7 @@ export interface DuplicateScanOptions {
 
 // ── View Types ──────────────────────────────────────────────
 
-export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "memory" | "settings";
+export type AppView = "overview" | "files" | "folders" | "duplicates" | "easyMove" | "changes" | "memory" | "diskIo" | "settings";
 
 // ── IPC API ─────────────────────────────────────────────────
 
@@ -767,6 +792,12 @@ export interface DiskhoundNativeApi {
   /** Returns the last sampled snapshot without triggering a fresh sample —
    *  use for instant paint on tab switch. Returns null on cold boot. */
   getCachedMemorySnapshot: () => Promise<SystemMemorySnapshot | null>;
+  /** Per-process disk I/O. Windows uses process performance counters;
+   *  Linux derives rates from /proc/<pid>/io. macOS returns an
+   *  unavailable snapshot because accurate per-process disk bytes
+   *  require privileged system tools there. */
+  getDiskIoSnapshot: () => Promise<DiskIoSnapshot>;
+  getCachedDiskIoSnapshot: () => Promise<DiskIoSnapshot | null>;
   /** Sample per-process GPU usage + adapter stats from Windows perf
    *  counters. Takes ~500-1500 ms via a single PowerShell command
    *  (Get-Counter is the bottleneck). Safe to call on non-Windows —
@@ -774,6 +805,14 @@ export interface DiskhoundNativeApi {
   getGpuSnapshot: () => Promise<GpuSnapshot>;
   /** Last sampled GPU snapshot without triggering a refresh. */
   getCachedGpuSnapshot: () => Promise<GpuSnapshot | null>;
+  /** Open the compact always-on-top system widget window. */
+  openSystemWidget: () => Promise<void>;
+  /** Close the compact widget window. */
+  closeSystemWidget: () => Promise<void>;
+  /** Focus the main DiskHound window from the widget. */
+  focusMainWindow: () => Promise<void>;
+  /** Toggle whether the widget floats above normal windows. */
+  setSystemWidgetPinned: (pinned: boolean) => Promise<boolean>;
   killProcess: (pid: number, signal: KillSignal) => Promise<PathActionResult>;
   /** Read the current CPU affinity mask for a process. Bit N set means
    *  the process is allowed to run on logical processor N. cpuCount

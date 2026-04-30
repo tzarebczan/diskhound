@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.5.10 — 2026-04-30
+
+First tagged release containing the **System Widget** + **Disk I/O
+tab**, plus a full UX overhaul of the widget.
+
+### New: System Widget (always-on-top monitor)
+
+A frameless, draggable, always-on-top mini-window showing live
+disk capacity, disk I/O, CPU, GPU (Windows), memory, scan
+status, and per-drive pressure. Triggers:
+
+- Header button beside Settings.
+- Tray menu → "Open System Widget".
+- Keyboard: `Ctrl+Shift+W`.
+
+Behavior: pin/unpin via the widget's toolbar (uses `floating`
+level on macOS plus visible-on-all-workspaces while pinned),
+remembers its own size + position via
+`userData/widget-window-state.json`, runs entirely in a separate
+renderer with its own theme + color-blind awareness.
+
+### New: Disk I/O tab (Ctrl+8)
+
+Per-process and per-volume disk-I/O sampling running on the
+existing 5 s memory cadence. Tabs renumbered:
+`Settings` moves from `Ctrl+8` to `Ctrl+9`.
+
+### System Widget UX overhaul
+
+The widget shipped functional in its first cut but read as a
+different product — conic-gradient rings where everything else
+is flat bars, heavy uppercase section heads, a generic chevron
+pretending to be a pin, no drag affordance, no keyboard
+handling, a permanent dead "GPU n/a" tile on Linux/Mac.
+Rewrote against DiskHound's existing design language (mono
+numerics, 9.5 px uppercase mono kickers, thin gradient bars).
+
+#### Hero metrics
+
+- Replaced the four 78 px conic-gradient `MetricDial` rings with
+  flat `StatTile` cards mirroring `.diskio-metric` from the main
+  app: 9.5 px mono kicker → 18 px tabular-nums value → 4 px
+  gradient progress bar → mono sub-line. Same data, ~38 % less
+  vertical space, fits the rest of DiskHound's vocabulary.
+- Hero grid now adapts: 2-up below 460 px (the default 390 px
+  width), 3-up at ≥460 px on macOS/Linux, 4-up on Windows. Was
+  locked at 2-up regardless of width — at 560 px each tile was
+  270 px wide.
+- **GPU tile hidden on non-Windows** entirely. The previous
+  permanent "n/a — Windows only" tile was 78 px of dead space on
+  every Linux/Mac user's widget forever.
+
+#### Affordances
+
+- **Real thumbtack pin icon** with filled head when active. Was a
+  generic chevron-with-tail that read as "elevate / promote";
+  pinned vs unpinned states were nearly indistinguishable.
+- **2×3 dot grip** on the left of the title bar — the de-facto
+  "this is draggable" affordance on frameless utility windows
+  (iStat, Stats, Loop). Subtle by default, brighter on titlebar
+  hover.
+- **DiskHound brand mark** (the same 16×16 stacked-tile SVG used
+  in the main app header) anchors widget identity.
+- **Live dot** stays green always now. Refreshing is signaled by
+  a 1.2 s opacity pulse instead of switching to amber — amber is
+  DiskHound's warn color and repurposing it for a benign refresh
+  tick was confusing.
+- **Refresh icon spins** while a refresh is in flight.
+- **Focus-visible ring** (2 px amber outline) on every icon
+  button. The previous rule collapsed `:focus-visible` into
+  `:hover` with `outline: none`, leaving keyboard users blind.
+- **Icon-group divider** before the close button so the
+  destructive action is visually fenced off from refresh / pin /
+  open-main.
+- **Section heads** dropped from 11 px sans 700-weight uppercase
+  to 9.5 px mono 600-weight — matches `.diskio-metric-label` and
+  stops fighting the values for hierarchy.
+
+#### Edge cases
+
+- **First-paint skeleton.** Widget now renders a "Sampling
+  system…" pulse until the first sampler returns instead of
+  showing four "—%" tiles + "warming counters".
+- **Sampler error stack.** Multiple simultaneous failures now
+  each get their own row (deduped by source) and can wrap to two
+  lines before truncating. Previously the first error overwrote
+  the rest and the strip was one-lined with a tooltip.
+- **Theme refresh.** Widget re-reads settings every 12 s so a
+  dark/light flip in the main window propagates (the in-window
+  `SETTINGS_UPDATED_EVENT` bus doesn't reach a separate
+  renderer).
+- **Idle scan bar** is now 0 % (was a phantom 8 % stub that made
+  the widget look like something was always running).
+- **Scan state colors** flow through the bar fill — running:
+  amber→orange, done: solid green, error: solid red. Dropped the
+  separate left-border accent.
+
+#### Smaller polish
+
+- `BrowserWindow.title` now matches the in-window text
+  ("DiskHound Monitor" — was "DiskHound Widget"). User-visible
+  in Alt-Tab / WM tooltips.
+- Top-process line for Disk I/O now badges the dominant
+  direction (`r` / `w` / `r+w`).
+- Top-process line for CPU now shows `name 12 %` instead of bare
+  process name.
+- Drives section caps at 4 with a "+ N more drives →" overflow
+  row that opens the main window's DiskPicker. Was 5 with no
+  overflow indicator.
+- Drive pressure thresholds renamed `low/mid/high` →
+  `ok/warn/critical` to match the main app's DriveCard.
+- Disk-I/O baseline placeholder hidden for the first 4 s so a
+  cold-start doesn't surface an unexplained "baseline" string.
+- Sampler issue copy: removes "Windows only", "warming
+  counters", and similar imprecise phrases. Either show real
+  data or show nothing.
+- **Keyboard.** `Esc` closes the widget; `Ctrl/Cmd+R`
+  refreshes (preventDefault'd so it doesn't reload the renderer
+  process).
+
 ## 0.5.9 — 2026-04-28
 
 Release-pipeline + cross-platform polish pass.

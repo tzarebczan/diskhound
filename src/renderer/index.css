@@ -1373,6 +1373,72 @@ button, input, select, textarea { font: inherit; }
   background: var(--bg);
 }
 
+.scan-summary-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  margin: 0 12px 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  flex-shrink: 0;
+}
+.scan-summary-card.grew { border-left-color: var(--amber); }
+.scan-summary-card.freed { border-left-color: var(--green); }
+.scan-summary-card.flat { border-left-color: var(--text-muted); }
+.scan-summary-main { min-width: 0; }
+.scan-summary-kicker {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: 3px;
+}
+.scan-summary-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+}
+.scan-summary-sub {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.scan-summary-chips {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-width: 52vw;
+}
+.scan-summary-chip {
+  max-width: 180px;
+  padding: 3px 7px;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: 1px solid var(--border);
+  background: var(--bg-row);
+}
+.scan-summary-chip.grew {
+  color: var(--amber);
+  border-color: rgba(245,158,11,0.25);
+  background: rgba(245,158,11,0.08);
+}
+.scan-summary-chip.freed {
+  color: var(--green);
+  border-color: rgba(16,185,129,0.22);
+  background: rgba(16,185,129,0.08);
+}
+
 /* Progress variant of the metric tile — only rendered during live
  * scans. Structurally identical to plain .metric so the strip stays
  * visually balanced, but includes an inline progress bar under the
@@ -6602,5 +6668,934 @@ button, input, select, textarea { font: inherit; }
   color: var(--text-tertiary);
   text-align: right;
   font-size: 10px;
+}
+
+/* ---- Disk I/O tab ---- */
+.diskio-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 14px;
+  padding: 16px 18px;
+  overflow: hidden;
+}
+.diskio-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-shrink: 0;
+}
+.diskio-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--text);
+  margin-bottom: 4px;
+}
+.diskio-subtitle {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  line-height: 1.45;
+  max-width: 760px;
+}
+.diskio-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.diskio-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  flex-shrink: 0;
+}
+.diskio-metric {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.diskio-metric-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diskio-metric-value.accent { color: var(--amber); }
+.diskio-metric-label {
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-tertiary);
+}
+.diskio-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+.diskio-toolbar .filter-input {
+  max-width: 320px;
+}
+.diskio-toolbar-meta {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diskio-table {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+.diskio-table-head,
+.diskio-row {
+  display: grid;
+  grid-template-columns: 24px minmax(180px, 1.6fr) 110px 110px minmax(140px, 1fr) 70px;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+}
+.diskio-table-head {
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--border);
+  background: rgba(10, 10, 16, 0.45);
+}
+.diskio-table-head button {
+  border: 0;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-align: left;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.diskio-table-head button:hover { color: var(--text-secondary); }
+.diskio-table-scroll {
+  min-height: 0;
+  overflow-y: auto;
+}
+.diskio-row {
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.diskio-row:hover { background: var(--bg-row-hover); }
+.diskio-row-icon {
+  width: 18px;
+  height: 18px;
+}
+.diskio-row-process { min-width: 0; }
+.diskio-row-name {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diskio-row-path {
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 9.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.diskio-row-rate {
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.diskio-row-rate.read { color: var(--blue); }
+.diskio-row-rate.write { color: var(--amber); }
+.diskio-row-total {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  color: var(--text);
+  font-weight: 600;
+  min-width: 0;
+}
+.diskio-row-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(148,163,184,0.12);
+  overflow: hidden;
+}
+.diskio-row-bar-fill {
+  height: 100%;
+  min-width: 2px;
+  border-radius: 2px;
+  background: var(--amber);
+  transition: width 0.25s ease;
+}
+.diskio-row-bar-read {
+  height: 100%;
+  background: var(--blue);
+}
+.diskio-row-pid {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  color: var(--text-tertiary);
+  text-align: right;
+}
+.diskio-row-reveal {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+}
+.diskio-row:hover .diskio-row-reveal,
+.diskio-row-reveal:focus-visible {
+  opacity: 1;
+}
+.diskio-row-reveal:hover {
+  color: var(--amber);
+  border-color: rgba(245,158,11,0.3);
+}
+.diskio-empty,
+.diskio-empty-inline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 100%;
+  padding: 48px 20px;
+  text-align: center;
+  color: var(--text-muted);
+}
+.diskio-empty-inline {
+  height: auto;
+  min-height: 180px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+.diskio-empty-icon {
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--amber);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+.diskio-empty-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.diskio-empty-sub {
+  max-width: 540px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.diskio-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(245, 158, 11, 0.2);
+  border-top-color: var(--amber);
+  border-radius: 50%;
+  animation: gpu-spin 0.9s linear infinite;
+}
+
+/* ── System Widget ──────────────────────────────────────────
+ *
+ * Always-on-top floating utility window. Aesthetic should match
+ * the rest of DiskHound: dense, mono-typed numerics, tiny
+ * uppercase kickers, thin horizontal progress bars (NOT rings —
+ * the previous conic-gradient hero felt like a different
+ * product). Section heads use the same 9.5 px / 0.08 em
+ * letter-spacing as `.diskio-metric-label` so the widget reads as
+ * a compressed sibling of the main app.
+ *
+ * Backdrop is a subtle warm wash from top-left only (the prior
+ * dual-corner radial-gradient setup was conspicuous because
+ * nothing else in the app glows).
+ */
+
+body.system-widget-body {
+  width: 100vw;
+  height: 100vh;
+  background:
+    radial-gradient(circle at 16% -8%, rgba(245, 158, 11, 0.07), transparent 42%),
+    var(--black);
+}
+:root.light body.system-widget-body {
+  background:
+    radial-gradient(circle at 16% -8%, rgba(245, 158, 11, 0.10), transparent 42%),
+    var(--bg);
+}
+body.system-widget-body #app {
+  width: 100vw;
+  height: 100vh;
+}
+
+.system-widget-shell {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 50px 1fr;
+  overflow: hidden;
+  color: var(--text);
+  background:
+    linear-gradient(180deg, rgba(19, 19, 27, 0.98), rgba(10, 10, 15, 0.98)),
+    var(--bg);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  /* Subtle inset highlight gives the frameless shell a chrome
+   * cue against dark window backgrounds — without it, on Linux
+   * with a dark desktop, the widget edge dissolves. */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+:root.light .system-widget-shell {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(241, 245, 249, 0.98)),
+    var(--bg);
+  border-color: rgba(15, 23, 42, 0.12);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+}
+
+/* ── Titlebar ──────────────────────────────────────────── */
+.system-widget-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px 8px 12px;
+  border-bottom: 1px solid var(--border);
+  -webkit-app-region: drag;
+}
+.system-widget-grip {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+.system-widget-titlebar:hover .system-widget-grip {
+  opacity: 0.9;
+}
+.system-widget-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  flex: 1;
+}
+.system-widget-brand-mark {
+  flex-shrink: 0;
+  color: var(--amber);
+}
+.system-widget-brand-text {
+  display: grid;
+  min-width: 0;
+}
+.system-widget-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  letter-spacing: 0;
+  color: var(--text);
+  line-height: 1.1;
+}
+.system-widget-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  min-width: 0;
+}
+.system-widget-live-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 3px var(--green-glow);
+}
+/* Live-dot semantic: stays GREEN always (the brand's warn color
+ * is amber — repurposing it for a benign refresh tick was
+ * confusing). While refreshing, a soft opacity pulse signals
+ * activity without changing color meaning. */
+.system-widget-live-dot.refreshing {
+  animation: system-widget-live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes system-widget-live-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.45; }
+}
+
+.system-widget-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  -webkit-app-region: no-drag;
+  flex-shrink: 0;
+}
+.system-widget-actions-divider {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  margin: 0 2px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+.system-widget-icon-btn {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.system-widget-icon-btn:hover {
+  color: var(--text);
+  border-color: var(--border-focus);
+  background: var(--bg-row-hover);
+}
+/* Distinct focus ring — the prior rule collapsed :focus-visible
+ * into :hover with `outline: none`, so keyboard users had no
+ * way to see which button they were on. Amber outline matches
+ * the rest of DiskHound's focus convention. */
+.system-widget-icon-btn:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+  color: var(--text);
+}
+.system-widget-icon-btn.active {
+  color: var(--amber);
+  border-color: var(--border-selected);
+  background: var(--amber-glow);
+}
+.system-widget-icon-btn.close:hover {
+  color: var(--red);
+  border-color: rgba(239, 68, 68, 0.25);
+  background: var(--red-glow);
+}
+/* Refresh icon spins while a refresh is in flight. Visible
+ * confirmation that the click registered, useful when sampler
+ * is slow (cold PowerShell ~1.5 s on Get-Counter). */
+.system-widget-icon-btn.refreshing svg {
+  animation: system-widget-spin 0.9s linear infinite;
+}
+@keyframes system-widget-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Content ──────────────────────────────────────────── */
+.system-widget-content {
+  min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  padding: 10px;
+}
+.system-widget-content-loading {
+  display: grid;
+  place-items: center;
+}
+
+/* ── Hero stat tiles ──────────────────────────────────── */
+.system-widget-tiles {
+  display: grid;
+  /* Default: 2-up. Wider widths flip to 3-up (no GPU on
+   * non-Win) or 4-up (Win) — see the >=460 px media query. */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.system-widget-stat {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+}
+:root.light .system-widget-stat {
+  background: rgba(255, 255, 255, 0.82);
+}
+.system-widget-stat.dimmed { opacity: 0.55; }
+.system-widget-stat-kicker {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.system-widget-stat-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  /* Tabular figures so a switch from 99% to 100% doesn't
+   * shift the layout half a pixel — Cascadia Mono handles
+   * this even without `tnum`, but be explicit. */
+  font-variant-numeric: tabular-nums;
+}
+.system-widget-stat-track {
+  height: 4px;
+  margin-top: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+:root.light .system-widget-stat-track {
+  background: rgba(15, 23, 42, 0.08);
+}
+.system-widget-stat-fill {
+  height: 100%;
+  border-radius: inherit;
+  /* Light easing on width change — the stat samples on a
+   * 4 s cadence so a hard jump every refresh felt jittery. */
+  transition: width 0.25s ease;
+}
+.system-widget-stat.amber .system-widget-stat-fill { background: linear-gradient(90deg, var(--amber), var(--orange)); }
+.system-widget-stat.blue  .system-widget-stat-fill { background: linear-gradient(90deg, var(--blue),  var(--teal)); }
+.system-widget-stat.green .system-widget-stat-fill { background: linear-gradient(90deg, var(--green), var(--teal)); }
+.system-widget-stat.teal  .system-widget-stat-fill { background: linear-gradient(90deg, var(--teal),  var(--blue)); }
+.system-widget-stat-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── Sections (I/O, Scan, Drives) ─────────────────────── */
+.system-widget-section {
+  padding: 11px 12px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
+}
+:root.light .system-widget-section {
+  background: rgba(255, 255, 255, 0.82);
+}
+.system-widget-section-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 9px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.system-widget-section-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Disk I/O bars ────────────────────────────────────── */
+.system-widget-io-bars {
+  display: grid;
+  gap: 6px;
+}
+.system-widget-flow-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) 70px;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+.system-widget-flow-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-weight: 600;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.system-widget-flow-track,
+.system-widget-drive-track,
+.system-widget-scan-track {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.07);
+}
+:root.light .system-widget-flow-track,
+:root.light .system-widget-drive-track,
+:root.light .system-widget-scan-track {
+  background: rgba(15, 23, 42, 0.08);
+}
+.system-widget-flow-fill,
+.system-widget-drive-fill,
+.system-widget-scan-fill {
+  height: 100%;
+  border-radius: inherit;
+  transition: width 0.2s ease;
+}
+.system-widget-flow-fill.blue  { background: linear-gradient(90deg, var(--blue),  var(--teal)); }
+.system-widget-flow-fill.amber { background: linear-gradient(90deg, var(--amber), var(--orange)); }
+
+.system-widget-process-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+}
+.system-widget-process-line.muted { color: var(--text-tertiary); }
+.system-widget-process-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Direction prefix (r / w / r+w) — tiny mono badge so the
+ * eye picks it up without confusing it for part of the
+ * process name. */
+.system-widget-process-line em {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  font-style: normal;
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+}
+
+/* ── Scan section ─────────────────────────────────────── */
+/* Status now expressed entirely via the bar fill color — no
+ * left-border accent (was fighting the bar for the same
+ * "what state is this in?" signal). */
+.system-widget-scan-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+.system-widget-scan-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 7px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.system-widget-scan-track {
+  margin-top: 9px;
+}
+/* Scan-fill color tracks the status. Idle = invisible (no
+ * phantom 8 % stub like the previous version). */
+.system-widget-scan-fill {
+  background: linear-gradient(90deg, var(--amber), var(--green));
+}
+.system-widget-scan.running .system-widget-scan-fill {
+  background: linear-gradient(90deg, var(--amber), var(--orange));
+}
+.system-widget-scan.done    .system-widget-scan-fill { background: var(--green); }
+.system-widget-scan.error   .system-widget-scan-fill { background: var(--red); }
+
+/* ── Drives ───────────────────────────────────────────── */
+.system-widget-drive-list {
+  display: grid;
+  gap: 9px;
+}
+.system-widget-drive-row {
+  display: grid;
+  gap: 5px;
+}
+.system-widget-drive-label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.system-widget-drive-label span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Pressure thresholds match the main app's DiskPicker
+ * (>90 critical, >75 warn, else ok) so the same drive reads
+ * the same in both surfaces. Renamed from low/mid/high. */
+.system-widget-drive-fill.ok       { background: linear-gradient(90deg, var(--green), var(--teal)); }
+.system-widget-drive-fill.warn     { background: linear-gradient(90deg, var(--amber), var(--orange)); }
+.system-widget-drive-fill.critical { background: linear-gradient(90deg, var(--orange), var(--red)); }
+.system-widget-drive-more {
+  width: 100%;
+  margin-top: 2px;
+  padding: 7px 8px;
+  text-align: left;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md);
+  background: transparent;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.system-widget-drive-more:hover {
+  color: var(--text);
+  border-color: var(--border-focus);
+  background: var(--bg-row-hover);
+}
+.system-widget-drive-more:focus-visible {
+  outline: 2px solid var(--amber);
+  outline-offset: 1px;
+}
+
+.system-widget-empty {
+  display: grid;
+  place-items: center;
+  min-height: 48px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+/* ── Sampler error stack ──────────────────────────────── */
+.system-widget-warnings {
+  display: grid;
+  gap: 6px;
+}
+.system-widget-warning {
+  padding: 7px 9px;
+  border: 1px solid rgba(245, 158, 11, 0.22);
+  border-radius: var(--radius-md);
+  color: var(--amber);
+  background: var(--amber-glow);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.4;
+  /* Allow up to 2 lines before truncating — long sampler
+   * messages (e.g. "Get-Counter timed out after 5 s reading
+   * \GPU Engine(*)\Utilization Percentage") are useless
+   * when one-lined to "Get-Counter timed out after 5 s read…" */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+.system-widget-warning strong {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-right: 4px;
+}
+
+/* ── Skeleton (first-paint state) ─────────────────────── */
+.system-widget-skeleton {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  padding: 28px 16px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+}
+.system-widget-skeleton-pulse {
+  width: 110px;
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.05) 0%,
+    rgba(245, 158, 11, 0.55) 50%,
+    rgba(255, 255, 255, 0.05) 100%
+  );
+  background-size: 200% 100%;
+  animation: system-widget-skeleton-shift 1.4s ease-in-out infinite;
+}
+:root.light .system-widget-skeleton-pulse {
+  background: linear-gradient(
+    90deg,
+    rgba(15, 23, 42, 0.05) 0%,
+    rgba(217, 119, 6, 0.55) 50%,
+    rgba(15, 23, 42, 0.05) 100%
+  );
+  background-size: 200% 100%;
+}
+@keyframes system-widget-skeleton-shift {
+  0%   { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
+}
+
+/* ── Responsive ────────────────────────────────────────
+ *
+ * The widget can be resized between 330–560 px wide and 500–900
+ * px tall (see main.ts createSystemWidgetWindow). Three tiers:
+ *
+ *   default  (< 460 px):  2-up tile grid, narrow flow rows.
+ *   ≥ 460 px:             3-up (non-Win) or 4-up (Win) tile grid.
+ *   ≤ 600 px tall:        compact paddings throughout so users
+ *                         can shrink the widget to a sliver and
+ *                         still see all four sections.
+ *   ≤ 360 px:             hide subtitle, narrow icon buttons.
+ */
+@media (min-width: 460px) {
+  .system-widget-tiles.tiles-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .system-widget-tiles.tiles-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+}
+
+@media (max-height: 600px) {
+  .system-widget-shell {
+    grid-template-rows: 44px 1fr;
+  }
+  .system-widget-titlebar {
+    padding: 6px 8px 6px 10px;
+  }
+  .system-widget-content {
+    gap: 7px;
+    padding: 8px;
+  }
+  .system-widget-stat {
+    padding: 7px 9px 8px;
+  }
+  .system-widget-stat-value {
+    font-size: 16px;
+  }
+  .system-widget-section {
+    padding: 9px 10px 10px;
+  }
+  .system-widget-section-head {
+    margin-bottom: 7px;
+  }
+  .system-widget-scan-stats {
+    margin-top: 5px;
+  }
+}
+
+@media (max-width: 360px) {
+  .system-widget-subtitle {
+    display: none;
+  }
+  .system-widget-actions {
+    gap: 3px;
+  }
+  .system-widget-actions-divider {
+    display: none;
+  }
+  .system-widget-icon-btn {
+    width: 24px;
+    height: 24px;
+  }
+  .system-widget-flow-row {
+    grid-template-columns: 32px minmax(0, 1fr) 60px;
+    gap: 6px;
+  }
+}
+
+@media (max-width: 960px) {
+  .scan-summary-card {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .scan-summary-chips {
+    justify-content: flex-start;
+    max-width: none;
+  }
+  .diskio-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .diskio-table-head,
+  .diskio-row {
+    grid-template-columns: 24px minmax(160px, 1fr) 90px 90px minmax(120px, 0.8fr) 62px;
+  }
+  .diskio-subtitle {
+    max-width: 560px;
+  }
+}
+
+@media (max-width: 780px) {
+  .diskio-header,
+  .diskio-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .diskio-actions {
+    justify-content: flex-start;
+  }
+  .diskio-toolbar .filter-input {
+    max-width: none;
+  }
+  .diskio-table {
+    overflow-x: auto;
+  }
+  .diskio-table-head,
+  .diskio-row {
+    min-width: 720px;
+  }
 }
 

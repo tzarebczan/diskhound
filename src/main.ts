@@ -25,6 +25,7 @@ import {
   type AffinityRule,
   type AppSettings,
   type DirectoryHotspot,
+  type DiskIoSnapshot,
   type FullDiffStatus,
   type FullDiffResult,
   type PathActionResult,
@@ -145,6 +146,7 @@ type ActiveScanSession = (WorkerScanSession | NativeScannerSession) & {
 };
 
 let mainWindow: BrowserWindow | null = null;
+let widgetWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 /**
  * Per-root scan sessions. Keyed by normPath(rootPath) so a "C:\" key and a
@@ -163,6 +165,7 @@ const activeDuplicateScans: Map<string, DuplicateScanHandle> = new Map();
 let monitoringInterval: ReturnType<typeof setInterval> | null = null;
 let settingsStore: SettingsStore | null = null;
 let windowStateStore: WindowStateStore | null = null;
+let widgetWindowStateStore: WindowStateStore | null = null;
 // Track whether the user explicitly quit (vs. close-to-tray)
 let isQuitting = false;
 
@@ -610,6 +613,12 @@ void app.whenReady().then(async () => {
     defaults: { width: 1560, height: 980 },
     minWidth: 960,
     minHeight: 640,
+  });
+  widgetWindowStateStore = await createWindowStateStore({
+    defaults: { width: 390, height: 650 },
+    minWidth: 330,
+    minHeight: 500,
+    fileName: "widget-window-state.json",
   });
 
   // Initialize disk monitor with persistent baseline storage
@@ -1378,6 +1387,8 @@ void app.whenReady().then(async () => {
   // switch is instant.
   let gpuCache: import("./shared/contracts").GpuSnapshot | null = null;
   let gpuSamplePromise: Promise<import("./shared/contracts").GpuSnapshot> | null = null;
+  let diskIoCache: DiskIoSnapshot | null = null;
+  let diskIoSamplePromise: Promise<DiskIoSnapshot> | null = null;
   // Throttle affinity-rule enforcement to one pass per 4 s regardless
   // of how often the memory sample refreshes. Affinity reads + writes
   // shell out to PowerShell, which isn't free; 4 s is fast enough to
@@ -1470,6 +1481,25 @@ void app.whenReady().then(async () => {
   // opened/closed without forcing a memory resample, and vice versa.
   // The sampler's PowerShell invocation is expensive (~500-1500 ms on
   // cold start), so deduping concurrent requests matters.
+  const refreshDiskIoSample = async () => {
+    if (diskIoSamplePromise) return diskIoSamplePromise;
+    const { sampleDiskIo } = await import("./shared/diskIoSampler");
+    diskIoSamplePromise = sampleDiskIo()
+      .then((snap) => {
+        diskIoCache = snap;
+        return snap;
+      })
+      .finally(() => {
+        diskIoSamplePromise = null;
+      });
+    return diskIoSamplePromise;
+  };
+  ipcMain.handle("diskhound:get-disk-io-snapshot", () => refreshDiskIoSample());
+  ipcMain.handle("diskhound:get-cached-disk-io-snapshot", () => {
+    if (!diskIoCache) return null;
+    return { ...diskIoCache, isStale: true };
+  });
+
   const refreshGpuSample = async () => {
     if (gpuSamplePromise) return gpuSamplePromise;
     const { sampleGpu } = await import("./shared/gpuSampler");
@@ -3091,6 +3121,12 @@ void app.whenReady().then(async () => {
           mainWindow?.focus();
         },
       },
+      {
+        label: "Open System Widget",
+        click: () => {
+          void createSystemWidgetWindow();
+        },
+      },
       { type: "separator" },
       {
         label: "Quit",
@@ -3109,6 +3145,114 @@ void app.whenReady().then(async () => {
   };
 
   // ── Window ────────────────────────────────────────────────
+
+  const loadRenderer = async (window: BrowserWindow, mode: "app" | "widget") => {
+    if (rendererEntryUrl) {
+      const url = mode === "widget"
+        ? `${rendererEntryUrl}${rendererEntryUrl.includes("?") ? "&" : "?"}widget=1`
+        : rendererEntryUrl;
+      await window.loadURL(url);
+    } else if (mode === "widget") {
+      await window.loadFile(rendererEntryFile, { query: { widget: "1" } });
+    } else {
+      await window.loadFile(rendererEntryFile);
+    }
+  };
+
+  const createSystemWidgetWindow = async () => {
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      if (!widgetWindow.isVisible()) widgetWindow.show();
+      widgetWindow.focus();
+      return;
+    }
+
+    const appIconPath = resolveAppIconPath();
+    const appIconImage = createAppIconImage();
+    const linuxIcon: Electron.BrowserWindowConstructorOptions["icon"] | undefined =
+      process.platform === "linux"
+        ? (appIconImage ?? appIconPath ?? undefined)
+        : undefined;
+    const width = 390;
+    const height = 650;
+    const savedBounds = widgetWindowStateStore?.resolveBounds();
+    const parentBounds = mainWindow?.getBounds();
+    const initialBounds = savedBounds
+      ?? (parentBounds
+      ? {
+          x: Math.max(0, parentBounds.x + parentBounds.width - width - 28),
+          y: Math.max(0, parentBounds.y + 64),
+          width,
+          height,
+        }
+      : { width, height });
+
+    widgetWindow = new BrowserWindow({
+      ...initialBounds,
+      minWidth: 330,
+      minHeight: 500,
+      maxWidth: 560,
+      maxHeight: 900,
+      // Match the user-visible title rendered by SystemWidget.tsx
+      // ("DiskHound Monitor"). Was previously "DiskHound Widget" —
+      // showed up in the Alt-Tab list / WM tooltip and didn't match
+      // the in-window text.
+      title: "DiskHound Monitor",
+      backgroundColor: "#0a0a0f",
+      frame: false,
+      resizable: true,
+      movable: true,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      alwaysOnTop: true,
+      skipTaskbar: true,
+      hasShadow: true,
+      ...(linuxIcon ? { icon: linuxIcon } : {}),
+      webPreferences: {
+        preload: Path.join(__dirname, "preload.cjs"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+
+    widgetWindow.setAlwaysOnTop(true, process.platform === "darwin" ? "floating" : "normal");
+    if (process.platform === "darwin") {
+      widgetWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+    if (process.platform === "linux" && appIconImage) {
+      try { widgetWindow.setIcon(appIconImage); } catch { /* best effort */ }
+    }
+
+    widgetWindowStateStore?.track(widgetWindow);
+
+    await loadRenderer(widgetWindow, "widget");
+
+    widgetWindow.on("closed", () => {
+      widgetWindow = null;
+    });
+  };
+
+  ipcMain.handle("diskhound:open-system-widget", async () => {
+    await createSystemWidgetWindow();
+  });
+  ipcMain.handle("diskhound:close-system-widget", async () => {
+    widgetWindow?.close();
+  });
+  ipcMain.handle("diskhound:focus-main-window", async () => {
+    if (!mainWindow) return;
+    if (!mainWindow.isVisible()) mainWindow.show();
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  });
+  ipcMain.handle("diskhound:set-system-widget-pinned", (_event, pinned: boolean) => {
+    if (!widgetWindow || widgetWindow.isDestroyed()) return false;
+    widgetWindow.setAlwaysOnTop(Boolean(pinned), process.platform === "darwin" ? "floating" : "normal");
+    if (process.platform === "darwin") {
+      widgetWindow.setVisibleOnAllWorkspaces(Boolean(pinned), { visibleOnFullScreen: Boolean(pinned) });
+    }
+    return widgetWindow.isAlwaysOnTop();
+  });
 
   const createWindow = async () => {
     const appIconPath = resolveAppIconPath();
@@ -3188,11 +3332,7 @@ void app.whenReady().then(async () => {
     // a slow drag doesn't generate a write per frame.
     windowStateStore?.track(mainWindow);
 
-    if (rendererEntryUrl) {
-      await mainWindow.loadURL(rendererEntryUrl);
-    } else {
-      await mainWindow.loadFile(rendererEntryFile);
-    }
+    await loadRenderer(mainWindow, "app");
 
     if (isDevelopment) {
       mainWindow.webContents.openDevTools({ mode: "detach" });
@@ -3421,6 +3561,10 @@ void app.whenReady().then(async () => {
       tray.destroy();
       tray = null;
     }
+    if (widgetWindow && !widgetWindow.isDestroyed()) {
+      widgetWindow.destroy();
+      widgetWindow = null;
+    }
     treemapCache.clear();
     // Flush pending window-state debounce so the final geometry
     // (e.g. user dragged the window then quit within 400 ms) is
@@ -3431,6 +3575,7 @@ void app.whenReady().then(async () => {
     // panic would produce. The window's own close listener also
     // calls persistNow as a belt-and-suspenders.
     void windowStateStore?.flush();
+    void widgetWindowStateStore?.flush();
   });
 }).catch((err) => {
   writeStartupLog(`whenReady rejected: ${err?.stack ?? err?.message ?? String(err)}`);

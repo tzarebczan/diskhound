@@ -76,8 +76,14 @@ const api: DiskhoundNativeApi = {
   unregisterScheduledTask: () => ipcRenderer.invoke("diskhound:unregister-scheduled-task"),
   runScheduledTask: () => ipcRenderer.invoke("diskhound:run-scheduled-task"),
   getCachedMemorySnapshot: () => ipcRenderer.invoke("diskhound:get-cached-memory-snapshot"),
+  getDiskIoSnapshot: () => ipcRenderer.invoke("diskhound:get-disk-io-snapshot"),
+  getCachedDiskIoSnapshot: () => ipcRenderer.invoke("diskhound:get-cached-disk-io-snapshot"),
   getGpuSnapshot: () => ipcRenderer.invoke("diskhound:get-gpu-snapshot"),
   getCachedGpuSnapshot: () => ipcRenderer.invoke("diskhound:get-cached-gpu-snapshot"),
+  openSystemWidget: () => ipcRenderer.invoke("diskhound:open-system-widget"),
+  closeSystemWidget: () => ipcRenderer.invoke("diskhound:close-system-widget"),
+  focusMainWindow: () => ipcRenderer.invoke("diskhound:focus-main-window"),
+  setSystemWidgetPinned: (pinned) => ipcRenderer.invoke("diskhound:set-system-widget-pinned", pinned),
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis
