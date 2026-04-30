@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.12 — 2026-04-30
+
+Release pipeline: macOS goes universal, drops macos-13 dependency.
+
+### Single universal Mac build
+
+The 0.5.9 release matrix split macOS into separate macos-13 (x64)
+and macos-14 (arm64) jobs to make sure each architecture got a
+natively-built Rust scanner. Worked, but macos-13 free runners on
+GitHub Actions are increasingly scarce — the v0.5.11 release run
+sat queued for 22 minutes waiting on a macos-13 host before being
+cancelled.
+
+The 0.5.12 setup:
+
+- Single `macos-14` runner builds **both** Rust targets
+  (`aarch64-apple-darwin` + `x86_64-apple-darwin`) and `lipo`s
+  them into a fat Mach-O binary. Cross-compiling x86_64 from
+  arm64 hardware works out of the box — Apple's toolchain
+  handles the cross-arch link with no extra setup.
+- `electron-builder.yml` mac arch is now `universal`. Electron's
+  `@electron/universal` package merges the per-arch `.app`
+  bundles produced by electron-builder into a single fat `.app`,
+  packaged into one `.dmg`.
+- Output: `DiskHound-universal.dmg` — runs natively on both
+  Apple Silicon and Intel Macs from a single download.
+
+Tradeoff: the universal `.dmg` is ~30 % larger than a single-arch
+build because it contains both architecture slices. For a
+~200 MB Electron app that's ~60 MB extra — noise on modern
+broadband, dramatically simpler UX (no "which Mac am I on?"
+decision at download time).
+
+README updated: replaced the two separate `DiskHound-x64.dmg` /
+`DiskHound-arm64.dmg` links with a single `DiskHound-universal.dmg`.
+
+This is the same approach Discord, Slack, Cursor, and most modern
+Electron apps use today.
+
 ## 0.5.11 — 2026-04-30
 
 Settings push, repurposed cleanup toggle, Disk I/O hardening,

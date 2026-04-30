@@ -22,8 +22,7 @@
 
 <p align="center">
   <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-Setup.exe">Windows</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x64.dmg">macOS (x64)</a> ·
-  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-arm64.dmg">macOS (arm64)</a> ·
+  <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-universal.dmg">macOS (Universal)</a> ·
   <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x86_64.AppImage">Linux — AppImage</a> ·
   <a href="https://github.com/tzarebczan/diskhound/releases/latest/download/DiskHound-x64.tar.gz">Linux — tar.gz</a>
 </p>
@@ -68,7 +67,7 @@ Use the one-click download links at the top of this README, or grab any release 
 | Platform | Artifact |
 |---|---|
 | Windows | `DiskHound-Setup.exe` — NSIS per-user installer with auto-update. |
-| macOS | `DiskHound-x64.dmg` / `DiskHound-arm64.dmg` — choose by Mac CPU. |
+| macOS | `DiskHound-universal.dmg` — single universal .dmg, native on both Apple Silicon and Intel Macs. |
 | Linux | `DiskHound-x86_64.AppImage` (recommended — built-in auto-update) or `DiskHound-x64.tar.gz` (extract-and-run tree). |
 
 ## Screenshots

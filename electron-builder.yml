@@ -62,11 +62,20 @@ nsis:
   runAfterFinish: true
 
 mac:
+  # Single universal .dmg containing native code for both Apple
+  # Silicon and Intel Macs (lipo'd Rust scanner +
+  # @electron/universal-merged Electron framework). One artifact
+  # users pick — no "which Mac am I on?" decision — and one runner
+  # in CI (no macos-13 free-tier queue dependency).
+  #
+  # Size cost: ~30% larger .dmg than a single-arch build, since
+  # both x86_64 and arm64 slices ship in the same file. For a
+  # ~200 MB Electron app that's ~60 MB extra, which is noise for
+  # any modern broadband.
   target:
     - target: dmg
       arch:
-        - x64
-        - arm64
+        - universal
   category: public.app-category.utilities
   artifactName: "${productName}-${arch}.${ext}"
 

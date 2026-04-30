@@ -13,6 +13,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Three runners produce the four shipped artifacts. macOS is a
+        # single universal .dmg containing both Apple Silicon and Intel
+        # native code (lipo'd Rust scanner + electron-builder
+        # `arch: universal`). Eliminates the macos-13 free-runner queue
+        # dependency that was stalling releases — we used to wait
+        # 30+ minutes for a macos-13 host to be assigned. macos-14
+        # cross-builds the x86_64 Rust target locally, which Apple's
+        # toolchain handles with no extra setup.
         include:
           - os: windows-latest
             rust-target: x86_64-pc-windows-msvc
@@ -20,12 +28,15 @@ jobs:
           - os: ubuntu-latest
             rust-target: x86_64-unknown-linux-gnu
             electron-builder-args: --linux --x64
-          - os: macos-13
-            rust-target: x86_64-apple-darwin
-            electron-builder-args: --mac --x64
           - os: macos-14
-            rust-target: aarch64-apple-darwin
-            electron-builder-args: --mac --arm64
+            # Comma-separated targets for dtolnay/rust-toolchain — both
+            # stdlibs get installed up front so the cargo builds below
+            # don't need a separate rustup-target-add step.
+            rust-target: aarch64-apple-darwin,x86_64-apple-darwin
+            # arch is read from electron-builder.yml (mac.target.arch =
+            # universal). --mac alone tells electron-builder to package
+            # the configured mac targets.
+            electron-builder-args: --mac
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -48,7 +59,19 @@ jobs:
         run: bun run sync:version-from-tag ${{ github.ref_name }}
 
       - name: Build native scanner
-        run: cargo build --release --target ${{ matrix.rust-target }} --manifest-path native/diskhound-native-scanner/Cargo.toml
+        shell: bash
+        run: |
+          # macOS does both Rust targets — they get lipo'd into a fat
+          # binary in the next step. Cross-compiling x86_64-apple-darwin
+          # from arm64 hardware works out of the box: rustup has the
+          # target stdlib (installed above) and Apple's `cc`/`ld` handle
+          # the cross-arch link transparently.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            cargo build --release --target aarch64-apple-darwin --manifest-path native/diskhound-native-scanner/Cargo.toml
+            cargo build --release --target x86_64-apple-darwin  --manifest-path native/diskhound-native-scanner/Cargo.toml
+          else
+            cargo build --release --target ${{ matrix.rust-target }} --manifest-path native/diskhound-native-scanner/Cargo.toml
+          fi
 
       - name: Stage native scanner for electron-builder
         shell: bash
@@ -56,6 +79,21 @@ jobs:
           mkdir -p native/diskhound-native-scanner/target/release
           if [ "${{ runner.os }}" = "Windows" ]; then
             cp native/diskhound-native-scanner/target/${{ matrix.rust-target }}/release/diskhound-native-scanner.exe native/diskhound-native-scanner/target/release/diskhound-native-scanner.exe
+          elif [ "${{ runner.os }}" = "macOS" ]; then
+            # lipo the per-arch binaries into a fat (universal) Mach-O.
+            # Both x86_64 and arm64 slices live in one file; the kernel
+            # picks the right slice at exec time, so the same binary
+            # runs natively on Apple Silicon AND Intel Macs without
+            # Rosetta. electron-builder's universal merge step copies
+            # this single file into the universal .app — see also the
+            # `mac.target.arch: universal` setting in electron-builder.yml.
+            lipo -create -output native/diskhound-native-scanner/target/release/diskhound-native-scanner \
+              native/diskhound-native-scanner/target/aarch64-apple-darwin/release/diskhound-native-scanner \
+              native/diskhound-native-scanner/target/x86_64-apple-darwin/release/diskhound-native-scanner
+            # Sanity: should print "Architectures in the fat file:
+            # aarch64 x86_64". Catches a regression where a future
+            # rustup change drops one of the targets silently.
+            lipo -info native/diskhound-native-scanner/target/release/diskhound-native-scanner
           else
             cp native/diskhound-native-scanner/target/${{ matrix.rust-target }}/release/diskhound-native-scanner native/diskhound-native-scanner/target/release/diskhound-native-scanner
           fi
