@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
+import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import {
   type AppSettings,
@@ -193,6 +193,32 @@ export function App() {
     } catch { /* no-op */ }
   };
   const isSearchableView = SEARCHABLE_VIEWS.includes(view);
+
+  // ── Drive-pills overflow detection ───────────────────────
+  // The .drive-pills container has a right-edge mask that
+  // fades the last 16 px to transparent — meant to hint
+  // "more drives offscreen, scroll →". Applied unconditionally,
+  // it ate the tail of the LAST visible pill in the
+  // single-drive case (the column auto-sized to content, so
+  // the pill exactly filled the masked area). Fix: track
+  // overflow live with a ResizeObserver and gate the mask
+  // behind a `.overflowing` class only set when scrollWidth >
+  // clientWidth.
+  const drivePillsRef = useRef<HTMLDivElement | null>(null);
+  const [drivePillsOverflowing, setDrivePillsOverflowing] = useState(false);
+  useEffect(() => {
+    const el = drivePillsRef.current;
+    if (!el) return;
+    const recompute = () => {
+      // 1 px tolerance for sub-pixel layout rounding — without it
+      // a pill that JUST fits can flicker the class on/off.
+      setDrivePillsOverflowing(el.scrollWidth > el.clientWidth + 1);
+    };
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [drives.length]);
 
   /**
    * Compute an approximate scan-progress fraction [0, 0.99] for a
@@ -984,7 +1010,10 @@ export function App() {
             )}
           </div>
 
-          <div className="drive-pills">
+          <div
+            ref={drivePillsRef}
+            className={`drive-pills ${drivePillsOverflowing ? "overflowing" : ""}`}
+          >
             {drives.map((d) => {
               // A drive is "scanning" if ANY active-scan root starts with
               // its letter — catches both `C:\` root scans and scans of

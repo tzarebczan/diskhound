@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.5.16 — 2026-05-01
+
+Header: drive-pills mask only fades when content overflows.
+
+The `.drive-pills` container had a permanent `mask-image`
+gradient fading the rightmost 16 px to transparent — meant to
+hint "more drives offscreen, scroll →". Applied unconditionally,
+so on single-drive setups (or any case where the auto-sized
+grid column exactly matched the pill width) the mask ate the
+tail of the only pill on screen. The "657 GB free" rendered as
+"657 GB f…" with the trailing characters dissolving into the
+header's background.
+
+Fix: detect overflow live with a `ResizeObserver` on the pills
+container, toggle a `.overflowing` class when
+`scrollWidth > clientWidth`, and gate the mask behind that
+class. Single drive → no mask, full pill text visible.
+Many-drives-overflowing → mask applies, hint preserved.
+
 ## 0.5.15 — 2026-04-30
 
 Customizable widget layout + sparkline alignment fix.

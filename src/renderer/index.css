@@ -926,9 +926,14 @@ button, input, select, textarea { font: inherit; }
   scrollbar-width: none;
   min-width: 0; /* lets flex shrink this below content-width */
   -webkit-app-region: drag;
-  /* Soft fade on the right edge when content overflows, to hint
-     more-content-offscreen without a visible scrollbar. Uses a
-     mask so it works over any background. */
+}
+/* Right-edge fade — hints "more drives offscreen, scroll →".
+ * Applied only when content is actually overflowing (class
+ * toggled by App.tsx via ResizeObserver). Prior to 0.5.16 this
+ * was unconditional, which on the single-drive case ate the
+ * tail of the only pill — the column auto-sized to content,
+ * so the pill exactly filled the area being masked. */
+.drive-pills.overflowing {
   -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
           mask-image: linear-gradient(90deg, #000 calc(100% - 16px), transparent 100%);
 }
