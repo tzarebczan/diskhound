@@ -88,6 +88,7 @@ const api: DiskhoundNativeApi = {
   focusMainWindow: () => ipcRenderer.invoke("diskhound:focus-main-window"),
   focusMainWithView: (payload) => ipcRenderer.invoke("diskhound:focus-main-with-view", payload),
   setSystemWidgetPinned: (pinned) => ipcRenderer.invoke("diskhound:set-system-widget-pinned", pinned),
+  setSystemWidgetMode: (mode) => ipcRenderer.invoke("diskhound:set-system-widget-mode", mode),
   getExecutableIcon: (path, size) => ipcRenderer.invoke("diskhound:get-executable-icon", path, size),
 
   // Cleanup analysis

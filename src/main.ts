@@ -3219,8 +3219,13 @@ void app.whenReady().then(async () => {
       ...initialBounds,
       minWidth: 330,
       minHeight: 500,
-      maxWidth: 560,
-      maxHeight: 900,
+      // No maxWidth/maxHeight — they used to clamp at 560×900,
+      // which prevented the user from dragging the widget to a
+      // larger size (especially useful when "wide mode" is on
+      // and the widget lives on a separate monitor). Removing
+      // the clamps also fixes the previous "resize-doesn't-
+      // persist" feel: the saved size was being honored, but
+      // anything above 560 was getting clamped on restore.
       // Match the user-visible title rendered by SystemWidget.tsx
       // ("DiskHound Monitor"). Was previously "DiskHound Widget" —
       // showed up in the Alt-Tab list / WM tooltip and didn't match
@@ -3301,6 +3306,32 @@ void app.whenReady().then(async () => {
       widgetWindow.setVisibleOnAllWorkspaces(Boolean(pinned), { visibleOnFullScreen: Boolean(pinned) });
     }
     return widgetWindow.isAlwaysOnTop();
+  });
+  ipcMain.handle("diskhound:set-system-widget-mode", (_event, mode: "compact" | "wide") => {
+    // Wide mode is for users who park the widget on a secondary
+    // monitor — bigger footprint, denser layout. Compact is the
+    // default sliver size. We only resize if the user is going
+    // FROM compact TO wide (or vice versa) with the current
+    // dimensions still matching the previous mode's defaults —
+    // otherwise we'd stomp on a custom size the user has set.
+    // Persistence of the mode itself lives in the renderer's
+    // localStorage; this handler just performs the resize.
+    if (!widgetWindow || widgetWindow.isDestroyed()) return;
+    const COMPACT = { width: 390, height: 650 };
+    const WIDE = { width: 880, height: 720 };
+    const current = widgetWindow.getBounds();
+    const target = mode === "wide" ? WIDE : COMPACT;
+    // Heuristic for "user hasn't customized": within 60 px of
+    // the OTHER mode's defaults. Anything outside that gap is
+    // assumed bespoke and left alone (we still flip the layout
+    // class via the renderer, just don't resize the window).
+    const other = mode === "wide" ? COMPACT : WIDE;
+    const nearOther =
+      Math.abs(current.width - other.width) < 60 &&
+      Math.abs(current.height - other.height) < 60;
+    if (nearOther) {
+      widgetWindow.setSize(target.width, target.height, true /* animate */);
+    }
   });
 
   const createWindow = async () => {

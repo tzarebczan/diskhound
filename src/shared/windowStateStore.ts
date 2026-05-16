@@ -180,14 +180,25 @@ export async function createWindowStateStore(opts: {
 
   return {
     resolveBounds: () => {
+      // Use `normalBounds` (the live, post-track state) rather
+      // than `bounds` (the startup-loaded snapshot). Otherwise
+      // close + reopen within a single app session would restore
+      // the geometry from app launch, not the user's most recent
+      // resize — `track()` updates `normalBounds` on every
+      // resize/move, but `bounds` is only ever assigned during
+      // initial disk load. The widget window hit this hard: user
+      // resized it, closed it, reopened it → reopened at the
+      // pre-resize size, even though the next save would have
+      // captured the new state.
+      const src = normalBounds;
       const out: { x?: number; y?: number; width: number; height: number } = {
-        width: bounds.width,
-        height: bounds.height,
+        width: src.width,
+        height: src.height,
       };
-      if (Number.isFinite(bounds.x) && Number.isFinite(bounds.y)) {
-        if (boundsAreOnSomeDisplay(bounds)) {
-          out.x = bounds.x;
-          out.y = bounds.y;
+      if (Number.isFinite(src.x) && Number.isFinite(src.y)) {
+        if (boundsAreOnSomeDisplay(src)) {
+          out.x = src.x;
+          out.y = src.y;
         }
         // else: unplugged monitor case — drop position, keep size.
       }

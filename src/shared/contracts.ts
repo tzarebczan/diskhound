@@ -1030,6 +1030,18 @@ export interface DiskhoundNativeApi {
    */
   focusMainWithView: (payload: NavigateViewPayload) => Promise<void>;
   /**
+   * Switch the System Widget between its compact and wide
+   * presentations. Wide mode resizes the widget window to a
+   * larger footprint (designed to live on a secondary monitor)
+   * and unlocks a denser layout — uncapped drives list, more
+   * processes in the detail panel, sections in two columns
+   * below the hero tiles. Compact returns to the default
+   * single-column layout. The widget renderer persists its
+   * choice to localStorage; this IPC just handles the window
+   * resize on the main-process side.
+   */
+  setSystemWidgetMode: (mode: "compact" | "wide") => Promise<void>;
+  /**
    * Push notification (main → mainWindow only) carrying a
    * `NavigateViewPayload`. App.tsx subscribes once on mount and
    * applies the view change. The widget never receives its own

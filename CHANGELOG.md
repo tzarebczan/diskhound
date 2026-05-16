@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.5.17 — 2026-05-01
+
+Three fixes for the System Widget.
+
+### Widget remembers size+position on same-session reopen
+
+`windowStateStore.resolveBounds()` was reading from `bounds`,
+which is only populated when the store is created (i.e. at app
+launch). `track()` updates a separate `normalBounds` on every
+resize/move, and persists THAT to disk — but the
+in-memory `bounds` never sees the new state. So within a single
+app session, closing the widget and reopening it restored the
+pre-resize size: the disk had the right value, but
+`resolveBounds()` returned the stale startup snapshot.
+
+Fix: `resolveBounds()` now reads from `normalBounds` (the live,
+post-track value) instead. Same-session reopens now restore the
+user's most recent resize.
+
+Bonus: removed the `maxWidth: 560, maxHeight: 900` clamps on the
+widget BrowserWindow. They were silently capping the restore
+size if the user had previously dragged the widget larger than
+those dimensions — explains the "remembered width feels weird"
+behavior people might have noticed.
+
+### Customize popover closes on click-outside
+
+The 0.5.15 popover was using `pointerdown` with capture-phase
+to detect outside clicks. In Electron's frameless windows, the
+`-webkit-app-region: drag` zones can intercept `pointerdown`
+for OS window-dragging, so the listener never fired and the
+only way to close the menu was clicking the toggle button
+again.
+
+Switched to `mousedown` on the bubble phase, with a one-tick
+`setTimeout` deferment so the click that OPENED the menu
+doesn't immediately get caught by its own listener on the way
+back up. Esc still closes too.
+
+### Wide popout mode
+
+New expand/compact toggle in the title bar (sits next to the
+pin button). Compact (default) is the existing ~390 × 650 layout.
+
+Wide mode (~880 × 720):
+- Sections below the tiles render in a **2-column grid**
+  (DISK I/O / Latest Scan / Drives flow into both columns
+  with `grid-auto-flow: dense` so a tall Drives section
+  tucks alongside the shorter Latest Scan).
+- **Detail panel shows top-10** processes instead of top-5
+  (more room to read).
+- **Drives section is uncapped** — every drive renders
+  directly, no "+ N more drives" footer.
+- Hero tiles get slightly bigger padding + 20 px value font
+  (was 18 px in compact).
+
+Mode persists to `localStorage` (`diskhound:widget-mode`); the
+renderer fires a `setSystemWidgetMode` IPC on change. Main
+process resizes the BrowserWindow to a sensible default for
+the new mode — but only if the current size is within 60 px of
+the OTHER mode's defaults, so a custom size the user has
+dialed in isn't clobbered.
+
+Designed for users who park the widget on a secondary monitor
+and want a denser at-a-glance dashboard.
+
 ## 0.5.16 — 2026-05-01
 
 Header: drive-pills mask only fades when content overflows.

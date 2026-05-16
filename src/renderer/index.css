@@ -7953,6 +7953,62 @@ body.system-widget-body #app {
   }
 }
 
+/* ── Wide mode ────────────────────────────────────────────
+ *
+ * Activated when the user clicks the expand button in the
+ * title bar; sets `.mode-wide` on the shell. Designed for a
+ * dedicated secondary monitor — bigger window (~880 × 720),
+ * 2-column section layout below the tiles, uncapped drives,
+ * top-10 (not top-5) in the detail panel.
+ *
+ * The compact mode (`.mode-compact`, default) leaves the
+ * layout untouched — wide mode is opt-in. We don't gate the
+ * tile grid on mode here; the existing
+ * `.system-widget-tiles.tiles-{3,4}` rules already pick 4-up
+ * at ≥460 px, which fires unconditionally at wide-mode width.
+ */
+.system-widget-shell.mode-wide .system-widget-content {
+  /* 2-column grid for the sections below the tiles. Detail
+   * panel + hero tiles span both columns (the detail relates
+   * to the tile that opened it, and the tiles should keep
+   * full width for the 4-up layout). DISK I/O, Latest Scan,
+   * Drives fill the columns row-by-row in source order.
+   *
+   * grid-auto-flow: dense lets a shorter section tuck into a
+   * gap on the previous row if its sibling is much taller —
+   * useful here because the Drives section grows with the
+   * drive count while the I/O section stays a fixed height. */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-auto-flow: dense;
+  gap: 10px;
+  padding: 12px;
+}
+/* Items that must span the full width: tiles row (so the
+ * 4-up grid still works) + the stale callout + sampler
+ * warnings + the detail panel (which is logically tied to
+ * the tiles row sitting above it). */
+.system-widget-shell.mode-wide .system-widget-stale,
+.system-widget-shell.mode-wide .system-widget-tiles,
+.system-widget-shell.mode-wide .system-widget-detail,
+.system-widget-shell.mode-wide .system-widget-warnings {
+  grid-column: 1 / -1;
+}
+/* Wide-mode tiles get a touch more padding since the window
+ * is wider — keeps the values feeling proportionate to the
+ * surrounding chrome. */
+.system-widget-shell.mode-wide .system-widget-stat {
+  padding: 11px 14px 12px;
+}
+.system-widget-shell.mode-wide .system-widget-stat-value {
+  font-size: 20px;
+}
+/* Detail panel can hold ~10 rows in wide mode without
+ * cramping; bump the row gap slightly. */
+.system-widget-shell.mode-wide .system-widget-detail-list {
+  gap: 6px;
+}
+
 @media (max-height: 600px) {
   .system-widget-shell {
     grid-template-rows: 44px 1fr;

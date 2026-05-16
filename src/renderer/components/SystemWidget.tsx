@@ -40,13 +40,41 @@ const GPU_REFRESH_MS = 7_500;
 const BASELINE_GRACE_MS = 4_000;
 const STALE_THRESHOLD_MS = 30_000;
 const HISTORY_CAP = 20;
-const DETAIL_TOP_N = 5;
+const DETAIL_TOP_N_COMPACT = 5;
+const DETAIL_TOP_N_WIDE = 10;
 
 /** localStorage keys for widget UI state. Keep them
  *  namespaced so the main app's window.localStorage doesn't
  *  collide if anything ever shares a key. */
 const STORAGE_LAYOUT_KEY = "diskhound:widget-layout";
 const STORAGE_DETAIL_KEY = "diskhound:widget-active-detail";
+const STORAGE_MODE_KEY = "diskhound:widget-mode";
+
+/**
+ * Widget presentation mode.
+ *  - compact: default single-column layout, ~390 px wide. Lives
+ *    well alongside the main window on one display.
+ *  - wide: 2-column layout, ~880 px wide. Designed for a
+ *    dedicated secondary monitor — shows the detail panel
+ *    AND the section cards (Disk I/O / Scan / Drives) at the
+ *    same time without scrolling, plus uncapped drive list +
+ *    top-10 (vs top-5) in the detail panel.
+ */
+type WidgetMode = "compact" | "wide";
+
+function loadStoredMode(): WidgetMode {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_MODE_KEY);
+    if (raw === "compact" || raw === "wide") return raw;
+  } catch { /* fall through */ }
+  return "compact";
+}
+
+function saveMode(mode: WidgetMode): void {
+  try {
+    window.localStorage.setItem(STORAGE_MODE_KEY, mode);
+  } catch { /* non-fatal */ }
+}
 
 /**
  * Per-section visibility toggles. Lets the user condense the
@@ -236,6 +264,15 @@ export function SystemWidget() {
   const [layout, setLayout] = useState<WidgetLayout>(loadStoredLayout);
   const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
 
+  // Compact vs wide presentation. Persisted across launches.
+  // Mode changes drive both a renderer-side CSS class (2-col
+  // layout, uncapped drives, top-10 detail in wide) AND a
+  // main-process IPC call that resizes the BrowserWindow to a
+  // sensible default for the new mode (only when the current
+  // size is "near the other mode's default" — so we don't
+  // clobber a custom size the user manually dialed in).
+  const [mode, setMode] = useState<WidgetMode>(loadStoredMode);
+
   const [diskHistory, setDiskHistory] = useState<number[]>([]);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([]);
   const [cpuHistory, setCpuHistory] = useState<number[]>([]);
@@ -284,6 +321,16 @@ export function SystemWidget() {
   useEffect(() => {
     saveDetail(activeDetail);
   }, [activeDetail]);
+  // Mode persistence + main-process sync. The IPC tells main
+  // to resize the BrowserWindow — main only acts if the
+  // current size is near the OTHER mode's defaults so we
+  // don't stomp on a custom size. Run on every mode change,
+  // including the initial mount (so when the widget re-opens
+  // remembering wide mode, the window sizes up).
+  useEffect(() => {
+    saveMode(mode);
+    void nativeApi.setSystemWidgetMode(mode);
+  }, [mode]);
 
   // When the user turns the detail surface OFF in the layout
   // menu, also collapse any currently-open detail. Otherwise
@@ -492,13 +539,15 @@ export function SystemWidget() {
   // ── Detail-panel data ─────────────────────────────────────
   // Computed eagerly so `activeDetail` toggles produce no
   // visible delay. Each accessor returns top-N rows for its
-  // category, sorted by the relevant metric.
+  // category, sorted by the relevant metric. Wide mode shows
+  // 10 rows instead of 5 — there's room.
+  const detailTopN = mode === "wide" ? DETAIL_TOP_N_WIDE : DETAIL_TOP_N_COMPACT;
   const memoryDetail = useMemo<DetailRow[]>(() => {
     if (!memory) return [];
     const top = memory.processes
       .slice()
       .sort((a, b) => b.memoryBytes - a.memoryBytes)
-      .slice(0, DETAIL_TOP_N);
+      .slice(0, detailTopN);
     const max = top[0]?.memoryBytes ?? 1;
     return top.map((p: ProcessInfo) => ({
       key: p.pid,
@@ -506,7 +555,7 @@ export function SystemWidget() {
       value: formatBytes(p.memoryBytes),
       pct: max > 0 ? (p.memoryBytes / max) * 100 : 0,
     }));
-  }, [memory]);
+  }, [memory, detailTopN]);
 
   const cpuDetail = useMemo<DetailRow[]>(() => {
     if (!memory) return [];
@@ -514,7 +563,7 @@ export function SystemWidget() {
       .filter((p) => typeof p.cpuPercent === "number" && (p.cpuPercent ?? 0) > 0)
       .slice()
       .sort((a, b) => (b.cpuPercent ?? 0) - (a.cpuPercent ?? 0))
-      .slice(0, DETAIL_TOP_N);
+      .slice(0, detailTopN);
     const max = top[0]?.cpuPercent ?? 1;
     return top.map((p: ProcessInfo) => ({
       key: p.pid,
@@ -522,14 +571,14 @@ export function SystemWidget() {
       value: pct(p.cpuPercent),
       pct: max > 0 ? ((p.cpuPercent ?? 0) / max) * 100 : 0,
     }));
-  }, [memory]);
+  }, [memory, detailTopN]);
 
   const gpuDetail = useMemo<DetailRow[]>(() => {
     if (!gpu || gpu.unavailable) return [];
     const top = gpu.processes
       .slice()
       .sort((a, b) => b.utilizationPercent - a.utilizationPercent)
-      .slice(0, DETAIL_TOP_N);
+      .slice(0, detailTopN);
     const max = top[0]?.utilizationPercent ?? 1;
     return top.map((p: GpuProcessInfo) => ({
       key: p.pid,
@@ -537,7 +586,7 @@ export function SystemWidget() {
       value: pct(p.utilizationPercent),
       pct: max > 0 ? (p.utilizationPercent / max) * 100 : 0,
     }));
-  }, [gpu]);
+  }, [gpu, detailTopN]);
 
   // ── Stale callout ─────────────────────────────────────────
   const memoryAge = memory ? Math.max(0, Math.round((now - memory.sampledAt) / 1000)) : 0;
@@ -602,7 +651,7 @@ export function SystemWidget() {
   // ── Skeleton state ────────────────────────────────────────
   if (!hasFirstSample) {
     return (
-      <div className="system-widget-shell">
+      <div className={`system-widget-shell mode-${mode}`}>
         <Titlebar
           pinned={pinned}
           onTogglePin={() => void setPinnedMode()}
@@ -611,6 +660,8 @@ export function SystemWidget() {
           layoutMenuOpen={layoutMenuOpen}
           onToggleLayoutMenu={() => setLayoutMenuOpen((v) => !v)}
           onCloseLayoutMenu={() => setLayoutMenuOpen(false)}
+          mode={mode}
+          onToggleMode={() => setMode((m) => (m === "wide" ? "compact" : "wide"))}
         />
         <main className="system-widget-content system-widget-content-loading">
           <div className="system-widget-skeleton">
@@ -623,7 +674,7 @@ export function SystemWidget() {
   }
 
   return (
-    <div className="system-widget-shell">
+    <div className={`system-widget-shell mode-${mode}`}>
       <Titlebar
         pinned={pinned}
         onTogglePin={() => void setPinnedMode()}
@@ -632,6 +683,8 @@ export function SystemWidget() {
         layoutMenuOpen={layoutMenuOpen}
         onToggleLayoutMenu={() => setLayoutMenuOpen((v) => !v)}
         onCloseLayoutMenu={() => setLayoutMenuOpen(false)}
+        mode={mode}
+        onToggleMode={() => setMode((m) => (m === "wide" ? "compact" : "wide"))}
       />
 
       <main className="system-widget-content">
@@ -794,7 +847,11 @@ export function SystemWidget() {
         <section className="system-widget-section">
           <SectionHead label="Drives" value={`${formatBytes(totalDisk.freeBytes)} free`} />
           <div className="system-widget-drive-list">
-            {drives.slice(0, 4).map((drive) => {
+            {/* Wide mode: show every drive (uncapped). Compact:
+              * cap at 4 to keep the widget short, with a static
+              * "+ N more drives" footer pointing at the main
+              * window. */}
+            {(mode === "wide" ? drives : drives.slice(0, 4)).map((drive) => {
               const cls = pressureClass(drive.usedPercent);
               return (
                 <div className="system-widget-drive-row" key={drive.drive}>
@@ -812,11 +869,9 @@ export function SystemWidget() {
               );
             })}
             {drives.length === 0 && <div className="system-widget-empty">Waiting for drive telemetry.</div>}
-            {drives.length > 4 && (
-              // Static count footer — no longer a click-through
-              // (widget is standalone). Users with 5+ drives can
-              // hit the "open main window" titlebar button to
-              // see the full list in the picker.
+            {mode === "compact" && drives.length > 4 && (
+              // Compact-mode footer — wide mode renders every
+              // drive directly so the footer is unnecessary.
               <div className="system-widget-drive-more-static">
                 + {drives.length - 4} more {drives.length - 4 === 1 ? "drive" : "drives"} (open main window for full list)
               </div>
@@ -849,12 +904,16 @@ function Titlebar(props: {
   layoutMenuOpen: boolean;
   onToggleLayoutMenu: () => void;
   onCloseLayoutMenu: () => void;
+  mode: WidgetMode;
+  onToggleMode: () => void;
 }) {
   const {
     pinned, onTogglePin,
     layout, onChangeLayout,
     layoutMenuOpen, onToggleLayoutMenu, onCloseLayoutMenu,
+    mode, onToggleMode,
   } = props;
+  const isWide = mode === "wide";
   return (
     <header className="system-widget-titlebar">
       <DragGrip />
@@ -871,6 +930,35 @@ function Titlebar(props: {
           onClick={onTogglePin}
         >
           <PinIcon active={pinned} />
+        </button>
+        {/* Expand / compact toggle. Arrows point outward in
+          * compact mode ("click to grow") and inward in wide
+          * mode ("click to shrink"). Lives next to the pin
+          * because both are widget-presentation controls. */}
+        <button
+          type="button"
+          className={`system-widget-icon-btn ${isWide ? "active" : ""}`}
+          title={isWide ? "Compact mode" : "Wide mode (more info at a glance)"}
+          aria-pressed={isWide}
+          onClick={onToggleMode}
+        >
+          {isWide ? (
+            // Inward arrows — currently wide, click to shrink
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M6 2v4H2" />
+              <path d="M2.5 2.5L6 6" />
+              <path d="M8 12v-4h4" />
+              <path d="M11.5 11.5L8 8" />
+            </svg>
+          ) : (
+            // Outward arrows — currently compact, click to grow
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M2 6V2h4" />
+              <path d="M2 2l4 4" />
+              <path d="M12 8v4h-4" />
+              <path d="M12 12l-4-4" />
+            </svg>
+          )}
         </button>
         {/* Layout customization. Anchored to its own button so
           * the popover positions naturally beneath it. The button
@@ -935,7 +1023,7 @@ function LayoutButton(props: {
 
   useEffect(() => {
     if (!open) return;
-    const onDocPointerDown = (e: PointerEvent) => {
+    const onDocMouseDown = (e: MouseEvent) => {
       const target = e.target as Node | null;
       if (target && containerRef.current && !containerRef.current.contains(target)) {
         onClose();
@@ -946,11 +1034,26 @@ function LayoutButton(props: {
         onClose();
       }
     };
-    document.addEventListener("pointerdown", onDocPointerDown, true);
-    document.addEventListener("keydown", onDocKey, true);
+    // Defer attachment by a microtask. The click that just
+    // OPENED the menu would otherwise be caught by our own
+    // listener on its way back up through document — closing
+    // the menu immediately on every open. setTimeout(…, 0)
+    // pushes the attach to the next event-loop turn, after the
+    // opening click has finished propagating.
+    //
+    // Switched from `pointerdown` + capture to `mousedown` +
+    // bubble: more reliable in Electron's frameless windows
+    // (pointerdown on drag-region elements gets intercepted by
+    // the OS for window dragging in some compositors and the
+    // renderer never sees the event).
+    const attachId = window.setTimeout(() => {
+      document.addEventListener("mousedown", onDocMouseDown);
+      document.addEventListener("keydown", onDocKey);
+    }, 0);
     return () => {
-      document.removeEventListener("pointerdown", onDocPointerDown, true);
-      document.removeEventListener("keydown", onDocKey, true);
+      window.clearTimeout(attachId);
+      document.removeEventListener("mousedown", onDocMouseDown);
+      document.removeEventListener("keydown", onDocKey);
     };
   }, [open, onClose]);
 
