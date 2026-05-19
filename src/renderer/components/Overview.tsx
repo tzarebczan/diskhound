@@ -20,6 +20,9 @@ const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 interface Props {
   snapshot: ScanSnapshot;
   onFilterExtension: (ext: string) => void;
+  /** Navigate to Files tab with the "Recently large" filter pre-set
+   *  to the chosen window. */
+  onShowRecentlyLarge?: (window: "7d" | "30d" | "90d") => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
    * enough drive metadata to compute a ratio. null otherwise — the
@@ -29,6 +32,13 @@ interface Props {
    */
   scanPercent?: number | null;
 }
+
+type OverviewRecentWindow = "7d" | "30d" | "90d";
+const OVERVIEW_RECENT_WINDOWS: { id: OverviewRecentWindow; label: string; ms: number }[] = [
+  { id: "7d",  label: "7d",  ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "30d", label: "30d", ms: 30 * 24 * 60 * 60 * 1000 },
+  { id: "90d", label: "90d", ms: 90 * 24 * 60 * 60 * 1000 },
+];
 
 type TreemapMode = "condensed" | "all";
 const TREEMAP_MODE_STORAGE_KEY = "diskhound:treemap-mode";
@@ -67,7 +77,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -229,6 +239,15 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
       </div>
 
       {latestDiff && <LatestScanSummary diff={latestDiff} />}
+
+      <RecentlyLargeCard
+        files={effectiveLargestFiles}
+        onSeeAll={onShowRecentlyLarge}
+        onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
+        onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
+        busy={busy}
+      />
+
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
         <div className="overview-main">
@@ -658,6 +677,124 @@ function LatestScanSummary({ diff }: { diff: ScanDiffResult }) {
           </span>
         ))}
       </div>
+    </div>
+  );
+}
+
+/**
+ * "Recently large" card — answers the user question "what recently
+ * gobbled up disk space?" Filters largestFiles to those modified in
+ * the selected window (7d / 30d / 90d) and shows the top 5 by size
+ * with reveal/open actions. "See all in Files" pre-applies the
+ * matching chip+window in the Files tab so the user can drill in.
+ *
+ * The list is intentionally compact (top 5) — Overview is already
+ * dense with metrics + treemap. Users wanting more depth click
+ * through to Files. Empty state (nothing in window) shows a hint
+ * instead of an empty list so the card never looks broken.
+ */
+const RECENTLY_LARGE_STORAGE_KEY = "diskhound:overview-recent-window";
+
+function getInitialRecentWindow(): OverviewRecentWindow {
+  if (typeof window === "undefined") return "30d";
+  const v = window.localStorage.getItem(RECENTLY_LARGE_STORAGE_KEY);
+  if (v === "7d" || v === "30d" || v === "90d") return v;
+  return "30d";
+}
+
+function RecentlyLargeCard({
+  files,
+  onSeeAll,
+  onReveal,
+  onOpen,
+  busy,
+}: {
+  files: ScanFileRecord[];
+  onSeeAll?: (window: OverviewRecentWindow) => void;
+  onReveal: (path: string) => void;
+  onOpen: (path: string) => void;
+  busy: Set<string>;
+}) {
+  const [window, setWindow] = useState<OverviewRecentWindow>(getInitialRecentWindow);
+  useEffect(() => {
+    try { globalThis.window.localStorage.setItem(RECENTLY_LARGE_STORAGE_KEY, window); } catch { /* ok */ }
+  }, [window]);
+
+  const recentLarge = useMemo(() => {
+    const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === window)?.ms ?? OVERVIEW_RECENT_WINDOWS[1].ms;
+    const cutoff = Date.now() - ms;
+    return files
+      .filter((f) => f.modifiedAt >= cutoff)
+      .sort((a, b) => b.size - a.size)
+      .slice(0, 5);
+  }, [files, window]);
+
+  const totalRecentBytes = useMemo(
+    () => recentLarge.reduce((sum, f) => sum + f.size, 0),
+    [recentLarge],
+  );
+
+  if (files.length === 0) return null;
+
+  return (
+    <div className="recently-large-card">
+      <div className="recently-large-header">
+        <div className="recently-large-title-row">
+          <div className="recently-large-title">Recently large files</div>
+          <div className="recently-large-window" role="radiogroup" aria-label="Recent window">
+            {OVERVIEW_RECENT_WINDOWS.map((w) => (
+              <button
+                key={w.id}
+                className={`chip chip-small ${window === w.id ? "active" : ""}`}
+                onClick={() => setWindow(w.id)}
+                role="radio"
+                aria-checked={window === w.id}
+              >
+                {w.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div className="recently-large-sub">
+          {recentLarge.length > 0
+            ? <>Top {recentLarge.length} of files modified in the last {window === "7d" ? "7 days" : window === "30d" ? "30 days" : "90 days"} — {formatBytes(totalRecentBytes)} combined</>
+            : <>Nothing modified in the last {window === "7d" ? "7 days" : window === "30d" ? "30 days" : "90 days"} in this scan</>}
+        </div>
+      </div>
+      {recentLarge.length > 0 && (
+        <ul className="recently-large-list">
+          {recentLarge.map((f) => {
+            const isBusy = busy.has(f.path);
+            const name = basename(f.path);
+            return (
+              <li key={f.path} className="recently-large-row">
+                <FileIcon path={f.path} className="recently-large-icon" />
+                <div className="recently-large-info">
+                  <div className="recently-large-name" title={f.path}>{name}</div>
+                  <div className="recently-large-meta">
+                    {formatBytes(f.size)} · {humanAge(f.modifiedAt)}
+                  </div>
+                </div>
+                <div className="recently-large-actions">
+                  <button className="action-btn" disabled={isBusy} onClick={() => onReveal(f.path)}>Reveal</button>
+                  <button className="action-btn" disabled={isBusy} onClick={() => onOpen(f.path)}>Open</button>
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {onSeeAll && (
+        <div className="recently-large-footer">
+          <button
+            className="recently-large-see-all"
+            onClick={() => onSeeAll(window)}
+            title="Open in Files tab with the same window pre-applied"
+          >
+            See all recently large in Files →
+          </button>
+        </div>
+      )}
     </div>
   );
 }

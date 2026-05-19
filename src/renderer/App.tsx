@@ -151,6 +151,13 @@ export function App() {
   const [view, setView] = useState<AppView>("overview");
   const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
   const [filterExt, setFilterExt] = useState<string | undefined>();
+  // One-shot pre-seed for FileList's quick-filter chip and recent-window
+  // pill. Bumped each time the user clicks the Overview "Recently large"
+  // card so FileList's useEffect fires even if the user is already on
+  // the Files tab. The values themselves are read on mount; the version
+  // is just a re-trigger key.
+  const [filesInitialQuickFilter, setFilesInitialQuickFilter] = useState<import("./components/FileList").QuickFilter | undefined>();
+  const [filesInitialRecentWindow, setFilesInitialRecentWindow] = useState<import("./components/FileList").RecentWindow | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
   // when we're about to restore a previous scan
   const [showPicker, setShowPicker] = useState<boolean | null>(null);
@@ -797,6 +804,13 @@ export function App() {
     setView("files");
   };
 
+  const onShowRecentlyLarge = (window: import("./components/FileList").RecentWindow) => {
+    setFilterExt(undefined);
+    setFilesInitialQuickFilter("recent");
+    setFilesInitialRecentWindow(window);
+    setView("files");
+  };
+
   // Search: filter the file list. Folders and extensions come from full scan
   // data (directory rollups) so they aren't filtered — only the file-level
   // views (Largest Files, Overview treemap) respond to search.
@@ -1175,8 +1189,8 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} scanPercent={currentScanPercent} /></ErrorBoundary>}
-              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onShowRecentlyLarge={onShowRecentlyLarge} scanPercent={currentScanPercent} /></ErrorBoundary>}
+              {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} initialQuickFilter={filesInitialQuickFilter} initialRecentWindow={filesInitialRecentWindow} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
               {view === "duplicates" && (
                 <ErrorBoundary name="Duplicates">
@@ -1197,7 +1211,7 @@ export function App() {
                   />
                 </ErrorBoundary>
               )}
-              {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} /></ErrorBoundary>}
+              {view === "changes" && <ErrorBoundary name="Changes"><ChangesView rootPath={snapshot.rootPath} snapshot={snapshot} drives={drives} /></ErrorBoundary>}
               {view === "easyMove" && <ErrorBoundary name="Easy Move"><EasyMoveView /></ErrorBoundary>}
               {view === "memory" && <ErrorBoundary name="Processes"><MemoryView /></ErrorBoundary>}
               {view === "diskIo" && <ErrorBoundary name="Disk I/O"><DiskIoView /></ErrorBoundary>}

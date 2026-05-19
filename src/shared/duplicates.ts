@@ -220,19 +220,26 @@ export function runDuplicateScan(
     if (!force && now - lastEmitAt < PROGRESS_INTERVAL_MS) return;
     lastEmitAt = now;
     const newGroups = pendingNewGroups.length > 0 ? pendingNewGroups.splice(0) : undefined;
-    callbacks.onProgress({
-      rootPath,
-      status,
-      filesWalked,
-      candidateGroups,
-      filesHashed,
-      groupsConfirmed,
-      elapsedMs: now - startedAt,
-      errorMessage: null,
-      source,
-      minSizeBytes,
-      newGroups,
-    });
+    // Wrap the callback — if the renderer's webContents.send throws
+    // (e.g. window destroyed mid-scan), we don't want it to surface as
+    // an uncaught exception that crashes the duplicate scan AND pops a
+    // "DiskHound — Unexpected error" dialog. The scan keeps running;
+    // the renderer is just missing this update.
+    try {
+      callbacks.onProgress({
+        rootPath,
+        status,
+        filesWalked,
+        candidateGroups,
+        filesHashed,
+        groupsConfirmed,
+        elapsedMs: now - startedAt,
+        errorMessage: null,
+        source,
+        minSizeBytes,
+        newGroups,
+      });
+    } catch { /* renderer gone or callback threw — non-fatal */ }
   };
 
   const run = async () => {
@@ -540,41 +547,51 @@ export function runDuplicateScan(
 
   void run().catch((error) => {
     if (!cancelled) {
-      callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      try {
+        callbacks.onError(error instanceof Error ? error : new Error(String(error)));
+      } catch { /* renderer gone — non-fatal */ }
     }
   });
 
   return {
     cancel: () => {
-      if (cancelled) return;
-      cancelled = true;
-      // Destroy every in-flight read stream so hashFileContent
-      // resolves null almost immediately instead of blocking on
-      // the rest of a multi-GB read. The hash workers see
-      // isCancelled() === true on their next loop iteration and
-      // exit; mapConcurrent's await Promise.all() then unblocks
-      // and run() returns. End-to-end cancel latency: a few ms.
-      for (const stream of activeStreams) {
-        try { stream.destroy(); } catch { /* already-destroyed is fine */ }
-      }
-      activeStreams.clear();
-      // Emit a final "cancelled" progress event so the renderer's
-      // active-scans set clears even though no further normal
-      // progress emits will fire. Force=true so it bypasses the
-      // 200 ms throttle.
-      const now = Date.now();
-      callbacks.onProgress({
-        rootPath,
-        status: "cancelled",
-        filesWalked,
-        candidateGroups,
-        filesHashed,
-        groupsConfirmed,
-        elapsedMs: now - startedAt,
-        errorMessage: null,
-        source,
-        minSizeBytes,
-      });
+      // Whole body wrapped — cancel() is called synchronously from
+      // an IPC handler in the main process. If anything here throws
+      // (e.g. a destroyed stream double-emitting), it surfaces as the
+      // "DiskHound — Unexpected error" dialog. Belt-and-suspenders.
+      try {
+        if (cancelled) return;
+        cancelled = true;
+        // Destroy every in-flight read stream so hashFileContent
+        // resolves null almost immediately instead of blocking on
+        // the rest of a multi-GB read. The hash workers see
+        // isCancelled() === true on their next loop iteration and
+        // exit; mapConcurrent's await Promise.all() then unblocks
+        // and run() returns. End-to-end cancel latency: a few ms.
+        for (const stream of activeStreams) {
+          try { stream.destroy(); } catch { /* already-destroyed is fine */ }
+        }
+        activeStreams.clear();
+        // Emit a final "cancelled" progress event so the renderer's
+        // active-scans set clears even though no further normal
+        // progress emits will fire. Force=true so it bypasses the
+        // 200 ms throttle.
+        const now = Date.now();
+        try {
+          callbacks.onProgress({
+            rootPath,
+            status: "cancelled",
+            filesWalked,
+            candidateGroups,
+            filesHashed,
+            groupsConfirmed,
+            elapsedMs: now - startedAt,
+            errorMessage: null,
+            source,
+            minSizeBytes,
+          });
+        } catch { /* renderer gone — non-fatal */ }
+      } catch { /* never let cancel propagate */ }
     },
   };
 }
@@ -676,6 +693,14 @@ async function streamIndex(
 ): Promise<void> {
   const gunzip = createGunzip();
   const source = createReadStream(indexPath);
+  // CRITICAL: attach error listeners to BOTH source and gunzip BEFORE
+  // calling pipe(). source.pipe(gunzip) does not propagate errors; if
+  // source errors (e.g. index file mid-rotation, transient EPERM) with
+  // no listener, Node throws an uncaught exception that surfaces as
+  // the "DiskHound — Unexpected error" dialog. Same for gunzip if
+  // decompression hits a malformed chunk.
+  source.on("error", () => { /* swallowed — the for-await will see EOF or be aborted */ });
+  gunzip.on("error", () => { /* swallowed — same */ });
   source.pipe(gunzip);
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
   try {
@@ -688,6 +713,10 @@ async function streamIndex(
       const cont = onRec(rec as { p: string; s?: number; m?: number; t?: string });
       if (!cont) break;
     }
+  } catch {
+    // for-await can throw if the underlying stream errors mid-read.
+    // We've already absorbed via the error listeners above, but the
+    // async iterator may still surface the underlying rejection.
   } finally {
     rl.close();
     // Close the gunzip & source streams so the OS file handle

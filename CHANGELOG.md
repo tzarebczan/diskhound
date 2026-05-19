@@ -1,5 +1,95 @@
 # Changelog
 
+## 0.5.20 — 2026-05-19
+
+Four things this release: a real fix for the "Unexpected error"
+dialog on duplicate scan, the Changes tab stale-file-list bug,
+clearer Changes-tab labelling, and a new "Recently large files"
+feature on both Overview and Files.
+
+### EPERM "Unexpected error" dialog on duplicate scan
+
+Root cause: gzip streams used by the duplicate scanner (index
+reader + hash-cache reader/writer) had error listeners attached
+*after* `.pipe()`. Node's pipe doesn't propagate errors, so a
+stream that errored before its listener was attached — or one
+that emitted directly on the source/gzip rather than the
+destination — surfaced as an uncaught exception, popping the
+"DiskHound — Unexpected error" dialog with the EPERM message.
+
+Fixes:
+
+- `streamIndex` (duplicate scanner's index reader): attach error
+  listeners to both `source` AND `gunzip` BEFORE `pipe()`. Same
+  defensive try/catch around the `for await` loop.
+- `readCacheFile` (hash cache loader): same fix.
+- `writeCacheFile` (hash cache writer): forward gzip errors to
+  the reject path that was previously only watching the file
+  write side.
+- IPC handlers `start-duplicate-scan` and `cancel-duplicate-scan`
+  now wrap their bodies in try/catch and surface failures via an
+  error progress event instead of an uncaught exception.
+- `runDuplicateScan`'s `cancel()` and all `callbacks.onProgress`
+  calls are wrapped — if the renderer's webContents is gone, we
+  no longer take down the whole scan.
+
+Additionally: `writeCrashLog` now uses **sync** appendFile. The
+old async version silently lost entries when the process crashed
+before the microtask flushed — we'd see the error dialog with
+no corresponding crash.log line, making remote diagnosis
+impossible.
+
+### Changes tab: clicking different scan-history pills now actually swaps the file list
+
+The bug: clicking a different scan history entry briefly flashed
+the new file list, then reverted to whatever was showing first.
+
+Root cause: `FullDiffList` rendered `fullDiff` without checking
+that its baseline/current IDs matched the currently-displayed
+`diff`. When the user clicked a new pill, `setFullDiff(null)`
+queued, but until the new baseline's full diff loaded, the
+render still occasionally re-used the previous baseline's
+fullDiff (state-update timing race).
+
+Fix: added a `matchingFullDiff` memo that only returns fullDiff
+when its IDs line up. Every detail-panel branch now gates on
+`matchingFullDiff` instead of raw `fullDiff`.
+
+### "Net freed" label clarified + free disk space surfaced
+
+The big "9.8 GB net freed" number is the *change in bytes the
+scanner saw between two scans* — not the disk's free space.
+Users were misreading it as the latter. Two changes:
+
+- Relabelled to "scan-to-scan freed" / "scan-to-scan grew" /
+  "scan-to-scan unchanged" so the number's source is in the copy.
+- Added a "C:\ free" stat tile alongside Previous/Current/Files
+  showing actual `freeBytes / totalBytes`. Pulled live from the
+  same disk-space monitor that drives the sidebar drive pills.
+
+### "Recently large files" feature
+
+For "what recently took up most space?" Two surfaces:
+
+1. **Files tab — "Recently large" chip.** Alongside Video /
+   Archives / etc. When active, files filter to modified-within
+   the chosen window (7d / 30d / 90d) and are force-sorted by
+   size desc. The window picker appears inline so it's discoverable.
+
+2. **Overview tab — "Recently large files" card.** Below the
+   metric strip. Shows top 5 with Reveal / Open actions, the
+   same 7d / 30d / 90d window picker (persisted to
+   localStorage), and a "See all recently large in Files →"
+   button that opens the Files tab with the matching chip +
+   window pre-applied. Empty state shows "Nothing modified in
+   the last X days" instead of an empty list.
+
+Score-vs-filter choice: I went with "modified in window, sort by
+size" rather than a fancy `size × recency` decay score. Users
+can already read size and age columns; collapsing them into one
+opaque number adds confusion without buying clarity. The window
+picker is the right knob — too narrow? widen it.
+
 ## 0.5.19 — 2026-05-19
 
 Diagnostic and reliability fixes for the duplicate scanner. The

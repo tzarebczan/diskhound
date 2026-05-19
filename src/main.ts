@@ -381,9 +381,16 @@ function writeCrashLog(tag: string, message: string): void {
   const line = `[${new Date().toISOString()}] [${tag}] ${message}\n`;
   try {
     const logPath = crashLogPath();
-    FS.mkdir(Path.dirname(logPath), { recursive: true }).catch(() => {});
-    FS.appendFile(logPath, line).catch(() => {});
-  } catch { /* best effort */ }
+    // Use SYNC append for crash-class events so the breadcrumb is on
+    // disk before the dialog appears / process is killed. The earlier
+    // async appendFile silently lost entries when the process crashed
+    // before the microtask flushed — we'd see the "Unexpected error"
+    // dialog with no corresponding crash.log entry, making remote
+    // diagnosis impossible. Sync write is fine; we're already in an
+    // exceptional path where perf doesn't matter.
+    try { FS_SYNC.mkdirSync(Path.dirname(logPath), { recursive: true }); } catch { /* ok */ }
+    FS_SYNC.appendFileSync(logPath, line);
+  } catch { /* best effort — disk full / readonly userData / etc */ }
   // Rotate opportunistically — cheap check, runs on a microtask so it
   // doesn't block the writer.
   void maybeRotateCrashLog();
@@ -2689,6 +2696,10 @@ void app.whenReady().then(async () => {
   // ── IPC: Duplicate Detection ────────────────────────────
 
   ipcMain.handle("diskhound:start-duplicate-scan", (_event, rootPath: string, options?: { minSizeBytes?: number }) => {
+    // Whole-handler try/catch — main-process IPC handlers that throw
+    // synchronously surface as the "DiskHound — Unexpected error"
+    // dialog via the uncaughtException hook. Belt-and-suspenders.
+    try {
     const resolvedRoot = Path.resolve(rootPath);
     const key = scanKey(resolvedRoot);
 
@@ -2697,7 +2708,7 @@ void app.whenReady().then(async () => {
     // asks in v0.3.1.
     const existing = activeDuplicateScans.get(key);
     if (existing) {
-      existing.cancel();
+      try { existing.cancel(); } catch { /* runDuplicateScan's cancel already self-wraps; defense in depth */ }
       activeDuplicateScans.delete(key);
     }
 
@@ -2751,6 +2762,25 @@ void app.whenReady().then(async () => {
       },
     );
     activeDuplicateScans.set(key, handle);
+    } catch (err) {
+      // Surface to the renderer as an error progress event instead of
+      // an uncaught exception dialog. The user sees a meaningful UI
+      // state rather than a generic crash.
+      const msg = err instanceof Error ? err.message : String(err);
+      writeCrashLog("start-duplicate-scan", msg);
+      try {
+        mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
+          rootPath,
+          status: "error",
+          filesWalked: 0,
+          candidateGroups: 0,
+          filesHashed: 0,
+          groupsConfirmed: 0,
+          elapsedMs: 0,
+          errorMessage: `Failed to start duplicate scan: ${msg}`,
+        });
+      } catch { /* ignore */ }
+    }
   });
 
   /**
@@ -2805,18 +2835,24 @@ void app.whenReady().then(async () => {
   }
 
   ipcMain.handle("diskhound:cancel-duplicate-scan", (_event, rootPath?: string) => {
-    if (rootPath) {
-      const key = scanKey(Path.resolve(rootPath));
-      const handle = activeDuplicateScans.get(key);
-      if (handle) {
-        handle.cancel();
-        activeDuplicateScans.delete(key);
+    try {
+      if (rootPath) {
+        const key = scanKey(Path.resolve(rootPath));
+        const handle = activeDuplicateScans.get(key);
+        if (handle) {
+          try { handle.cancel(); } catch { /* defensive */ }
+          activeDuplicateScans.delete(key);
+        }
+        return;
       }
-      return;
+      // No rootPath → cancel all (e.g. app quit, or renderer asking for a full stop).
+      for (const handle of activeDuplicateScans.values()) {
+        try { handle.cancel(); } catch { /* defensive */ }
+      }
+      activeDuplicateScans.clear();
+    } catch (err) {
+      writeCrashLog("cancel-duplicate-scan", err instanceof Error ? err.stack ?? err.message : String(err));
     }
-    // No rootPath → cancel all (e.g. app quit, or renderer asking for a full stop).
-    for (const handle of activeDuplicateScans.values()) handle.cancel();
-    activeDuplicateScans.clear();
   });
 
   ipcMain.handle("diskhound:get-active-duplicate-scan-roots", () => {

@@ -166,34 +166,50 @@ async function readCacheFile(
 ): Promise<void> {
   const gunzip = createGunzip();
   const src = createReadStream(p);
+  // CRITICAL: attach error listeners BEFORE pipe(). pipe doesn't
+  // propagate errors — an unhandled error event on src or gunzip
+  // (e.g. cache file mid-rotation, corrupted gzip header) surfaces
+  // as an uncaught main-process exception. Swallow here; caller has
+  // its own try/catch and recovers via empty cache.
+  src.on("error", () => { /* swallowed */ });
+  gunzip.on("error", () => { /* swallowed */ });
   src.pipe(gunzip);
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line) continue;
-    let rec: Partial<WireEntry> & { p?: string; s?: number; m?: number; h?: string; l?: number };
-    try {
-      rec = JSON.parse(line);
-    } catch {
-      continue;
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: Partial<WireEntry> & { p?: string; s?: number; m?: number; h?: string; l?: number };
+      try {
+        rec = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      // Short-key schema to keep the file small:
+      //   p=path, s=size, m=mtime, h=hash, l=lastUsed
+      const path = rec.p ?? rec.path;
+      const size = rec.s ?? rec.size;
+      const mtime = rec.m ?? rec.mtime;
+      const hash = rec.h ?? rec.hash;
+      const lastUsed = rec.l ?? rec.lastUsed ?? 0;
+      if (
+        typeof path !== "string" ||
+        typeof size !== "number" ||
+        typeof mtime !== "number" ||
+        typeof hash !== "string"
+      ) {
+        continue;
+      }
+      onEntry({ path, size, mtime, hash, lastUsed });
     }
-    // Short-key schema to keep the file small:
-    //   p=path, s=size, m=mtime, h=hash, l=lastUsed
-    const path = rec.p ?? rec.path;
-    const size = rec.s ?? rec.size;
-    const mtime = rec.m ?? rec.mtime;
-    const hash = rec.h ?? rec.hash;
-    const lastUsed = rec.l ?? rec.lastUsed ?? 0;
-    if (
-      typeof path !== "string" ||
-      typeof size !== "number" ||
-      typeof mtime !== "number" ||
-      typeof hash !== "string"
-    ) {
-      continue;
-    }
-    onEntry({ path, size, mtime, hash, lastUsed });
+  } catch {
+    // for-await can surface underlying stream errors; we've already
+    // absorbed them via the listeners above. The caller of
+    // readCacheFile already wraps in try/catch and resets the cache.
+  } finally {
+    rl.close();
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { src.destroy(); } catch { /* ok */ }
   }
-  rl.close();
 }
 
 async function writeCacheFile(
@@ -205,10 +221,15 @@ async function writeCacheFile(
   const tmp = p + ".tmp";
   const gzip = createGzip();
   const out = createWriteStream(tmp);
-  gzip.pipe(out);
   await new Promise<void>((resolve, reject) => {
-    out.on("finish", resolve);
+    // Attach error listeners to BOTH streams BEFORE piping. pipe()
+    // does not propagate errors, so an unhandled error event on gzip
+    // (e.g. OOM mid-compression on a giant cache) would surface as an
+    // uncaught exception in the main process. Forward both to reject.
+    gzip.on("error", reject);
     out.on("error", reject);
+    out.on("finish", resolve);
+    gzip.pipe(out);
     for (const [path, e] of entries) {
       gzip.write(
         JSON.stringify({

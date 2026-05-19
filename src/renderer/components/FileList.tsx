@@ -7,9 +7,25 @@ import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
 
-type QuickFilter = "all" | "video" | "archives" | "installers" | "images" | "audio" | "documents";
+export type QuickFilter = "all" | "recent" | "video" | "archives" | "installers" | "images" | "audio" | "documents";
 type SortField = "size" | "name" | "ext" | "age";
 type SortDir = "asc" | "desc";
+
+/**
+ * "Recently large" windows. The user's question is "what recently
+ * gobbled up disk space?" — so we filter to files modified in the
+ * last N days and sort by size descending. No fancy score function
+ * (size×recency, decay weights) because users can already read the
+ * (size, age) columns; a score collapses two intuitive numbers into
+ * one opaque one. The pills let users widen the lens if 30 days
+ * is too narrow.
+ */
+export type RecentWindow = "7d" | "30d" | "90d";
+export const RECENT_WINDOWS: { id: RecentWindow; label: string; ms: number }[] = [
+  { id: "7d",  label: "7 days",  ms: 7 * 24 * 60 * 60 * 1000 },
+  { id: "30d", label: "30 days", ms: 30 * 24 * 60 * 60 * 1000 },
+  { id: "90d", label: "90 days", ms: 90 * 24 * 60 * 60 * 1000 },
+];
 
 /**
  * Page size for the Largest Files list. Rendering ~50K rows of
@@ -27,8 +43,9 @@ type SortDir = "asc" | "desc";
  */
 const PAGE_SIZE = 1000;
 
-const QUICK_FILTERS: { id: QuickFilter; label: string }[] = [
+const QUICK_FILTERS: { id: QuickFilter; label: string; title?: string }[] = [
   { id: "all", label: "All" },
+  { id: "recent", label: "Recently large", title: "Files modified in the last N days, sorted by size — the things that recently took up the most space" },
   { id: "video", label: "Video" },
   { id: "archives", label: "Archives" },
   { id: "installers", label: "Installers" },
@@ -37,7 +54,7 @@ const QUICK_FILTERS: { id: QuickFilter; label: string }[] = [
   { id: "documents", label: "Docs" },
 ];
 
-const FILTER_EXTS: Record<Exclude<QuickFilter, "all">, Set<string>> = {
+const FILTER_EXTS: Record<Exclude<QuickFilter, "all" | "recent">, Set<string>> = {
   video: new Set([".avi", ".m4v", ".mkv", ".mov", ".mp4", ".webm", ".wmv"]),
   archives: new Set([".7z", ".bz2", ".gz", ".iso", ".rar", ".tar", ".xz", ".zip"]),
   installers: new Set([".appx", ".dmg", ".exe", ".iso", ".msi", ".msix", ".pkg"]),
@@ -49,6 +66,12 @@ const FILTER_EXTS: Record<Exclude<QuickFilter, "all">, Set<string>> = {
 interface Props {
   snapshot: ScanSnapshot;
   initialFilter?: string;
+  /** Pre-select a quick-filter chip on mount. Used when navigating
+   *  in from the Overview "Recently large" card. */
+  initialQuickFilter?: QuickFilter;
+  /** Pre-select the recent-window pill when initialQuickFilter ===
+   *  "recent". */
+  initialRecentWindow?: RecentWindow;
 }
 
 function compareFn(field: SortField, dir: SortDir) {
@@ -63,9 +86,29 @@ function compareFn(field: SortField, dir: SortDir) {
   };
 }
 
-export function FileList({ snapshot, initialFilter }: Props) {
+export function FileList({ snapshot, initialFilter, initialQuickFilter, initialRecentWindow }: Props) {
   const [filterText, setFilterText] = useState(initialFilter ?? "");
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>(initialQuickFilter ?? "all");
+  // Only meaningful when quickFilter === "recent". Persists across
+  // chip toggles so flipping back into "recent" reuses the user's
+  // last window choice instead of forcing them to re-pick.
+  const [recentWindow, setRecentWindow] = useState<RecentWindow>(initialRecentWindow ?? "30d");
+
+  // If the caller flips the initial filter mid-mount (e.g. user
+  // clicks the Overview "Recently large" card while already on the
+  // Files tab), pick up the new value. We intentionally ignore
+  // subsequent user toggles after that — initial* is a one-way pre-
+  // seeding mechanism, not a controlled prop.
+  const lastInitialQuickFilterRef = useRef(initialQuickFilter);
+  useEffect(() => {
+    if (initialQuickFilter && initialQuickFilter !== lastInitialQuickFilterRef.current) {
+      lastInitialQuickFilterRef.current = initialQuickFilter;
+      setQuickFilter(initialQuickFilter);
+      if (initialQuickFilter === "recent" && initialRecentWindow) {
+        setRecentWindow(initialRecentWindow);
+      }
+    }
+  }, [initialQuickFilter, initialRecentWindow]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   // We use our own local runAction below (so success+dismiss can also hide the row),
@@ -97,12 +140,28 @@ export function FileList({ snapshot, initialFilter }: Props) {
   // page would be confusing), and the Load-more decision.
   const filteredFiles = useMemo(() => {
     const query = filterText.trim().toLowerCase();
+    // "Recently large" path: filter by mtime within the chosen
+    // window. We force-sort by size desc so the user immediately
+    // sees the biggest recent additions (the whole point of the
+    // chip). The extension filters from the other chips don't
+    // apply here — recent-large is its own slice.
+    if (quickFilter === "recent") {
+      const cutoff = Date.now() - (RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms ?? 30 * 24 * 60 * 60 * 1000);
+      const filtered = snapshot.largestFiles
+        .filter((f) => !dismissed.has(f.path))
+        .filter((f) => f.modifiedAt >= cutoff)
+        .filter((f) => !query || `${f.path} ${f.extension}`.toLowerCase().includes(query));
+      // Force size-desc regardless of user's sort selection — that's
+      // the whole point of this chip. Users can flip back to "All"
+      // if they want to sort by something else.
+      return [...filtered].sort((a, b) => b.size - a.size);
+    }
     const filtered = snapshot.largestFiles
       .filter((f) => !dismissed.has(f.path))
-      .filter((f) => quickFilter === "all" || FILTER_EXTS[quickFilter]?.has(f.extension))
+      .filter((f) => quickFilter === "all" || FILTER_EXTS[quickFilter as Exclude<QuickFilter, "all" | "recent">]?.has(f.extension))
       .filter((f) => !query || `${f.path} ${f.extension}`.toLowerCase().includes(query));
     return [...filtered].sort(compareFn(sortField, sortDir));
-  }, [snapshot.largestFiles, filterText, quickFilter, dismissed, sortField, sortDir]);
+  }, [snapshot.largestFiles, filterText, quickFilter, recentWindow, dismissed, sortField, sortDir]);
 
   // Paginated slice we actually render. Filter/sort changes reset
   // the page back to PAGE_SIZE in the effect below, so the user
@@ -298,11 +357,28 @@ export function FileList({ snapshot, initialFilter }: Props) {
               key={f.id}
               className={`chip ${quickFilter === f.id ? "active" : ""}`}
               onClick={() => setQuickFilter(f.id)}
+              title={f.title}
             >
               {f.label}
             </button>
           ))}
         </div>
+        {quickFilter === "recent" && (
+          <div className="chip-group file-recent-window" role="radiogroup" aria-label="Recent window">
+            <span className="file-recent-window-label">within</span>
+            {RECENT_WINDOWS.map((w) => (
+              <button
+                key={w.id}
+                className={`chip ${recentWindow === w.id ? "active" : ""}`}
+                onClick={() => setRecentWindow(w.id)}
+                role="radio"
+                aria-checked={recentWindow === w.id}
+              >
+                {w.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="bulk-bar">

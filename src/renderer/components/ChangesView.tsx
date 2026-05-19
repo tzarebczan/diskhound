@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 
 import type {
   DirectoryDelta,
+  DiskSpaceInfo,
   FileDelta,
   FullDiffStatus,
   FullDiffResult,
@@ -22,6 +23,10 @@ interface Props {
   rootPath: string | null;
   /** The live snapshot — used to detect scan completions for auto-refresh. */
   snapshot: ScanSnapshot;
+  /** Live disk space info — used to show current free space alongside the
+   *  net-delta number so users don't conflate "net freed between scans"
+   *  with "total free space on disk". */
+  drives: DiskSpaceInfo[];
 }
 
 type DetailTab = "files" | "directories";
@@ -88,7 +93,7 @@ function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[]): Resolv
 
 // ── Main component ─────────────────────────────────────────
 
-export function ChangesView({ rootPath, snapshot }: Props) {
+export function ChangesView({ rootPath, snapshot, drives }: Props) {
   const [diff, setDiff] = useState<ScanDiffResult | null>(null);
   const [history, setHistory] = useState<ScanHistoryEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -437,10 +442,41 @@ export function ChangesView({ rootPath, snapshot }: Props) {
   const netLabel = isZeroDelta ? "unchanged" : gained ? "grew" : "freed";
   const netColorClass = isZeroDelta ? "neutral" : gained ? "negative" : "positive";
 
+  // Match the current root to its drive entry so we can show CURRENT
+  // free space alongside the diff. Users reported confusion: "9.8 GB
+  // net freed" was misread as "9.8 GB of disk is free." Showing the
+  // actual free-space number next to it disambiguates.
+  const currentDrive = useMemo(() => {
+    if (!rootPath || drives.length === 0) return null;
+    // Match by drive letter prefix (Windows) or root-equality (POSIX).
+    const driveLetter = rootPath.match(/^[A-Za-z]:/)?.[0];
+    if (driveLetter) {
+      const target = driveLetter.toUpperCase();
+      return drives.find((d) => d.drive.toUpperCase().startsWith(target)) ?? null;
+    }
+    // POSIX fallback: pick the drive whose path is a prefix of rootPath.
+    return drives.find((d) => rootPath.startsWith(d.drive)) ?? drives[0] ?? null;
+  }, [rootPath, drives]);
+
+  // Guard against stale fullDiff: when the user clicks a different
+  // baseline pill, selectBaseline() sets fullDiff=null and the new
+  // baseline's diff loads asynchronously. If the previous fullDiff
+  // value lingers (race during auto-load), we used to render the OLD
+  // baseline's file list under the NEW baseline's summary. Result was
+  // the symptom the user reported: pills flash but always show files
+  // from the first selection. Only honor fullDiff when its IDs match
+  // the currently-displayed diff.
+  const matchingFullDiff = useMemo(() => {
+    if (!fullDiff) return null;
+    if (fullDiff.baselineId !== diff.baselineId) return null;
+    if (fullDiff.currentId !== diff.currentId) return null;
+    return fullDiff;
+  }, [fullDiff, diff.baselineId, diff.currentId]);
+
   const isScanning = snapshot.status === "running";
   const showManualFullDiffCta =
     detailTab === "files"
-    && !fullDiff
+    && !matchingFullDiff
     && !fullDiffLoading
     && !!fullDiffStatus
     && !shouldAutoLoadFullDiff;
@@ -462,15 +498,24 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
       {/* ── Summary strip ── */}
       <div className="changes-summary">
-        <div className="changes-summary-net">
+        <div
+          className="changes-summary-net"
+          title={`Change in total bytes seen by the scanner between the two scans. Not the same as the disk's free space — see the "${currentDrive?.drive ?? ""} free" stat to the right.`}
+        >
           <span className={`changes-delta-big ${netColorClass}`}>
             {isZeroDelta ? "0 B" : `${gained ? "+" : ""}${formatBytes(Math.abs(diff.totalBytesDelta))}`}
           </span>
-          <span className="changes-delta-label">net {netLabel}</span>
+          <span className="changes-delta-label">scan-to-scan {netLabel}</span>
         </div>
         <div className="changes-summary-stats">
           <SummaryItem label="Previous" value={formatBytes(diff.previousBytesSeen)} />
           <SummaryItem label="Current" value={formatBytes(diff.currentBytesSeen)} />
+          {currentDrive && (
+            <SummaryItem
+              label={`${currentDrive.drive} free`}
+              value={`${formatBytes(currentDrive.freeBytes)} / ${formatBytes(currentDrive.totalBytes)}`}
+            />
+          )}
           <SummaryItem
             label="Files"
             value={`${diff.totalFilesDelta >= 0 ? "+" : ""}${diff.totalFilesDelta.toLocaleString()}`}
@@ -606,9 +651,9 @@ export function ChangesView({ rootPath, snapshot }: Props) {
 
           {/* Detail list */}
           <div className="changes-detail-scroll">
-            {detailTab === "files" && fullDiff && fullDiff.totalChanges > 0 && (
+            {detailTab === "files" && matchingFullDiff && matchingFullDiff.totalChanges > 0 && (
               <FullDiffList
-                diff={fullDiff}
+                diff={matchingFullDiff}
                 busy={busy}
                 onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
                 onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
@@ -616,7 +661,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 onEasyMove={(p) => void handleEasyMove(p)}
               />
             )}
-            {detailTab === "files" && fullDiff && fullDiff.totalChanges === 0 && (
+            {detailTab === "files" && matchingFullDiff && matchingFullDiff.totalChanges === 0 && (
               <div className="changes-empty-detail">
                 <div className="changes-empty-detail-title">No file-level changes</div>
                 <div className="changes-empty-detail-hint">
@@ -625,7 +670,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 </div>
               </div>
             )}
-            {detailTab === "files" && !fullDiff && fullDiffLoading && (
+            {detailTab === "files" && !matchingFullDiff && fullDiffLoading && (
               <div className="changes-empty-detail">
                 <div className="changes-empty-detail-title">Loading changes…</div>
                 <div className="changes-empty-detail-hint">
@@ -633,7 +678,7 @@ export function ChangesView({ rootPath, snapshot }: Props) {
                 </div>
               </div>
             )}
-            {detailTab === "files" && !fullDiff && !fullDiffLoading && (
+            {detailTab === "files" && !matchingFullDiff && !fullDiffLoading && (
               <>
                 {fullDiffError && (
                   <div className="changes-full-diff-cta changes-full-diff-cta-error" role="alert">
