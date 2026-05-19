@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.22 — 2026-05-19
+
+User reported a flood of ENOENT popups for files like
+`mpasbase.vdm` (Windows Defender) and `CrashpadMetrics.pma`
+(Brave) during duplicate scanning — files that exist in the
+scan index but get rotated or deleted by the OS / other apps
+between when we listed them and when we tried to open them.
+
+These are routine filesystem races that aren't actionable by
+the user: the file is just gone. Until now they were caught in
+the duplicate scanner's hash functions (which return null), but
+some still leak through other code paths the v0.5.20-v0.5.21
+audits didn't catch.
+
+### Routine FS errors no longer pop a dialog
+
+The `process.on("uncaughtException")` handler now classifies the
+error: routine filesystem failures (`ENOENT`, `EPERM`, `EACCES`,
+`EBUSY`, `EMFILE`, `ENFILE`, `EISDIR`, `ENOTDIR`) get logged to
+`crash.log` with their `[CODE]` tag prepended for grep-ability,
+but the dialog is suppressed. There's nothing the user can do
+about a file that vanished mid-scan.
+
+Anything else — TypeError, RangeError, native panics, our own
+throws — still pops the dialog so real bugs surface clearly.
+The dialog tax on noise was making real signal harder to spot.
+
+Also: the `code` property is now included in `main-rejection`
+log lines so unhandled-rejection diagnostics show the error
+class up front.
+
 ## 0.5.21 — 2026-05-19
 
 Codebase-wide audit of unguarded `pipe()` calls + reshape of the

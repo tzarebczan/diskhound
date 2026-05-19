@@ -401,18 +401,63 @@ function writeStartupLog(message: string): void {
   writeCrashLog("startup", message);
 }
 
+// Errors codes that we treat as "routine, not user-actionable":
+// the file vanished, was locked, or we lacked permission to read it.
+// These happen all the time on a live filesystem (Brave deleting
+// its crash metrics file mid-scan, Defender rotating its
+// definition updates, etc.) and aren't bugs we can fix in code —
+// the user just sees a confusing "Unexpected error" dialog they
+// have to click through. Log them quietly to crash.log so we can
+// still see the pattern in support data, but skip the dialog.
+//
+// Anything else (TypeError, RangeError, panics from native code,
+// our own throws) still pops the dialog so real bugs aren't
+// hidden.
+const ROUTINE_FS_ERROR_CODES = new Set([
+  "ENOENT",   // file doesn't exist (anymore)
+  "EPERM",    // permission denied
+  "EACCES",   // access denied (POSIX flavor of EPERM)
+  "EBUSY",    // file in use
+  "EMFILE",   // too many open files — transient
+  "ENFILE",   // OS-wide file table full — transient
+  "EISDIR",   // tried to open a dir as a file — index drift
+  "ENOTDIR",  // tried to readdir a file — same
+]);
+
+function isRoutineFsError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" && ROUTINE_FS_ERROR_CODES.has(code);
+}
+
 // Surface uncaught exceptions so a silent crash at least shows up and
-// leaves breadcrumbs in crash.log.
+// leaves breadcrumbs in crash.log. Routine FS errors get logged but
+// not dialogged — too noisy on live filesystems where files come and
+// go independently of our scan.
 process.on("uncaughtException", (err) => {
-  writeCrashLog("main-uncaught", err?.stack ?? err?.message ?? String(err));
+  const stackOrMsg = (err as { stack?: string })?.stack
+    ?? (err as { message?: string })?.message
+    ?? String(err);
+  const code = (err as { code?: string })?.code ?? "";
+  writeCrashLog("main-uncaught", `${code ? `[${code}] ` : ""}${stackOrMsg}`);
+  if (isRoutineFsError(err)) {
+    // Silent: the user can't do anything about a file that vanished
+    // mid-scan. The crash.log entry above is sufficient for us to
+    // diagnose if the rate gets out of hand.
+    return;
+  }
   try {
-    dialog.showErrorBox("DiskHound — Unexpected error", String(err?.stack ?? err?.message ?? err));
+    dialog.showErrorBox(
+      "DiskHound — Unexpected error",
+      String((err as { stack?: string })?.stack ?? (err as { message?: string })?.message ?? err),
+    );
   } catch { /* noop */ }
 });
 
 process.on("unhandledRejection", (reason) => {
   const err = reason instanceof Error ? reason : new Error(String(reason));
-  writeCrashLog("main-rejection", err.stack ?? err.message);
+  const code = (reason as { code?: string })?.code ?? "";
+  writeCrashLog("main-rejection", `${code ? `[${code}] ` : ""}${err.stack ?? err.message}`);
 });
 
 /**
