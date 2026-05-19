@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.5.28 — 2026-05-19
+
+v0.5.27 fixed the crash but exposed a new mystery: `pass-a-done`
+now reports `ok=0 null=30065` in 539 ms — 18 μs per file, which
+is too fast for any real I/O. Every single hash is fast-returning
+null without actually reading anything. Five possible causes,
+each one needing a different fix.
+
+This release adds a one-time-per-scan diagnostic that captures
+the FIRST failure of each kind in `crash.log`. Re-run a scan
+with verbose logging on and the log will name the bug:
+
+- `hash-fail kind=ctor-throw …` — `createReadStream` throws
+  synchronously (invalid path / options).
+- `hash-fail kind=error-event code=ENOENT path=…` — the file
+  doesn't exist at the path the index recorded (deleted /
+  rotated / moved drive letter).
+- `hash-fail kind=error-event code=EPERM path=…` — Windows ACL
+  denying read (typical for system files).
+- `hash-fail kind=close-before-end path=…` — Node emitted
+  `close` before `end`, which means the stream was destroyed
+  early. Rare but would indicate a Node version quirk.
+- `hash-fail kind=end-no-data path=…` — `end` fired without any
+  `data` chunks, meaning the file is empty. Valid hash but
+  unexpected for "candidates" (all > 1 MB by min-size filter).
+- `hash-fail kind=timeout path=…` — 30 s elapsed without
+  resolution.
+
+De-duped by `kind` so a flood of ENOENTs only logs once, but a
+mix logs each distinct cause. Capped at 5 entries total per
+scan.
+
+Once we see which `kind` dominates, the fix is one or two lines.
+
 ## 0.5.27 — 2026-05-19
 
 User found the bug with v0.5.26's verbose logging:

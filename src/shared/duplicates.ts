@@ -268,6 +268,12 @@ export function runDuplicateScan(
   };
 
   const run = async () => {
+    // Reset the one-time-per-scan failure diagnostic. Without this,
+    // a sequence of scans would only log failures from the FIRST
+    // scan and silently swallow the rest, making "all null" reports
+    // from later scans impossible to diagnose.
+    resetFailureLogger();
+
     // Kick off hash cache load. Non-fatal if this fails (cache
     // module falls back to in-memory on I/O errors). We don't await
     // the initial load synchronously because we want the "walking"
@@ -922,6 +928,9 @@ function hashFilePrefix(
     let settled = false;
     let stream: ReadStream | null = null;
     let timeoutId: NodeJS.Timeout | null = null;
+    let hashUpdateCount = 0; // diagnostic: was data ever delivered?
+    let endFired = false;    // diagnostic: did the stream end normally?
+    let closeFiredFirst = false; // diagnostic: did close fire before end?
     const finish = (val: string | null) => {
       if (settled) return;
       settled = true;
@@ -941,7 +950,8 @@ function hashFilePrefix(
         end: PREFIX_BYTES - 1,
         highWaterMark: PREFIX_BYTES,
       });
-    } catch {
+    } catch (err) {
+      logFirstFailure("ctor-throw", filePath, err);
       return finish(null);
     }
 
@@ -951,8 +961,21 @@ function hashFilePrefix(
     // trace — symptom of the error event firing on a stream before its
     // listener was attached, which happens if any sync code between
     // createReadStream and stream.on("error") throws. Defense in depth.
-    stream.on("error", () => finish(null));
-    stream.on("close", () => finish(null));
+    stream.on("error", (err) => {
+      logFirstFailure("error-event", filePath, err);
+      finish(null);
+    });
+    stream.on("close", () => {
+      if (!endFired && !settled) {
+        closeFiredFirst = true;
+        logFirstFailure(
+          "close-before-end",
+          filePath,
+          new Error(`close fired before end (hashUpdateCount=${hashUpdateCount})`),
+        );
+      }
+      finish(null);
+    });
 
     active.add(stream);
 
@@ -967,14 +990,27 @@ function hashFilePrefix(
       // exception. Wrap defensively.
       try {
         hash.update(chunk);
-      } catch {
+        hashUpdateCount++;
+      } catch (err) {
+        logFirstFailure("hash-update-throw", filePath, err);
         finish(null);
       }
     });
     stream.on("end", () => {
+      endFired = true;
       try {
-        finish(isCancelled() ? null : hash.digest("hex"));
-      } catch {
+        const digest = isCancelled() ? null : hash.digest("hex");
+        if (digest === null) {
+          // Cancelled. Don't log as failure.
+        } else if (hashUpdateCount === 0) {
+          // end fired without ANY data chunks — empty file. Valid but
+          // unusual for "candidates" (which are all > 1 MB by default).
+          // Log so we can see whether this case dominates.
+          logFirstFailure("end-no-data", filePath, new Error("end fired with zero chunks"));
+        }
+        finish(digest);
+      } catch (err) {
+        logFirstFailure("digest-throw", filePath, err);
         finish(null);
       }
     });
@@ -983,8 +1019,37 @@ function hashFilePrefix(
     // — even a slow HDD reads that in well under a second), force-resolve
     // so the worker pool isn't held hostage by a stuck stream. 30 s is
     // generous; in practice the timeout never fires under normal conditions.
-    timeoutId = setTimeout(() => finish(null), 30_000);
+    timeoutId = setTimeout(() => {
+      logFirstFailure("timeout", filePath, new Error(`30s timeout, hashUpdateCount=${hashUpdateCount}, endFired=${endFired}, closeFiredFirst=${closeFiredFirst}`));
+      finish(null);
+    }, 30_000);
   });
+}
+
+/**
+ * One-time diagnostic log for the first N hash failures we see, so a
+ * "no duplicates found" report includes the actual error code +
+ * sample path. Without this we could only see "ok=0 null=30065" with
+ * no clue WHY. Cleared on each scan via resetFailureLogger() called
+ * from runDuplicateScan's setup.
+ */
+let failuresLogged = 0;
+const MAX_FAILURE_LOGS = 5; // one per "kind", roughly
+const failureKindsLogged = new Set<string>();
+function resetFailureLogger(): void {
+  failuresLogged = 0;
+  failureKindsLogged.clear();
+}
+function logFirstFailure(kind: string, path: string, err: unknown): void {
+  // De-dupe by (kind) so a flood of ENOENTs only logs once but a
+  // mixed flood logs all distinct causes.
+  if (failureKindsLogged.has(kind)) return;
+  if (failuresLogged >= MAX_FAILURE_LOGS) return;
+  failureKindsLogged.add(kind);
+  failuresLogged++;
+  const code = (err as { code?: string })?.code ?? "";
+  const msg = err instanceof Error ? err.message : String(err);
+  verboseLogger(`hash-fail kind=${kind} code=${code} path=${path} err=${msg}`);
 }
 
 /**
