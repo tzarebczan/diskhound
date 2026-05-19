@@ -90,6 +90,19 @@ const HASH_CONCURRENCY = (() => {
  */
 const DEFAULT_MIN_SIZE_BYTES = 1 * 1024 * 1024;
 
+/**
+ * Opt-in verbose logging. Set DISKHOUND_DUP_DEBUG=1 in the environment
+ * to get per-phase counts (candidate groups, prefix-bucket sizes,
+ * null-hash counts). The always-on summary line at scan-end stays
+ * regardless — see `summaryLog` further down. Useful when a user
+ * reports "no duplicates found" so we can pinpoint which phase ate
+ * their data.
+ */
+const DEBUG_ENABLED = process.env.DISKHOUND_DUP_DEBUG === "1";
+function debugLog(msg: string): void {
+  if (DEBUG_ENABLED) console.log(`[diskhound-dup] ${msg}`);
+}
+
 export interface DuplicateScanCallbacks {
   onProgress: (progress: DuplicateScanProgress) => void;
   onResult: (result: DuplicateAnalysis) => void;
@@ -283,9 +296,14 @@ export function runDuplicateScan(
     if (cancelled) return;
     // Final count of candidate-bearing sizes after the map is built.
     candidateGroups = 0;
+    let totalCandidateFiles = 0;
     for (const list of sizeMap.values()) {
-      if (list.length >= 2) candidateGroups++;
+      if (list.length >= 2) {
+        candidateGroups++;
+        totalCandidateFiles += list.length;
+      }
     }
+    debugLog(`phase-1-done source=${source} candidateGroups=${candidateGroups} candidateFiles=${totalCandidateFiles} totalSizeBuckets=${sizeMap.size}`);
     emitProgress("walking", true);
 
     // ── Phase 2: Hash candidates ──
@@ -344,6 +362,13 @@ export function runDuplicateScan(
       isCancelled,
     );
     if (cancelled) return;
+    let prefixNullCount = 0;
+    let prefixOkCount = 0;
+    for (const r of prefixResults) {
+      if (!r.prefixHash) prefixNullCount++;
+      else prefixOkCount++;
+    }
+    debugLog(`pass-a-done prefixResults=${prefixResults.length} ok=${prefixOkCount} null=${prefixNullCount}`);
 
     // Re-bucket by (size, prefix). Small files (≤ PREFIX_BYTES) skip
     // Pass B — their prefix hash IS the full hash — so we collect
@@ -356,6 +381,9 @@ export function runDuplicateScan(
       if (bucket) bucket.push(r.file);
       else prefixBuckets.set(key, [r.file]);
     }
+    let prefixBucketsWith2Plus = 0;
+    for (const [, bucket] of prefixBuckets) if (bucket.length >= 2) prefixBucketsWith2Plus++;
+    debugLog(`pass-a-buckets total=${prefixBuckets.size} bucketsWith2OrMore=${prefixBucketsWith2Plus}`);
 
     // Confirm small-file groups (size ≤ PREFIX_BYTES) without Pass B.
     // For larger files, queue every file for the full-hash pass.
@@ -402,6 +430,13 @@ export function runDuplicateScan(
       isCancelled,
     );
     if (cancelled) return;
+    let fullNullCount = 0;
+    let fullOkCount = 0;
+    for (const r of fullResults) {
+      if (!r.fullHash) fullNullCount++;
+      else fullOkCount++;
+    }
+    debugLog(`pass-b-done fullResults=${fullResults.length} ok=${fullOkCount} null=${fullNullCount} fullHashTasks=${fullHashTasks.length}`);
 
     // Bucket full-hash results by (size, full-hash), emit confirmed
     // groups. Same-hash + same-size → duplicate.
@@ -413,6 +448,9 @@ export function runDuplicateScan(
       if (bucket) bucket.push(r.file);
       else fullBuckets.set(key, [r.file]);
     }
+    let fullBucketsWith2Plus = 0;
+    for (const [, bucket] of fullBuckets) if (bucket.length >= 2) fullBucketsWith2Plus++;
+    debugLog(`pass-b-buckets total=${fullBuckets.size} bucketsWith2OrMore=${fullBucketsWith2Plus} totalConfirmedSoFar=${confirmedGroups.length}`);
     // Emit groups as they're confirmed, interleaved with progress
     // ticks so the UI's duplicate list populates during the scan
     // instead of in one flood at the end. Map iteration order is
@@ -446,12 +484,6 @@ export function runDuplicateScan(
 
     if (cancelled) return;
 
-    // Persist the hash cache so the next scan skips unchanged files.
-    // Non-fatal on error; cache module handles its own logging.
-    if (options.cacheDir) {
-      await persistHashCache();
-    }
-
     confirmedGroups.sort(
       (a, b) => (b.files.length - 1) * b.size - (a.files.length - 1) * a.size,
     );
@@ -477,7 +509,33 @@ export function runDuplicateScan(
       analyzedAt: Date.now(),
     };
 
+    // Always-on summary line — one per scan, sized to be useful in bug
+    // reports without polluting steady-state logs. If a user reports
+    // "no duplicates found" we can read this and immediately see
+    // whether candidates were collected, files were hashed, and how
+    // many groups confirmed.
+    console.log(
+      `[diskhound-dup] scan complete: root=${rootPath} source=${source} ` +
+      `walked=${filesWalked} candGroups=${candidateGroups} hashed=${filesHashed} ` +
+      `groups=${confirmedGroups.length} wastedBytes=${totalWastedBytes} ` +
+      `elapsedMs=${Date.now() - startedAt}`,
+    );
+
+    // Emit the result FIRST, then persist the cache. Cache persistence
+    // can take many seconds on a populated cache (hundreds of MB) and
+    // we don't want the UI to sit on "Scanning…" while the cache
+    // serialises — especially since the last progress event was
+    // status:"hashing" which keeps isScanning=true in the renderer
+    // until onResult flips it.
     callbacks.onResult(result);
+
+    // Persist the hash cache so the next scan skips unchanged files.
+    // Non-fatal on error; cache module handles its own logging.
+    // Fire-and-forget — the user has their results, this is just
+    // bookkeeping for the next scan.
+    if (options.cacheDir) {
+      void persistHashCache().catch(() => { /* non-fatal */ });
+    }
   };
 
   void run().catch((error) => {
@@ -565,6 +623,13 @@ async function collectFromIndex(
     return true;
   });
   if (cbs.isCancelled()) return new Map();
+  // Final tick after pass A so filesWalked reflects the true total
+  // even when the index has < 5000 candidate files.
+  {
+    let candGroups = 0;
+    for (const count of sizeCounts.values()) if (count >= 2) candGroups++;
+    cbs.onProgress(walked, candGroups);
+  }
 
   // Compact the count map down to "sizes we care about".
   const candidateSizes = new Set<number>();
@@ -701,6 +766,15 @@ async function collectFromWalk(
         cbs.onProgress(walked, candGroups);
       }
     }
+  }
+
+  // Final tick so the summary log and progress UI show the true walk
+  // count even for trees that finished without crossing the 500-file
+  // sample boundary (small folders, or scan completed quickly).
+  {
+    let candGroups = 0;
+    for (const c of sizeCounts.values()) if (c >= 2) candGroups++;
+    cbs.onProgress(walked, candGroups);
   }
 
   // Build the candidate map, keeping only sizes with ≥ 2 occurrences.

@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.5.19 — 2026-05-19
+
+Diagnostic and reliability fixes for the duplicate scanner. The
+v0.5.18 cancellation + BLAKE2b changes work correctly in isolated
+testing (44-file mix across walk + index + warm-cache paths, plus
+mid-scan cancellation), but a user reported the scan returning
+zero duplicates. None of the suspected causes reproduced in
+isolation, so this release adds telemetry to pinpoint where real
+data deviates from the test fixtures, plus three reliability
+fixes that may also be involved.
+
+### Hash cache persist no longer blocks the result emit
+
+The post-scan flow was:
+
+```
+emit final progress (status: "hashing", with confirmed groups)
+await persistHashCache()                 ← could take many seconds
+build result
+emit onResult                            ← UI finally flips out of "Scanning…"
+```
+
+If the cache had hundreds of MB of entries, `persistHashCache`
+took 5–30 s to serialise. The renderer's last seen status was
+"hashing" so `isScanning` stayed true the whole time, and the
+streamed-in groups were visible *under* a "Scanning…" header.
+Worse, if cache write hung (network userData dir, antivirus
+quarantine), the result never arrived at all.
+
+Fixed: emit the result first, then fire-and-forget the cache
+persist. The user gets their dupes immediately; the cache
+catches up in the background. If the cache write fails or
+hangs, the scan is still complete from the user's perspective.
+
+### Always-on summary log line
+
+Every scan now writes one structured line to the main-process
+stdout at completion:
+
+```
+[diskhound-dup] scan complete: root=D:\Media source=index walked=412382 candGroups=8941 hashed=18922 groups=312 wastedBytes=27634982144 elapsedMs=84223
+```
+
+Useful in bug reports — we can see immediately whether the walk
+found candidates, whether hashing ran, and how many groups
+confirmed. Previously a "no duplicates found" report had no way
+to distinguish "no candidates collected" from "candidates
+collected but all hashes returned null" from "hashes worked but
+no buckets matched."
+
+### Opt-in verbose logging
+
+Set `DISKHOUND_DUP_DEBUG=1` in the environment to get per-phase
+counts (candidate groups, prefix-bucket sizes, null-hash counts).
+Quiet by default.
+
+### Fixed `filesWalked` counter showing 0 for small scans
+
+The walker only emitted progress every 500 files / 5000 index
+records, so a scan that finished below that threshold (or
+finished its last batch right at the boundary) reported
+`filesWalked=0` in both the UI progress text and the new
+summary log. Now both collectors emit a final progress tick on
+completion so the count is accurate regardless of tree size.
+
 ## 0.5.18 — 2026-05-18
 
 Duplicate scanning got a major performance + cancellation overhaul.
