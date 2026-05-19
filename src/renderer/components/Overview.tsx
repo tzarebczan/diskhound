@@ -20,6 +20,10 @@ const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 interface Props {
   snapshot: ScanSnapshot;
   onFilterExtension: (ext: string) => void;
+  /** Switch to the Changes view. Called from the LatestScanSummary
+   *  card's "View details" affordance so users can drill into the
+   *  full diff without hunting for the sidebar tab. */
+  onViewChanges?: () => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
    * enough drive metadata to compute a ratio. null otherwise — the
@@ -88,7 +92,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -281,7 +285,7 @@ export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
         )}
       </div>
 
-      {latestDiff && <LatestScanSummary diff={latestDiff} />}
+      {latestDiff && <LatestScanSummary diff={latestDiff} onViewDetails={onViewChanges} />}
 
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
@@ -707,7 +711,7 @@ function Metric({ value, label, accent }: { value: string; label: string; accent
   );
 }
 
-function LatestScanSummary({ diff }: { diff: ScanDiffResult }) {
+function LatestScanSummary({ diff, onViewDetails }: { diff: ScanDiffResult; onViewDetails?: () => void }) {
   const grew = diff.totalBytesDelta > 0;
   const bytesLabel = formatBytes(Math.abs(diff.totalBytesDelta));
   const title = diff.totalBytesDelta === 0
@@ -733,6 +737,19 @@ function LatestScanSummary({ diff }: { diff: ScanDiffResult }) {
           {diff.totalFilesDelta >= 0 ? "+" : ""}{formatCount(diff.totalFilesDelta)} files -{" "}
           {diff.totalDirsDelta >= 0 ? "+" : ""}{formatCount(diff.totalDirsDelta)} folders -{" "}
           compared with {relativeTime(diff.baselineScannedAt)}
+          {onViewDetails && (
+            <>
+              {" — "}
+              <button
+                type="button"
+                className="scan-summary-view-details"
+                onClick={onViewDetails}
+                title="Open the Changes tab with this diff loaded"
+              >
+                View details →
+              </button>
+            </>
+          )}
         </div>
       </div>
       <div className="scan-summary-chips">

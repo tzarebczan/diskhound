@@ -157,7 +157,15 @@ async function mapConcurrent<T, R>(
           const i = next++;
           if (i >= items.length) return;
           try {
-            results[i] = await fn(items[i]!, i);
+            // Belt-and-suspenders: cap any individual task at 10 min so
+            // a stuck Promise (e.g. a stream that never resolves on a
+            // hung network drive) can't deadlock the whole worker pool.
+            // The hash functions have their own per-stream timeouts;
+            // this is the outermost safety net.
+            results[i] = await Promise.race([
+              fn(items[i]!, i),
+              new Promise<R>((resolve) => setTimeout(() => resolve(undefined as R), 10 * 60_000)),
+            ]);
           } catch {
             // Hash functions resolve null on error; this catch only
             // exists to keep one runaway worker from breaking the
@@ -884,8 +892,22 @@ function hashFilePrefix(
   isCancelled: () => boolean,
 ): Promise<string | null> {
   return new Promise((resolve) => {
-    if (isCancelled()) return resolve(null);
+    let settled = false;
     let stream: ReadStream | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    const finish = (val: string | null) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+      if (stream) {
+        active.delete(stream);
+        try { stream.destroy(); } catch { /* already destroyed */ }
+      }
+      resolve(val);
+    };
+
+    if (isCancelled()) return finish(null);
+
     try {
       stream = createReadStream(filePath, {
         start: 0,
@@ -893,30 +915,48 @@ function hashFilePrefix(
         highWaterMark: PREFIX_BYTES,
       });
     } catch {
-      return resolve(null);
+      return finish(null);
     }
+
+    // CRITICAL: attach error + close listeners FIRST, before active.add /
+    // createHash / data listener / anything else that could throw. A v0.5.22
+    // user hit a wave of [main-uncaught] ENOENT/EBUSY errors with no stack
+    // trace — symptom of the error event firing on a stream before its
+    // listener was attached, which happens if any sync code between
+    // createReadStream and stream.on("error") throws. Defense in depth.
+    stream.on("error", () => finish(null));
+    stream.on("close", () => finish(null));
+
     active.add(stream);
+
     const hash = createHash(HASH_ALGO);
-    let settled = false;
-    const finish = (val: string | null) => {
-      if (settled) return;
-      settled = true;
-      active.delete(stream!);
-      try { stream!.destroy(); } catch { /* ok */ }
-      resolve(val);
-    };
     stream.on("data", (chunk) => {
       if (isCancelled()) {
         finish(null);
         return;
       }
-      hash.update(chunk);
+      // hash.update should never throw on a Buffer, but if it ever did,
+      // the throw would propagate out of the event listener as an uncaught
+      // exception. Wrap defensively.
+      try {
+        hash.update(chunk);
+      } catch {
+        finish(null);
+      }
     });
-    stream.on("end", () => finish(isCancelled() ? null : hash.digest("hex")));
-    stream.on("error", () => finish(null));
-    stream.on("close", () => {
-      if (!settled) finish(null);
+    stream.on("end", () => {
+      try {
+        finish(isCancelled() ? null : hash.digest("hex"));
+      } catch {
+        finish(null);
+      }
     });
+
+    // Safety timeout: if no event fires for 30 s (prefix is at most 64 KB
+    // — even a slow HDD reads that in well under a second), force-resolve
+    // so the worker pool isn't held hostage by a stuck stream. 30 s is
+    // generous; in practice the timeout never fires under normal conditions.
+    timeoutId = setTimeout(() => finish(null), 30_000);
   });
 }
 
@@ -934,35 +974,61 @@ function hashFileFull(
   isCancelled: () => boolean,
 ): Promise<string | null> {
   return new Promise((resolve) => {
-    if (isCancelled()) return resolve(null);
-    let stream: ReadStream | null = null;
-    try {
-      stream = createReadStream(filePath, { highWaterMark: FULL_HASH_HIGH_WATER_MARK });
-    } catch {
-      return resolve(null);
-    }
-    active.add(stream);
-    const hash = createHash(HASH_ALGO);
     let settled = false;
+    let stream: ReadStream | null = null;
+    let timeoutId: NodeJS.Timeout | null = null;
     const finish = (val: string | null) => {
       if (settled) return;
       settled = true;
-      active.delete(stream!);
-      try { stream!.destroy(); } catch { /* ok */ }
+      if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+      if (stream) {
+        active.delete(stream);
+        try { stream.destroy(); } catch { /* already destroyed */ }
+      }
       resolve(val);
     };
+
+    if (isCancelled()) return finish(null);
+
+    try {
+      stream = createReadStream(filePath, { highWaterMark: FULL_HASH_HIGH_WATER_MARK });
+    } catch {
+      return finish(null);
+    }
+
+    // Same defensive ordering as hashFilePrefix — error + close listeners
+    // BEFORE any sync code that could throw.
+    stream.on("error", () => finish(null));
+    stream.on("close", () => finish(null));
+
+    active.add(stream);
+
+    const hash = createHash(HASH_ALGO);
     stream.on("data", (chunk) => {
       if (isCancelled()) {
         finish(null);
         return;
       }
-      hash.update(chunk);
+      try {
+        hash.update(chunk);
+      } catch {
+        finish(null);
+      }
     });
-    stream.on("end", () => finish(isCancelled() ? null : hash.digest("hex")));
-    stream.on("error", () => finish(null));
-    stream.on("close", () => {
-      if (!settled) finish(null);
+    stream.on("end", () => {
+      try {
+        finish(isCancelled() ? null : hash.digest("hex"));
+      } catch {
+        finish(null);
+      }
     });
+
+    // Safety timeout for the full-hash case: 5 min. Full hashes only run
+    // for files ≤ 64 MB (anything larger goes through hashFileSample), so
+    // even at HDD speeds (~30 MB/s) the cap is well within reach. If a
+    // file's open() blocks indefinitely (network drive offline, etc.),
+    // the timeout unblocks the worker pool.
+    timeoutId = setTimeout(() => finish(null), 5 * 60_000);
   });
 }
 

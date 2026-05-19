@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.5.23 — 2026-05-19
+
+The v0.5.22 dialog suppression worked, but exposed a deeper
+problem: when a stream's `error` event fires before its listener
+is attached (rare but possible if any sync code between
+`createReadStream` and `stream.on("error", …)` throws), Node
+emits the error as an uncaught exception. The Promise wrapping
+the stream stays pending forever, the worker awaiting it hangs,
+and the whole 16-way hash pool deadlocks. End result for the
+user: duplicate scan completes silently with 0 results, second
+scan stuck at "Cataloging files... 0 scanned", Changes tab
+won't load.
+
+### Hash functions: error listener attached FIRST
+
+`hashFilePrefix` and `hashFileFull` now attach `error` + `close`
+listeners IMMEDIATELY after `createReadStream`, before any other
+sync code (`active.add`, `createHash`, the `data` listener, etc).
+Even if one of those throws, the error path is already covered.
+
+`hash.update(chunk)` and `hash.digest(...)` are also wrapped in
+try/catch — they shouldn't throw on valid Buffers, but defense
+in depth is cheap here.
+
+### Per-task safety timeouts so a stuck stream can't deadlock the pool
+
+Each hash function gets a per-task timeout:
+- `hashFilePrefix`: 30 s (4 KB read, even on a slow HDD takes ms)
+- `hashFileFull`: 5 min (files ≤ 64 MB at ~30 MB/s = ~2 s max in
+  practice; 5 min is the no-progress floor before we give up)
+
+`mapConcurrent` adds an outer 10-minute cap via `Promise.race`
+as the final backstop — if a hash function's own timeout somehow
+doesn't fire, the worker still moves on.
+
+If the timeout fires, the task resolves null and the worker
+takes the next item. Worst case: a small subset of files don't
+get hashed; the scan still completes.
+
+### "View details" link on the latest-scan summary card
+
+The card already shows scan-to-scan deltas. Now it has a
+"View details →" affordance inline with the meta line that
+switches the view to the Changes tab with the diff loaded.
+One-click drill-in instead of forcing users to find the sidebar
+tab.
+
 ## 0.5.22 — 2026-05-19
 
 User reported a flood of ENOENT popups for files like

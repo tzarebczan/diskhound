@@ -1175,7 +1175,7 @@ export function App() {
             />
           ) : (
             <>
-              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} scanPercent={currentScanPercent} /></ErrorBoundary>}
+              {view === "overview" && <ErrorBoundary name="Overview"><Overview snapshot={snapshot} onFilterExtension={onFilterExtension} onViewChanges={() => setView("changes")} scanPercent={currentScanPercent} /></ErrorBoundary>}
               {view === "files" && <ErrorBoundary name="File List"><FileList snapshot={searchFilteredSnapshot} initialFilter={filterExt} /></ErrorBoundary>}
               {view === "folders" && <ErrorBoundary name="Folders"><FolderList snapshot={snapshot} /></ErrorBoundary>}
               {view === "duplicates" && (

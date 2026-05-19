@@ -1474,6 +1474,23 @@ button, input, select, textarea { font: inherit; }
   border-color: rgba(16,185,129,0.22);
   background: rgba(16,185,129,0.08);
 }
+/* Inline "View details →" link inside the scan summary card. Styled
+ * as text-link (not a button) so it reads as part of the meta line
+ * but is still clearly clickable. */
+.scan-summary-view-details {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: none;
+  font-weight: 500;
+}
+.scan-summary-view-details:hover {
+  text-decoration: underline;
+}
 
 /* ── Recently large UX (compact, opt-in) ─────────────────────
  * No standalone card — the feature is a single toggle on the
