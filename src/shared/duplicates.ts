@@ -91,16 +91,39 @@ const HASH_CONCURRENCY = (() => {
 const DEFAULT_MIN_SIZE_BYTES = 1 * 1024 * 1024;
 
 /**
- * Opt-in verbose logging. Set DISKHOUND_DUP_DEBUG=1 in the environment
- * to get per-phase counts (candidate groups, prefix-bucket sizes,
- * null-hash counts). The always-on summary line at scan-end stays
- * regardless — see `summaryLog` further down. Useful when a user
- * reports "no duplicates found" so we can pinpoint which phase ate
- * their data.
+ * Opt-in verbose logging. Two ways to enable:
+ *   1. Env var DISKHOUND_DUP_DEBUG=1 (dev / power users)
+ *   2. Runtime toggle via setDuplicateVerbose() — called by
+ *      main.ts whenever the user flips the settings checkbox.
+ *
+ * Output goes through `verboseLogger` which main.ts wires to
+ * writeCrashLog so the lines land in crash.log alongside other
+ * diagnostic events. The crash-log viewer in Settings then makes
+ * them shareable.
+ *
+ * The always-on summary line at scan-end stays regardless —
+ * see the `console.log` near the end of `run()`. Useful when a
+ * user reports "no duplicates found" so we can pinpoint which
+ * phase ate their data.
  */
-const DEBUG_ENABLED = process.env.DISKHOUND_DUP_DEBUG === "1";
+let verboseEnabled = process.env.DISKHOUND_DUP_DEBUG === "1";
+let verboseLogger: (msg: string) => void = (msg) => console.log(`[diskhound-dup] ${msg}`);
+
+/** Toggle verbose logging at runtime. Called by main.ts via the
+ *  settings.subscribe wiring whenever the user changes the toggle. */
+export function setDuplicateVerbose(on: boolean): void {
+  verboseEnabled = on || process.env.DISKHOUND_DUP_DEBUG === "1";
+}
+
+/** Inject a logger sink. main.ts uses this to route verbose lines
+ *  into writeCrashLog so they survive process restarts and show up
+ *  in the Settings → Crash log viewer. */
+export function setDuplicateLogger(fn: (msg: string) => void): void {
+  verboseLogger = fn;
+}
+
 function debugLog(msg: string): void {
-  if (DEBUG_ENABLED) console.log(`[diskhound-dup] ${msg}`);
+  if (verboseEnabled) verboseLogger(msg);
 }
 
 export interface DuplicateScanCallbacks {
@@ -528,9 +551,12 @@ export function runDuplicateScan(
     // reports without polluting steady-state logs. If a user reports
     // "no duplicates found" we can read this and immediately see
     // whether candidates were collected, files were hashed, and how
-    // many groups confirmed.
-    console.log(
-      `[diskhound-dup] scan complete: root=${rootPath} source=${source} ` +
+    // many groups confirmed. Routed through verboseLogger (which
+    // main.ts hooks to writeCrashLog) so it lands in crash.log
+    // regardless of the verbose toggle — this is the always-on
+    // breadcrumb, not the per-phase counts that the toggle gates.
+    verboseLogger(
+      `scan complete: root=${rootPath} source=${source} ` +
       `walked=${filesWalked} candGroups=${candidateGroups} hashed=${filesHashed} ` +
       `groups=${confirmedGroups.length} wastedBytes=${totalWastedBytes} ` +
       `elapsedMs=${Date.now() - startedAt}`,

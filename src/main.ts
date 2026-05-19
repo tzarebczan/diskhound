@@ -77,7 +77,12 @@ import {
   indexFilePath,
   initScanIndex,
 } from "./shared/scanIndex";
-import { runDuplicateScan, type DuplicateScanHandle } from "./shared/duplicates";
+import {
+  runDuplicateScan,
+  setDuplicateLogger,
+  setDuplicateVerbose,
+  type DuplicateScanHandle,
+} from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
 import { normPath } from "./shared/pathUtils";
 import { analyzeForCleanup } from "./shared/suggestions";
@@ -694,6 +699,12 @@ void app.whenReady().then(async () => {
   // remember to broadcast (e.g. the affinity-rule engine that
   // updates `lastAppliedAt` from the main process automatically
   // flows through here).
+  // Wire the duplicate scanner's verbose logger into crash.log so
+  // diagnostic lines land in the same shareable file as everything
+  // else. The verboseEnabled flag is then toggled via the settings
+  // subscribe wiring below.
+  setDuplicateLogger((msg) => writeCrashLog("dup", msg));
+
   settingsStore.subscribe((settings) => {
     // Push the retention cap into scanHistory so subsequent scans
     // honor the user's preference. The retention is enforced on
@@ -702,6 +713,7 @@ void app.whenReady().then(async () => {
     // user clears via the Storage panel's button instead). That's
     // intentional: a settings change shouldn't surprise-delete data.
     setMaxHistoryPerRoot(settings.storage.maxHistoryPerRoot);
+    setDuplicateVerbose(settings.storage.verboseDuplicateLog);
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;
       try {
@@ -711,8 +723,9 @@ void app.whenReady().then(async () => {
       }
     }
   });
-  // Apply the current setting once at startup before any scan saves.
+  // Apply the current settings once at startup before any scan runs.
   setMaxHistoryPerRoot(settingsStore.get().storage.maxHistoryPerRoot);
+  setDuplicateVerbose(settingsStore.get().storage.verboseDuplicateLog);
 
   // Sweep orphan pending-* index files left behind by crashed scans.
   // Done in the background so app startup isn't delayed; if it's

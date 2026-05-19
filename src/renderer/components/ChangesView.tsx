@@ -273,9 +273,62 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
   // "switching" overlay until the new result lands.
   const switchSeqRef = useRef(0);
   const [switching, setSwitching] = useState(false);
+
+  /**
+   * Diff mode toggle.
+   *
+   * - "cumulative" (default): every history row diffs against the
+   *   CURRENT scan. Clicking "6h ago" answers "what changed in the
+   *   last 6 hours". Same file growing across multiple time-points
+   *   shows up in every row that pre-dates the growth.
+   *
+   * - "per-scan": every history row diffs against the scan
+   *   chronologically AFTER it. Clicking "6h ago" answers "what
+   *   changed between the 6h-ago scan and the next scan after it".
+   *   A file that grew once shows up exactly once — in the row for
+   *   the scan immediately before the growth.
+   *
+   * User asked for both. Persisted to localStorage so the
+   * preference survives reopens.
+   */
+  type DiffMode = "cumulative" | "per-scan";
+  const DIFF_MODE_KEY = "diskhound:changes-diff-mode";
+  const [diffMode, setDiffMode] = useState<DiffMode>(() => {
+    if (typeof window === "undefined") return "cumulative";
+    const v = window.localStorage.getItem(DIFF_MODE_KEY);
+    return v === "per-scan" ? "per-scan" : "cumulative";
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(DIFF_MODE_KEY, diffMode); } catch { /* ok */ }
+    // When the user flips the mode, every cached diff becomes stale
+    // because the meaning of (baseline, current) pair changes. Drop
+    // the cache so subsequent selectBaseline calls re-fetch with
+    // the right "current" side.
+    diffCache.current.clear();
+  }, [diffMode]);
+
+  /**
+   * Pick the "current" side of a diff given a baseline ID + the mode.
+   * - cumulative: always history[0] (latest).
+   * - per-scan: the entry immediately newer than the baseline.
+   * Returns null when the baseline is the latest entry (which the UI
+   * doesn't let users click anyway — the latest is the COMPARING
+   * AGAINST header, not a clickable pill).
+   */
+  const resolveCurrentId = (baselineId: string): string | null => {
+    if (history.length === 0) return null;
+    if (diffMode === "cumulative") return history[0].id;
+    // per-scan: find the baseline's index, then take the entry one
+    // index lower (newer, since history is sorted newest-first).
+    const baselineIdx = history.findIndex((h) => h.id === baselineId);
+    if (baselineIdx <= 0) return null; // not found, or it IS the latest
+    return history[baselineIdx - 1].id;
+  };
+
   const selectBaseline = async (baselineId: string) => {
     if (!history.length) return;
-    const currentId = history[0].id;
+    const currentId = resolveCurrentId(baselineId);
+    if (!currentId) return; // can't diff the latest against itself
     setSelectedBaseline(baselineId);
     fullDiffSeqRef.current += 1;
     setFullDiff(null); // invalidate — applies to different baseline now
@@ -302,6 +355,18 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     }
     setSwitching(false);
   };
+
+  // When the diff mode flips, re-run the current baseline so the
+  // displayed diff matches the new mode.
+  useEffect(() => {
+    if (!selectedBaseline || history.length === 0) return;
+    void selectBaseline(selectedBaseline);
+    // selectBaseline is stable across renders w.r.t. the values we
+    // care about here. Including it in deps would re-fire on every
+    // render (it captures history/diffMode in closure each time);
+    // we want this effect ONLY on mode flips.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [diffMode]);
 
   const [fullDiffError, setFullDiffError] = useState<string | null>(null);
   const loadFullDiff = useCallback(async () => {
@@ -532,6 +597,34 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         {/* History sidebar */}
         <div className="changes-history">
           <div className="changes-history-title">Scan History</div>
+
+          {/* Diff-mode toggle. Cumulative = each row compared to
+              CURRENT; per-scan = each row compared to the NEXT scan
+              after it chronologically. Defaults to cumulative since
+              "what changed in the last N hours" is the more common
+              question. */}
+          <div className="changes-diff-mode" role="radiogroup" aria-label="Diff mode">
+            <button
+              type="button"
+              className={`chip chip-small ${diffMode === "cumulative" ? "active" : ""}`}
+              onClick={() => setDiffMode("cumulative")}
+              role="radio"
+              aria-checked={diffMode === "cumulative"}
+              title="Each row diffs against the current (latest) scan — answers 'what changed in the last N hours'. Same file growing across multiple time-points appears in every pre-growth row."
+            >
+              vs current
+            </button>
+            <button
+              type="button"
+              className={`chip chip-small ${diffMode === "per-scan" ? "active" : ""}`}
+              onClick={() => setDiffMode("per-scan")}
+              role="radio"
+              aria-checked={diffMode === "per-scan"}
+              title="Each row diffs against the scan immediately after it — answers 'what changed in that specific step'. A file that grew once shows up exactly once."
+            >
+              vs next
+            </button>
+          </div>
 
           {/* Quick-select time range pills */}
           <QuickSelectPills
@@ -1006,6 +1099,13 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
         return (
           <div key={d.path} className="changes-row">
             <div className={`changes-row-badge ${badgeClass(d.kind)}`}>{d.kind}</div>
+            {/* Spacer for the 18px file-icon column. FileDeltaList
+                renders a <FileIcon> here; for directory rows we need
+                an empty placeholder so the grid columns line up —
+                without it the "info" cell collapses into the 18px
+                icon slot, truncating directory names to one letter
+                (the bug the user reported in v0.5.24). */}
+            <div aria-hidden="true" />
             <div className="changes-row-info">
               <div className="changes-row-name">{name}</div>
               <div className="changes-row-path">{d.path}</div>

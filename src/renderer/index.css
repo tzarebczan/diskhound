@@ -1492,6 +1492,16 @@ button, input, select, textarea { font: inherit; }
   text-decoration: underline;
 }
 
+/* Changes-tab diff-mode toggle (cumulative vs per-scan). Lives in
+ * the sidebar above the quick-select time pills. */
+.changes-diff-mode {
+  display: flex;
+  gap: 4px;
+  padding: 0 12px 8px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 8px;
+}
+
 /* ── Recently large UX (compact, opt-in) ─────────────────────
  * No standalone card — the feature is a single toggle on the
  * treemap toolbar plus 3 window pills that appear inline when

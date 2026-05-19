@@ -252,6 +252,16 @@ export interface StorageSettings {
    * indexes were silently accumulating tens of GB of history.
    */
   maxHistoryPerRoot: number;
+  /**
+   * Verbose logging for the duplicate scanner. When on, every phase
+   * boundary writes a counts line to crash.log so a "no duplicates
+   * found" bug report has enough detail to diagnose remotely (was
+   * the candidate list empty? did hashing produce nulls? did
+   * bucketing fail?). Off by default — adds 5-20 lines per scan
+   * which is fine to ignore but clutters the log for users who
+   * aren't debugging anything.
+   */
+  verboseDuplicateLog: boolean;
 }
 
 /** Returned by `nativeApi.getStorageStats()` — surfaces disk usage
@@ -1149,6 +1159,7 @@ export function defaultSettings(): AppSettings {
       // big enough to be useful, small enough that most users won't
       // notice it on the disk. Was 20 (hardcoded) before v0.5.24.
       maxHistoryPerRoot: 7,
+      verboseDuplicateLog: false,
     },
     recentScans: [],
     affinityRules: [],
@@ -1296,6 +1307,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         30, // upper bound — beyond this the history-index file grows large
         defaults.storage.maxHistoryPerRoot,
       ),
+      verboseDuplicateLog: Boolean(merged.storage.verboseDuplicateLog),
     },
     recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])
       .filter((scan): scan is RecentScan =>

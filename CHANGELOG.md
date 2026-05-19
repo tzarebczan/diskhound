@@ -1,5 +1,66 @@
 # Changelog
 
+## 0.5.25 — 2026-05-19
+
+Three Changes-tab fixes plus a way to debug duplicate scans
+without a dev-mode launch.
+
+### Directories tab: names no longer truncated to one letter
+
+`DirDeltaList` was missing the 18 px spacer column that
+`FileDeltaList` uses for the file-icon. CSS Grid assigned the
+"info" cell to the icon slot instead, so directory names rendered
+as `t...`, `A...`, `D...`. Fixed with an empty `<div>` placeholder
+in the icon position.
+
+### "vs current" / "vs next" diff mode on the Changes sidebar
+
+The original behavior was: every history pill diffs against the
+CURRENT scan ("what changed in the last N hours"). User reported
+the same files appearing across multiple pill rows — that's the
+cumulative semantics, and it's the right default for "what
+happened on this drive recently?". But sometimes you want
+between-scans deltas instead ("what happened in this specific
+step").
+
+Added a toggle near the sidebar's quick-select pills:
+
+- **vs current** (default): each row diffs against the latest
+  scan. A file growing across multiple time-points appears in
+  every pre-growth row. Answers "what changed in the last N
+  hours / days".
+- **vs next**: each row diffs against the scan chronologically
+  AFTER it. A file that grew once appears exactly once — in the
+  row for the scan immediately before the growth. Answers "what
+  changed in this specific step".
+
+Persisted to localStorage so the preference survives reopens.
+Flipping the toggle re-runs the currently-selected baseline so
+the displayed diff matches the new mode.
+
+### Verbose duplicate-scan logging (opt-in, in Settings)
+
+User reported the duplicate scan completes silently with no
+results and asked for a way to debug without a dev-mode launch.
+Settings → Storage now has a "Verbose duplicate-scan logging"
+toggle. When on:
+
+- Every phase boundary writes a counts line to crash.log
+  (candidates collected, prefix-bucketed, full-hashed, etc).
+- The always-on summary line ("scan complete: walked=X
+  candGroups=Y hashed=Z groups=N") now routes through crash.log
+  instead of stdout, so even without the toggle the most useful
+  diagnostic is shareable.
+
+The crash log is viewable in Settings → Crash log → View, or
+the file path is revealed via "Open folder". Workflow for a
+"no duplicates returned" repro:
+
+1. Toggle "Verbose duplicate-scan logging" on
+2. Click Scan for Duplicates, let it complete
+3. Settings → Crash log → View
+4. Copy the `[dup]` lines and share
+
 ## 0.5.24 — 2026-05-19
 
 User noticed DiskHound was sitting on ~7 GB of its own scan

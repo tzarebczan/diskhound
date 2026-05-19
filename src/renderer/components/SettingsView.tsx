@@ -385,6 +385,12 @@ function StorageSection({
         max={30}
         onChange={(v) => onChange({ ...settings, storage: { ...settings.storage, maxHistoryPerRoot: v } })}
       />
+      <ToggleRow
+        label="Verbose duplicate-scan logging"
+        desc="Writes per-phase counts (candidates collected, hashed, bucketed, confirmed) to crash.log on every duplicate scan. Off by default — turn on if a duplicate scan completes silently without results, then view the crash log below and share it. Adds ~5–20 lines per scan."
+        value={settings.storage.verboseDuplicateLog}
+        onChange={(v) => onChange({ ...settings, storage: { ...settings.storage, verboseDuplicateLog: v } })}
+      />
       <div className="settings-row settings-row-action">
         <div className="settings-row-label">
           Clear all scan history
