@@ -26,7 +26,14 @@ import { createInterface } from "node:readline";
  * vanish from disk are pruned on next persist.
  */
 
-const CACHE_FILE_NAME = "duplicate-hash-cache.ndjson.gz";
+/**
+ * v2: switched hash algorithm from SHA-256 to BLAKE2b in v0.5.18,
+ * and added "sample:" cache keys for large-file 3-window hashing.
+ * The v1 cache contains incompatible SHA-256 digests so we use a
+ * distinct filename and best-effort delete the old file on init.
+ */
+const CACHE_FILE_NAME = "duplicate-hash-cache-v2.ndjson.gz";
+const LEGACY_CACHE_FILE_NAME = "duplicate-hash-cache.ndjson.gz";
 const CACHE_MAX_ENTRIES = 500_000;
 
 interface CacheEntry {
@@ -56,6 +63,15 @@ export async function initHashCache(dataDirPath: string): Promise<void> {
   dataDir = dataDirPath;
   loaded = true;
   cache = new Map();
+  // Best-effort cleanup of the v1 SHA-256 cache file. Its digests
+  // are useless under the new BLAKE2b scheme and the file is
+  // typically tens of MB on a well-used install.
+  try {
+    const legacyPath = Path.join(dataDir, LEGACY_CACHE_FILE_NAME);
+    if (FS.existsSync(legacyPath)) {
+      await FS.promises.unlink(legacyPath).catch(() => {});
+    }
+  } catch { /* non-fatal */ }
   const p = cachePath();
   if (!FS.existsSync(p)) return;
   try {
