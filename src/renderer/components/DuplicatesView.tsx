@@ -1,4 +1,4 @@
-import { useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useState } from "preact/hooks";
 
 import type {
   DuplicateAnalysis,
@@ -44,6 +44,23 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   // snapshot.rootPath as-is (the typical case).
   const [scopeOverride, setScopeOverride] = useState<string | null>(null);
   const effectiveScope = scopeOverride ?? rootPath ?? "";
+
+  // Does this scope have a scan-index we can stream? If yes, the
+  // duplicate scan runs the fast path (read gzipped NDJSON, ~5 s on a
+  // 7 M-file drive). If no, it falls back to walking the live
+  // filesystem — 10-60 min on the same drive. We check upfront so the
+  // pre-scan UI can warn the user (and recommend running a regular
+  // scan first) BEFORE they click and wait an hour. null = still
+  // loading; true = fast path available; false = walk mode only.
+  const [hasIndex, setHasIndex] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!effectiveScope) { setHasIndex(null); return; }
+    let cancelled = false;
+    void nativeApi.hasScanIndexForPath(effectiveScope).then((result) => {
+      if (!cancelled) setHasIndex(result);
+    });
+    return () => { cancelled = true; };
+  }, [effectiveScope]);
 
   const startScan = () => {
     if (!effectiveScope) return;
@@ -356,6 +373,21 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               {progress.groupsConfirmed > 0 && `, ${progress.groupsConfirmed} confirmed`}
             </span>
           </div>
+          {/* Walk-mode warning. The duplicate scanner has two paths:
+              - index: streams a previous scan's gzipped NDJSON
+                (~5 sec for a 7M-file drive)
+              - walk: enumerates the live filesystem via readdir+stat
+                (10-60 min for the same drive on Windows)
+              Without a prior regular scan there's no index to use, so
+              we fall back to walk. The user doesn't see that
+              distinction in the UI; surface it here so a 30-min wait
+              isn't a mystery, and link to the Overview tab where they
+              can kick off a regular scan to populate the index. */}
+          {progress.status === "walking" && progress.source === "walk" && (
+            <div className="duplicates-walk-hint">
+              <strong>Slow scan:</strong> no recent index for this drive — walking the live filesystem. On big drives (1 M+ files) this can take 10-60 min. For future runs, scan the drive from the <strong>Overview</strong> tab first; subsequent duplicate scans read the index in seconds.
+            </div>
+          )}
         </div>
       )}
 
@@ -412,6 +444,27 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
                   : "current scan root — change above"}
               </span>
             </div>
+            {/* Walk-mode warning shown BEFORE the user clicks scan.
+                hasIndex is null while loading, true if a regular scan
+                covers this scope (fast path), false if not (walk
+                fallback, much slower). Only render the warning when
+                we know for sure (false), so we don't pre-emptively
+                scare anyone while the IPC is still in flight. */}
+            {hasIndex === false && effectiveScope && (
+              <div className="duplicates-walk-warning">
+                <div className="duplicates-walk-warning-title">⚠ Slow scan ahead</div>
+                <div className="duplicates-walk-warning-body">
+                  No scan index for <code>{effectiveScope}</code> — the duplicate scanner
+                  will walk the live filesystem. On big drives (1 M+ files) this can
+                  take 10–60 min.
+                </div>
+                <div className="duplicates-walk-warning-tip">
+                  <strong>Tip:</strong> Run a regular scan from the <strong>Overview</strong> tab
+                  first. It uses the NTFS master file table directly and finishes in a few
+                  minutes; subsequent duplicate scans then read the index in seconds.
+                </div>
+              </div>
+            )}
           </div>
         )}
 

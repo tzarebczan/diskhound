@@ -1007,6 +1007,11 @@ export interface DiskhoundNativeApi {
    *  (interrupted scans). Runs automatically on startup; the
    *  Settings panel can also trigger it manually. */
   cleanupOrphanPending: () => Promise<{ removed: number; bytesFreed: number }>;
+  /** Whether a usable scan-index covers this path. When false, the
+   *  duplicate scanner has to walk the live filesystem (slow on big
+   *  drives) instead of streaming the gzipped index. The UI uses
+   *  this to surface a "run a regular scan first" hint upfront. */
+  hasScanIndexForPath: (rootPath: string) => Promise<boolean>;
   getFullDiffStatus: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffStatus>;
   /** Compute the full per-file diff from the persisted index files (not top-N). */
   computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;

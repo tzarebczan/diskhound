@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.5.29 — 2026-05-19
+
+After clearing scan history (via Settings → Storage → "Clear
+all" in v0.5.24), the duplicate scanner has no index to read
+from and falls back to walking the live filesystem — 10-60 min
+for a 7M-file drive vs. 5 sec for the index path. The user hit
+this and reasonably mistook the slowness for a bug.
+
+### Upfront walk-mode warning
+
+New IPC `hasScanIndexForPath(rootPath)` returns whether a usable
+scan index exists for the chosen scope. The DuplicatesView
+queries it on mount and, if no index is available, shows a
+prominent amber warning in the pre-scan empty state:
+
+> **⚠ Slow scan ahead**
+> No scan index for `C:\` — the duplicate scanner will walk the
+> live filesystem. On big drives (1 M+ files) this can take
+> 10–60 min.
+>
+> **Tip:** Run a regular scan from the **Overview** tab first.
+> It uses the NTFS master file table directly and finishes in a
+> few minutes; subsequent duplicate scans then read the index in
+> seconds.
+
+If the user starts the scan anyway, a smaller inline hint sits
+in the progress strip while walking (same advice, shorter).
+
+### Why the user lost settings (they didn't)
+
+The "Clear all" button in v0.5.24's Storage panel deletes scan
+history + indexes — which is what makes the drive picker appear
+on next launch (no recent scan to restore) and why the duplicate
+scan falls back to walk mode. App-level settings (general,
+monitoring, cleanup, storage prefs, etc.) are preserved. The
+existing confirm dialog already calls this out; this release
+just makes the *next* scan's slowness obvious before the user
+commits to it.
+
 ## 0.5.28 — 2026-05-19
 
 v0.5.27 fixed the crash but exposed a new mystery: `pass-a-done`

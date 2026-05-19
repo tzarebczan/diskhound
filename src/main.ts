@@ -2982,6 +2982,22 @@ void app.whenReady().then(async () => {
     return Array.from(activeDuplicateScans.keys());
   });
 
+  /**
+   * Does a scan-index file exist for the given path? Used by the
+   * DuplicatesView to warn the user UPFRONT (before they click Scan)
+   * that without an index, the duplicate scan will walk the live
+   * filesystem (slow on big drives — 10-60 min for 1 M+ files vs.
+   * 5 sec for the index path).
+   */
+  ipcMain.handle("diskhound:has-scan-index-for-path", (_event, rootPath: string) => {
+    try {
+      const resolved = Path.resolve(rootPath);
+      return findIndexCoveringPath(resolved) !== null;
+    } catch {
+      return false;
+    }
+  });
+
   // ── IPC: Storage management ───────────────────────────────
   //
   // Surfaces disk-usage stats for the Settings → Storage panel and

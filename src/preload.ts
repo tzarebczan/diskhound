@@ -123,6 +123,7 @@ const api: DiskhoundNativeApi = {
   getStorageStats: () => ipcRenderer.invoke("diskhound:get-storage-stats"),
   clearScanHistory: () => ipcRenderer.invoke("diskhound:clear-scan-history"),
   cleanupOrphanPending: () => ipcRenderer.invoke("diskhound:cleanup-orphan-pending"),
+  hasScanIndexForPath: (rootPath) => ipcRenderer.invoke("diskhound:has-scan-index-for-path", rootPath),
   getFullDiffStatus: (baselineId, currentId, limit) =>
     ipcRenderer.invoke("diskhound:get-full-diff-status", baselineId, currentId, limit),
   computeFullScanDiff: (baselineId, currentId, limit) =>

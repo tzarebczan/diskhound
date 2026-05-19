@@ -5289,6 +5289,56 @@ button, input, select, textarea { font: inherit; }
   max-width: 340px;
 }
 
+/* Pre-scan walk-mode warning — shown in the empty state when no
+ * scan index covers the chosen scope. Visually distinct (amber
+ * border) so the user notices it before clicking Scan and waiting
+ * an hour. */
+.duplicates-walk-warning {
+  margin-top: 20px;
+  padding: 12px 16px;
+  max-width: 520px;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-left-width: 3px;
+  border-radius: var(--radius-md);
+  background: rgba(245, 158, 11, 0.06);
+  text-align: left;
+}
+.duplicates-walk-warning-title {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--amber);
+  margin-bottom: 4px;
+}
+.duplicates-walk-warning-body {
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.duplicates-walk-warning-body code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+.duplicates-walk-warning-tip {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* Inline hint inside the in-progress strip when the scan IS already
+ * running in walk mode (user dismissed or didn't see the upfront
+ * warning). Smaller, inline with the progress text. */
+.duplicates-walk-hint {
+  margin-top: 8px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--amber);
+  background: rgba(245, 158, 11, 0.06);
+  border-left: 2px solid rgba(245, 158, 11, 0.35);
+  border-radius: 3px;
+  line-height: 1.4;
+}
+
 /* ── Changes View ─────────────────────────────── */
 .changes-view {
   display: flex;
