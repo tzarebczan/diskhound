@@ -16,6 +16,7 @@ import type {
 } from "./contracts";
 import { createIdleScanSnapshot } from "./contracts";
 import { normPath } from "./pathUtils";
+import { attachPipeErrorHandlers } from "./streamSafety";
 
 const INDEX_DIR = "scan-indexes";
 const INDEX_SUFFIX = ".ndjson.gz";
@@ -76,6 +77,9 @@ export function openIndexWriter(filePath: string): {
   FS.mkdirSync(Path.dirname(filePath), { recursive: true });
   const gz = createGzip({ level: 6 });
   const file = createWriteStream(filePath);
+  // Without these listeners, an EPERM/ENOSPC on `file` or a gzip
+  // engine error surfaces as an uncaught main-process exception.
+  attachPipeErrorHandlers([gz, file]);
   gz.pipe(file);
 
   let settled = false;
@@ -98,18 +102,25 @@ export async function loadIndex(filePath: string): Promise<Map<string, IndexReco
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line) continue;
-    try {
-      const rec = JSON.parse(line) as IndexRecord;
-      if (rec && typeof rec.p === "string" && rec.t !== "d") {
-        // Only file entries belong in the file-diff map.
-        map.set(normPath(rec.p), rec);
-      }
-    } catch { /* skip malformed lines */ }
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      try {
+        const rec = JSON.parse(line) as IndexRecord;
+        if (rec && typeof rec.p === "string" && rec.t !== "d") {
+          // Only file entries belong in the file-diff map.
+          map.set(normPath(rec.p), rec);
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* stream errored — return whatever we collected */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
   return map;
 }
@@ -126,17 +137,24 @@ export async function loadDirMtimes(filePath: string): Promise<Map<string, numbe
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line) continue;
-    try {
-      const rec = JSON.parse(line) as IndexRecord;
-      if (rec && rec.t === "d" && typeof rec.p === "string" && typeof rec.m === "number") {
-        map.set(normPath(rec.p), rec.m);
-      }
-    } catch { /* skip malformed lines */ }
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      try {
+        const rec = JSON.parse(line) as IndexRecord;
+        if (rec && rec.t === "d" && typeof rec.p === "string" && typeof rec.m === "number") {
+          map.set(normPath(rec.p), rec.m);
+        }
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* stream errored — return partial */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
   return map;
 }
@@ -157,23 +175,30 @@ export async function loadFilesByParent(
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (!line) continue;
-    try {
-      const rec = JSON.parse(line) as IndexRecord;
-      if (!rec || typeof rec.p !== "string" || rec.t === "d") continue;
-      if (typeof rec.s !== "number") continue;
-      const parent = normPath(Path.dirname(rec.p));
-      let list = byParent.get(parent);
-      if (!list) {
-        list = [];
-        byParent.set(parent, list);
-      }
-      list.push(rec);
-    } catch { /* skip malformed lines */ }
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      try {
+        const rec = JSON.parse(line) as IndexRecord;
+        if (!rec || typeof rec.p !== "string" || rec.t === "d") continue;
+        if (typeof rec.s !== "number") continue;
+        const parent = normPath(Path.dirname(rec.p));
+        let list = byParent.get(parent);
+        if (!list) {
+          list = [];
+          byParent.set(parent, list);
+        }
+        list.push(rec);
+      } catch { /* skip malformed lines */ }
+    }
+  } catch { /* stream errored — return partial */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
   return byParent;
 }
@@ -276,32 +301,39 @@ export async function loadLargestFiles(
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
 
-  for await (const line of rl) {
-    if (!line) continue;
-    let rec: IndexRecord;
-    try {
-      rec = JSON.parse(line) as IndexRecord;
-    } catch { continue; }
-    if (!rec || typeof rec.s !== "number" || rec.s < minBytes) continue;
-    // Skip directory entries — they carry mtime only, no size.
-    if (rec.t === "d") continue;
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: IndexRecord;
+      try {
+        rec = JSON.parse(line) as IndexRecord;
+      } catch { continue; }
+      if (!rec || typeof rec.s !== "number" || rec.s < minBytes) continue;
+      // Skip directory entries — they carry mtime only, no size.
+      if (rec.t === "d") continue;
 
-    if (top.length < limit) {
-      top.push(rec);
-      if (top.length === limit) {
+      if (top.length < limit) {
+        top.push(rec);
+        if (top.length === limit) {
+          top.sort((a, b) => a.s - b.s);
+          smallestInTop = top[0].s;
+        }
+      } else if (rec.s > smallestInTop) {
+        // Replace the smallest entry (binary insertion keeps it sorted ascending)
+        top[0] = rec;
+        // Re-bubble down to maintain sorted order — simple re-sort is fine at this size
         top.sort((a, b) => a.s - b.s);
         smallestInTop = top[0].s;
       }
-    } else if (rec.s > smallestInTop) {
-      // Replace the smallest entry (binary insertion keeps it sorted ascending)
-      top[0] = rec;
-      // Re-bubble down to maintain sorted order — simple re-sort is fine at this size
-      top.sort((a, b) => a.s - b.s);
-      smallestInTop = top[0].s;
     }
+  } catch { /* stream errored — return partial */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
 
   return top.sort((a, b) => b.s - a.s);
@@ -348,49 +380,56 @@ export async function loadDirectChildrenFromIndex(
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
 
-  for await (const line of rl) {
-    if (!line) continue;
-    let rec: IndexRecord;
-    try { rec = JSON.parse(line) as IndexRecord; } catch { continue; }
-    if (!rec || typeof rec.p !== "string") continue;
-    // Skip directory entries — they carry mtime only, no size, and we
-    // roll up dirs from their file descendants anyway.
-    if (rec.t === "d") continue;
-    if (typeof rec.s !== "number") continue;
+  try {
+    for await (const line of rl) {
+      if (!line) continue;
+      let rec: IndexRecord;
+      try { rec = JSON.parse(line) as IndexRecord; } catch { continue; }
+      if (!rec || typeof rec.p !== "string") continue;
+      // Skip directory entries — they carry mtime only, no size, and we
+      // roll up dirs from their file descendants anyway.
+      if (rec.t === "d") continue;
+      if (typeof rec.s !== "number") continue;
 
-    const filePathNorm = normPath(rec.p);
-    if (!filePathNorm.startsWith(prefix)) continue;
+      const filePathNorm = normPath(rec.p);
+      if (!filePathNorm.startsWith(prefix)) continue;
 
-    const rest = filePathNorm.slice(prefix.length);
-    const firstSep = rest.search(/[\\/]/);
-    if (firstSep === -1) {
-      // Direct file in parentPath — capture in top-N.
-      if (topFiles.length < fileLimit) {
-        topFiles.push(rec);
-        if (topFiles.length === fileLimit) {
+      const rest = filePathNorm.slice(prefix.length);
+      const firstSep = rest.search(/[\\/]/);
+      if (firstSep === -1) {
+        // Direct file in parentPath — capture in top-N.
+        if (topFiles.length < fileLimit) {
+          topFiles.push(rec);
+          if (topFiles.length === fileLimit) {
+            topFiles.sort((a, b) => a.s - b.s);
+            smallestInTop = topFiles[0].s;
+          }
+        } else if (rec.s > smallestInTop) {
+          topFiles[0] = rec;
           topFiles.sort((a, b) => a.s - b.s);
           smallestInTop = topFiles[0].s;
         }
-      } else if (rec.s > smallestInTop) {
-        topFiles[0] = rec;
-        topFiles.sort((a, b) => a.s - b.s);
-        smallestInTop = topFiles[0].s;
-      }
-    } else {
-      // Belongs to a child subfolder — roll up into that folder's totals.
-      const childName = rest.slice(0, firstSep);
-      const childPath = parentNorm + Path.sep + childName;
-      const existing = childDirTotals.get(childPath);
-      if (existing) {
-        existing.size += rec.s;
-        existing.fileCount += 1;
       } else {
-        childDirTotals.set(childPath, { size: rec.s, fileCount: 1 });
+        // Belongs to a child subfolder — roll up into that folder's totals.
+        const childName = rest.slice(0, firstSep);
+        const childPath = parentNorm + Path.sep + childName;
+        const existing = childDirTotals.get(childPath);
+        if (existing) {
+          existing.size += rec.s;
+          existing.fileCount += 1;
+        } else {
+          childDirTotals.set(childPath, { size: rec.s, fileCount: 1 });
+        }
       }
     }
+  } catch { /* stream errored — return partial */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
 
   const dirs = Array.from(childDirTotals.entries())
@@ -489,9 +528,11 @@ export async function buildSnapshotFromIndex(
 
   const gunzip = createGunzip();
   const source = createReadStream(indexPath);
+  attachPipeErrorHandlers([source, gunzip]);
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
+  try {
   for await (const line of rl) {
     if (!line) continue;
     let rec: { p?: string; s?: number; m?: number; t?: string };
@@ -566,6 +607,11 @@ export async function buildSnapshotFromIndex(
       largestFiles.sort((a, b) => a.size - b.size);
       smallestInTop = largestFiles[0].size;
     }
+  }
+  } catch { /* stream errored — finalize with partial data */ }
+  finally {
+    try { gunzip.destroy(); } catch { /* ok */ }
+    try { source.destroy(); } catch { /* ok */ }
   }
 
   // Finalize: sort largest files descending, build hottestDirectories

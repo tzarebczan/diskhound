@@ -1475,106 +1475,21 @@ button, input, select, textarea { font: inherit; }
   background: rgba(16,185,129,0.08);
 }
 
-/* ── Recently large files card (Overview) ─────────────────────
- * Answers "what recently took up the most space?" Lives just
- * below the LatestScanSummary card. Compact list + window
- * picker (7d/30d/90d) + see-all link to Files tab.
+/* ── Recently large UX (compact, opt-in) ─────────────────────
+ * No standalone card — the feature is a single toggle on the
+ * treemap toolbar plus 3 window pills that appear inline when
+ * the toggle is active. Same surface footprint regardless of
+ * state, so opt-in users get the lens without paying any
+ * permanent UI cost.
  */
-.recently-large-card {
-  margin: 0 12px 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-panel);
-  flex-shrink: 0;
-}
-.recently-large-header { margin-bottom: 8px; }
-.recently-large-title-row {
+.treemap-recent-window {
   display: flex;
-  align-items: center;
-  gap: 12px;
-  justify-content: space-between;
-}
-.recently-large-title {
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--text);
-}
-.recently-large-window {
-  display: flex;
-  gap: 4px;
-}
-.recently-large-sub {
-  margin-top: 3px;
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-secondary);
-}
-.recently-large-list {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  display: flex;
-  flex-direction: column;
   gap: 2px;
-}
-.recently-large-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-}
-.recently-large-row:hover { background: var(--bg-row-hover); }
-.recently-large-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-.recently-large-info { min-width: 0; }
-.recently-large-name {
-  font-size: 12.5px;
-  font-weight: 500;
-  color: var(--text);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.recently-large-meta {
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--text-tertiary);
-  margin-top: 1px;
-}
-.recently-large-actions {
-  display: flex;
-  gap: 4px;
-  opacity: 0;
-  transition: opacity 0.12s;
-}
-.recently-large-row:hover .recently-large-actions { opacity: 1; }
-.recently-large-footer {
-  margin-top: 6px;
-  display: flex;
-  justify-content: flex-end;
-}
-.recently-large-see-all {
-  background: none;
-  border: none;
-  color: var(--accent);
-  font-size: 11.5px;
-  font-weight: 500;
-  cursor: pointer;
-  padding: 4px 6px;
-  border-radius: var(--radius-sm);
-}
-.recently-large-see-all:hover {
-  background: rgba(99,102,241,0.08);
+  margin-left: 4px;
 }
 
-/* Small variant of the chip — used in the recently-large window
- * picker where a full-size chip would dominate the header row.
+/* Small variant of the chip — used in the recent-window pills
+ * on both Overview and Files tabs.
  */
 .chip.chip-small {
   font-size: 10.5px;

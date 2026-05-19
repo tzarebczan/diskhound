@@ -440,6 +440,11 @@ async function applyDeltasToIndex(
 
   const gzOut = createGzip({ level: 6 });
   const writeStream = createWriteStream(newPath);
+  // Attach error listeners BEFORE pipe() — pipe() doesn't propagate
+  // errors, so an EPERM/ENOSPC on writeStream or a gzip error becomes
+  // an uncaught main-process exception otherwise.
+  gzOut.on("error", () => { /* swallowed */ });
+  writeStream.on("error", () => { /* swallowed */ });
   gzOut.pipe(writeStream);
 
   const writeLine = (obj: unknown) => {
@@ -448,6 +453,8 @@ async function applyDeltasToIndex(
 
   const gunzip = createGunzip();
   const source = createReadStream(previousPath);
+  source.on("error", () => { /* swallowed */ });
+  gunzip.on("error", () => { /* swallowed */ });
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });

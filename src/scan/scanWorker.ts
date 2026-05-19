@@ -90,7 +90,13 @@ async function runScan(input: MainToWorkerMessage["input"]): Promise<void> {
     try {
       mkdirSync(Path.dirname(input.indexOutput), { recursive: true });
       indexGzip = createGzip({ level: 6 });
-      indexGzip.pipe(createWriteStream(input.indexOutput));
+      const outStream = createWriteStream(input.indexOutput);
+      // Error listeners BEFORE pipe() — pipe doesn't propagate, and
+      // a worker thread crash from an unhandled stream error makes
+      // the whole scan look like it disappeared into the void.
+      indexGzip.on("error", () => { indexGzip = null; });
+      outStream.on("error", () => { indexGzip = null; });
+      indexGzip.pipe(outStream);
     } catch {
       indexGzip = null;
     }
@@ -460,6 +466,10 @@ async function loadBaseline(filePath: string): Promise<Baseline> {
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  // Don't let an EPERM/ENOENT race on the baseline file (e.g. file
+  // rotated while we read it) crash the worker.
+  source.on("error", () => { /* swallowed */ });
+  gunzip.on("error", () => { /* swallowed */ });
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });

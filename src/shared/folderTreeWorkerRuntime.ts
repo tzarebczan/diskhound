@@ -38,6 +38,12 @@ export async function buildFolderTreeFromIndex(
 
   const gunzip = createGunzip();
   const source = createReadStream(indexPathStr);
+  // Don't let an EPERM/ENOENT on the index file (e.g. the file was
+  // rotated mid-read by a parallel scan finishing) take down the
+  // whole worker thread. Errors become a normal for-await rejection
+  // that the outer caller handles.
+  source.on("error", () => { /* swallowed */ });
+  gunzip.on("error", () => { /* swallowed */ });
   source.pipe(gunzip);
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
 

@@ -20,9 +20,6 @@ const TREEMAP_FOLDERS_STORAGE_KEY = "diskhound:treemap-folders";
 interface Props {
   snapshot: ScanSnapshot;
   onFilterExtension: (ext: string) => void;
-  /** Navigate to Files tab with the "Recently large" filter pre-set
-   *  to the chosen window. */
-  onShowRecentlyLarge?: (window: "7d" | "30d" | "90d") => void;
   /**
    * Scan progress percent (0–99) when a scan is live and we have
    * enough drive metadata to compute a ratio. null otherwise — the
@@ -39,6 +36,20 @@ const OVERVIEW_RECENT_WINDOWS: { id: OverviewRecentWindow; label: string; ms: nu
   { id: "30d", label: "30d", ms: 30 * 24 * 60 * 60 * 1000 },
   { id: "90d", label: "90d", ms: 90 * 24 * 60 * 60 * 1000 },
 ];
+const TREEMAP_RECENT_ON_KEY = "diskhound:treemap-recent-on";
+const TREEMAP_RECENT_WINDOW_KEY = "diskhound:treemap-recent-window";
+
+function getInitialRecentOn(): boolean {
+  if (typeof window === "undefined") return false;
+  return window.localStorage.getItem(TREEMAP_RECENT_ON_KEY) === "1";
+}
+
+function getInitialRecentWindow(): OverviewRecentWindow {
+  if (typeof window === "undefined") return "30d";
+  const v = window.localStorage.getItem(TREEMAP_RECENT_WINDOW_KEY);
+  if (v === "7d" || v === "30d" || v === "90d") return v;
+  return "30d";
+}
 
 type TreemapMode = "condensed" | "all";
 const TREEMAP_MODE_STORAGE_KEY = "diskhound:treemap-mode";
@@ -77,7 +88,7 @@ function getInitialShowFolders(): boolean {
 // canvas render performance.
 const DENSE_TREEMAP_LIMIT = 5_000;
 
-export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, scanPercent }: Props) {
+export function Overview({ snapshot, onFilterExtension, scanPercent }: Props) {
   const { bytesSeen, filesVisited, directoriesVisited, skippedEntries } = snapshot;
   // Live-ticking elapsed: during a running scan the snapshot only updates
   // ~5x/second via progress messages, so the "elapsed" metric would
@@ -104,6 +115,15 @@ export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, sca
   const [treemapLayout, setTreemapLayout] = useState<TreemapLayout>(getInitialTreemapLayout);
   const [extSidebarCollapsed, setExtSidebarCollapsed] = useState<boolean>(getInitialExtSidebarCollapsed);
   const [showFolders, setShowFolders] = useState<boolean>(getInitialShowFolders);
+  // Opt-in "recent only" filter applied to the treemap. Default OFF
+  // so the user's first impression is the full disk, not a sliced
+  // view. When ON, the treemap re-renders with only files modified
+  // within recentWindow — same "what recently took up the most space"
+  // question but answered inside the existing treemap surface
+  // instead of a separate list. Persisted to localStorage so the
+  // user's preference survives reopens.
+  const [recentOn, setRecentOn] = useState<boolean>(getInitialRecentOn);
+  const [recentWindow, setRecentWindow] = useState<OverviewRecentWindow>(getInitialRecentWindow);
   const [dominantExpanded, setDominantExpanded] = useState(false);
   const [denseFiles, setDenseFiles] = useState<ScanFileRecord[] | null>(null);
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
@@ -173,7 +193,20 @@ export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, sca
 
   // Prefer the dense file list; fall back to the snapshot's top-N while a
   // scan is running or if the index isn't available.
-  const sourceFiles = denseFiles ?? effectiveLargestFiles;
+  const sourceFilesRaw = denseFiles ?? effectiveLargestFiles;
+
+  // Apply the "Recent only" filter at the source — pasted into the
+  // treemap pipeline so the composition (featured items, hottest,
+  // hierarchy) all reflects the recent slice, not just the rendered
+  // rects. Cutoff is computed once per render so we don't drift mid-
+  // session as Date.now() advances.
+  const sourceFiles = useMemo(() => {
+    if (!recentOn) return sourceFilesRaw;
+    const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === recentWindow)?.ms
+      ?? OVERVIEW_RECENT_WINDOWS[1].ms;
+    const cutoff = Date.now() - ms;
+    return sourceFilesRaw.filter((f) => f.modifiedAt >= cutoff);
+  }, [sourceFilesRaw, recentOn, recentWindow]);
 
   const treemapComposition = useMemo(
     () => buildTreemapComposition(sourceFiles),
@@ -211,6 +244,16 @@ export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, sca
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    window.localStorage.setItem(TREEMAP_RECENT_ON_KEY, recentOn ? "1" : "0");
+  }, [recentOn]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(TREEMAP_RECENT_WINDOW_KEY, recentWindow);
+  }, [recentWindow]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
     window.localStorage.setItem(TREEMAP_FOLDERS_STORAGE_KEY, showFolders ? "1" : "0");
   }, [showFolders]);
 
@@ -239,14 +282,6 @@ export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, sca
       </div>
 
       {latestDiff && <LatestScanSummary diff={latestDiff} />}
-
-      <RecentlyLargeCard
-        files={effectiveLargestFiles}
-        onSeeAll={onShowRecentlyLarge}
-        onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
-        onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-        busy={busy}
-      />
 
 
       <div className={`overview-body ${extSidebarCollapsed ? "ext-collapsed" : ""}`}>
@@ -298,6 +333,41 @@ export function Overview({ snapshot, onFilterExtension, onShowRecentlyLarge, sca
                     </svg>
                     Folders
                   </button>
+                )}
+                {/* "Recent only" treemap filter. Opt-in (default off).
+                    One button + 3 window pills that appear inline when
+                    active. Answers "what recently took up the most
+                    space" inside the existing treemap surface instead
+                    of a separate card. */}
+                <button
+                  type="button"
+                  className={`treemap-folders-toggle ${recentOn ? "active" : ""}`}
+                  aria-pressed={recentOn}
+                  title={recentOn
+                    ? `Showing only files modified in the last ${recentWindow === "7d" ? "7 days" : recentWindow === "30d" ? "30 days" : "90 days"}. Click to show all.`
+                    : "Filter the treemap to only show recently-modified files"}
+                  onClick={() => setRecentOn((v) => !v)}
+                >
+                  <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.4">
+                    <circle cx="7" cy="7" r="5" />
+                    <path d="M7 4V7L9 8.5" />
+                  </svg>
+                  Recent
+                </button>
+                {recentOn && (
+                  <div className="treemap-recent-window treemap-mode-switch" role="radiogroup" aria-label="Recent window">
+                    {OVERVIEW_RECENT_WINDOWS.map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        className={`treemap-mode-btn ${recentWindow === w.id ? "active" : ""}`}
+                        aria-pressed={recentWindow === w.id}
+                        onClick={() => setRecentWindow(w.id)}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
                 )}
                 {/* Mode: whether to extract dominant files into cards (only
                     meaningful for Size layout) */}
@@ -677,124 +747,6 @@ function LatestScanSummary({ diff }: { diff: ScanDiffResult }) {
           </span>
         ))}
       </div>
-    </div>
-  );
-}
-
-/**
- * "Recently large" card — answers the user question "what recently
- * gobbled up disk space?" Filters largestFiles to those modified in
- * the selected window (7d / 30d / 90d) and shows the top 5 by size
- * with reveal/open actions. "See all in Files" pre-applies the
- * matching chip+window in the Files tab so the user can drill in.
- *
- * The list is intentionally compact (top 5) — Overview is already
- * dense with metrics + treemap. Users wanting more depth click
- * through to Files. Empty state (nothing in window) shows a hint
- * instead of an empty list so the card never looks broken.
- */
-const RECENTLY_LARGE_STORAGE_KEY = "diskhound:overview-recent-window";
-
-function getInitialRecentWindow(): OverviewRecentWindow {
-  if (typeof window === "undefined") return "30d";
-  const v = window.localStorage.getItem(RECENTLY_LARGE_STORAGE_KEY);
-  if (v === "7d" || v === "30d" || v === "90d") return v;
-  return "30d";
-}
-
-function RecentlyLargeCard({
-  files,
-  onSeeAll,
-  onReveal,
-  onOpen,
-  busy,
-}: {
-  files: ScanFileRecord[];
-  onSeeAll?: (window: OverviewRecentWindow) => void;
-  onReveal: (path: string) => void;
-  onOpen: (path: string) => void;
-  busy: Set<string>;
-}) {
-  const [window, setWindow] = useState<OverviewRecentWindow>(getInitialRecentWindow);
-  useEffect(() => {
-    try { globalThis.window.localStorage.setItem(RECENTLY_LARGE_STORAGE_KEY, window); } catch { /* ok */ }
-  }, [window]);
-
-  const recentLarge = useMemo(() => {
-    const ms = OVERVIEW_RECENT_WINDOWS.find((w) => w.id === window)?.ms ?? OVERVIEW_RECENT_WINDOWS[1].ms;
-    const cutoff = Date.now() - ms;
-    return files
-      .filter((f) => f.modifiedAt >= cutoff)
-      .sort((a, b) => b.size - a.size)
-      .slice(0, 5);
-  }, [files, window]);
-
-  const totalRecentBytes = useMemo(
-    () => recentLarge.reduce((sum, f) => sum + f.size, 0),
-    [recentLarge],
-  );
-
-  if (files.length === 0) return null;
-
-  return (
-    <div className="recently-large-card">
-      <div className="recently-large-header">
-        <div className="recently-large-title-row">
-          <div className="recently-large-title">Recently large files</div>
-          <div className="recently-large-window" role="radiogroup" aria-label="Recent window">
-            {OVERVIEW_RECENT_WINDOWS.map((w) => (
-              <button
-                key={w.id}
-                className={`chip chip-small ${window === w.id ? "active" : ""}`}
-                onClick={() => setWindow(w.id)}
-                role="radio"
-                aria-checked={window === w.id}
-              >
-                {w.label}
-              </button>
-            ))}
-          </div>
-        </div>
-        <div className="recently-large-sub">
-          {recentLarge.length > 0
-            ? <>Top {recentLarge.length} of files modified in the last {window === "7d" ? "7 days" : window === "30d" ? "30 days" : "90 days"} — {formatBytes(totalRecentBytes)} combined</>
-            : <>Nothing modified in the last {window === "7d" ? "7 days" : window === "30d" ? "30 days" : "90 days"} in this scan</>}
-        </div>
-      </div>
-      {recentLarge.length > 0 && (
-        <ul className="recently-large-list">
-          {recentLarge.map((f) => {
-            const isBusy = busy.has(f.path);
-            const name = basename(f.path);
-            return (
-              <li key={f.path} className="recently-large-row">
-                <FileIcon path={f.path} className="recently-large-icon" />
-                <div className="recently-large-info">
-                  <div className="recently-large-name" title={f.path}>{name}</div>
-                  <div className="recently-large-meta">
-                    {formatBytes(f.size)} · {humanAge(f.modifiedAt)}
-                  </div>
-                </div>
-                <div className="recently-large-actions">
-                  <button className="action-btn" disabled={isBusy} onClick={() => onReveal(f.path)}>Reveal</button>
-                  <button className="action-btn" disabled={isBusy} onClick={() => onOpen(f.path)}>Open</button>
-                </div>
-              </li>
-            );
-          })}
-        </ul>
-      )}
-      {onSeeAll && (
-        <div className="recently-large-footer">
-          <button
-            className="recently-large-see-all"
-            onClick={() => onSeeAll(window)}
-            title="Open in Files tab with the same window pre-applied"
-          >
-            See all recently large in Files →
-          </button>
-        </div>
-      )}
     </div>
   );
 }

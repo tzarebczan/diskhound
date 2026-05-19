@@ -52,6 +52,12 @@ async function streamFileIndexRecords(
 
   const gunzip = createGunzip();
   const source = createReadStream(filePath);
+  // Worker threads with unhandled stream errors crash the whole
+  // worker, which the parent surfaces as a generic "worker exited
+  // unexpectedly" error. Attach listeners so the for-await loop
+  // surfaces the error as a normal rejection instead.
+  source.on("error", () => { /* swallowed */ });
+  gunzip.on("error", () => { /* swallowed */ });
   source.pipe(gunzip);
 
   const rl = createInterface({ input: gunzip, crlfDelay: Infinity });

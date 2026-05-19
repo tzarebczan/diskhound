@@ -2352,6 +2352,16 @@ void app.whenReady().then(async () => {
     try {
       const gunzip = createGunzip();
       const src = createReadStream(filePath);
+      // CRITICAL: attach error listeners BEFORE pipe(). pipe doesn't
+      // propagate errors — an unhandled error event on src (e.g.
+      // ENOENT race when the sidecar was deleted between existsSync
+      // and createReadStream's async open) surfaces as the
+      // "DiskHound — Unexpected error" dialog. Same for gunzip if
+      // the gzipped data is corrupt or truncated. The outer
+      // try/catch picks up the rejection from the for-await loop and
+      // returns null so the caller rebuilds the tree from the index.
+      src.on("error", () => { /* swallowed — for-await aborts */ });
+      gunzip.on("error", () => { /* swallowed */ });
       src.pipe(gunzip);
       const rl = createInterface({ input: gunzip, crlfDelay: Infinity });
       for await (const line of rl) {

@@ -66,12 +66,6 @@ const FILTER_EXTS: Record<Exclude<QuickFilter, "all" | "recent">, Set<string>> =
 interface Props {
   snapshot: ScanSnapshot;
   initialFilter?: string;
-  /** Pre-select a quick-filter chip on mount. Used when navigating
-   *  in from the Overview "Recently large" card. */
-  initialQuickFilter?: QuickFilter;
-  /** Pre-select the recent-window pill when initialQuickFilter ===
-   *  "recent". */
-  initialRecentWindow?: RecentWindow;
 }
 
 function compareFn(field: SortField, dir: SortDir) {
@@ -86,29 +80,13 @@ function compareFn(field: SortField, dir: SortDir) {
   };
 }
 
-export function FileList({ snapshot, initialFilter, initialQuickFilter, initialRecentWindow }: Props) {
+export function FileList({ snapshot, initialFilter }: Props) {
   const [filterText, setFilterText] = useState(initialFilter ?? "");
-  const [quickFilter, setQuickFilter] = useState<QuickFilter>(initialQuickFilter ?? "all");
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>("all");
   // Only meaningful when quickFilter === "recent". Persists across
   // chip toggles so flipping back into "recent" reuses the user's
   // last window choice instead of forcing them to re-pick.
-  const [recentWindow, setRecentWindow] = useState<RecentWindow>(initialRecentWindow ?? "30d");
-
-  // If the caller flips the initial filter mid-mount (e.g. user
-  // clicks the Overview "Recently large" card while already on the
-  // Files tab), pick up the new value. We intentionally ignore
-  // subsequent user toggles after that — initial* is a one-way pre-
-  // seeding mechanism, not a controlled prop.
-  const lastInitialQuickFilterRef = useRef(initialQuickFilter);
-  useEffect(() => {
-    if (initialQuickFilter && initialQuickFilter !== lastInitialQuickFilterRef.current) {
-      lastInitialQuickFilterRef.current = initialQuickFilter;
-      setQuickFilter(initialQuickFilter);
-      if (initialQuickFilter === "recent" && initialRecentWindow) {
-        setRecentWindow(initialRecentWindow);
-      }
-    }
-  }, [initialQuickFilter, initialRecentWindow]);
+  const [recentWindow, setRecentWindow] = useState<RecentWindow>("30d");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   // We use our own local runAction below (so success+dismiss can also hide the row),

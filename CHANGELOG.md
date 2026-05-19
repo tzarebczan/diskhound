@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.5.21 — 2026-05-19
+
+Codebase-wide audit of unguarded `pipe()` calls + reshape of the
+Recently-large UX to a treemap mode instead of a separate card.
+
+### Audited every `pipe()` for missing error listeners
+
+A new ENOENT popup ("no such file or directory, open
+'…folder-tree.ndjson.gz'") landed on top of yesterday's EPERM
+fix, with the same root cause in a different file: `pipe()`
+doesn't propagate errors, and the codebase had ~15 places that
+piped gzip streams without listeners on the source / gzip side.
+Each missed one is a future "Unexpected error" dialog waiting
+to happen.
+
+This release fixes them all in one sweep, gated by a new
+`src/shared/streamSafety.ts#attachPipeErrorHandlers([streams])`
+helper so future call sites have an obvious one-line idiom.
+Sites fixed:
+
+- `readFolderTreeSidecar` (the ENOENT from the screenshot — file
+  rotated between existsSync and createReadStream's async open)
+- `scanIndex.ts`: `openIndexWriter`, `loadIndex`, `loadDirMtimes`,
+  `loadFilesByParent`, `loadTopNFromIndex`,
+  `loadDirectChildrenFromIndex`, `buildSnapshotFromIndex` — all
+  seven gzip readers / writers used by the regular scan + folders
+  tab
+- `usnMonitor.ts`: USN-journal incremental rewriter (both the
+  reader of the previous gz index and the writer of the new one)
+- `scanWorker.ts`: the index writer + the baseline reader the
+  worker thread uses
+- `folderTreeWorkerRuntime.ts`, `fullDiffWorkerRuntime.ts`: worker
+  threads that load gzip indexes — unhandled stream errors here
+  crash the whole worker, which the parent surfaces as a generic
+  "worker exited unexpectedly"
+
+Every reader now also wraps its `for await` loop in
+try / catch / finally and destroys both streams in the finally
+block, so a malformed gzip header or mid-read I/O failure
+returns partial data instead of corrupting the surrounding flow.
+
+### Recently-large feature: card → treemap mode
+
+The v0.5.20 implementation put a multi-row file listing card on
+the Overview tab. User feedback: don't want a file listing, want
+a treemap-style view filtered to recently-large files; opt-in,
+not default; doesn't take up extra space.
+
+This version replaces the card with a single "Recent" toggle in
+the existing treemap toolbar. Default off. When clicked, three
+window pills (7d / 30d / 90d) appear inline next to it and the
+treemap re-renders showing only files modified inside the chosen
+window. Toggle off → back to the full disk treemap.
+
+Persisted to localStorage (both the on/off and the window) so
+the user's preference survives reopens.
+
+The Files-tab "Recently large" chip from v0.5.20 stays — it's a
+one-line addition to an existing chip row, doesn't violate the
+"no listing" feedback because the Files tab is already a listing
+that users opt into.
+
 ## 0.5.20 — 2026-05-19
 
 Four things this release: a real fix for the "Unexpected error"
