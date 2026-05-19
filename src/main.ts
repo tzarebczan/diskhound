@@ -727,6 +727,39 @@ void app.whenReady().then(async () => {
   setMaxHistoryPerRoot(settingsStore.get().storage.maxHistoryPerRoot);
   setDuplicateVerbose(settingsStore.get().storage.verboseDuplicateLog);
 
+  // Startup-state diagnostic. User reported drive picker showing
+  // up unexpectedly (didn't run "Clear all" themselves). Log the
+  // state of the relevant files so we can spot whether last-scan
+  // .json or the scan-history index disappeared between sessions.
+  try {
+    const userData = app.getPath("userData");
+    const lastScanPath = Path.join(userData, "last-scan.json");
+    const histIndexPath = Path.join(userData, "scan-history", "scan-history-index.json");
+    const indexesDir = Path.join(userData, "scan-indexes");
+    let lastScanInfo = "missing";
+    try {
+      const st = await FS.stat(lastScanPath);
+      const raw = await FS.readFile(lastScanPath, "utf-8");
+      const parsed = JSON.parse(raw) as { status?: string; rootPath?: string | null; finishedAt?: number };
+      lastScanInfo = `size=${st.size}B status=${parsed.status ?? "?"} root=${parsed.rootPath ?? "null"} finishedAt=${parsed.finishedAt ?? "?"}`;
+    } catch { /* missing or unreadable */ }
+    let histCount = 0;
+    try {
+      const raw = await FS.readFile(histIndexPath, "utf-8");
+      const entries = JSON.parse(raw) as unknown[];
+      if (Array.isArray(entries)) histCount = entries.length;
+    } catch { /* missing */ }
+    let indexFileCount = 0;
+    try {
+      const entries = await FS.readdir(indexesDir);
+      indexFileCount = entries.filter((n) => n.endsWith(".ndjson.gz")).length;
+    } catch { /* missing */ }
+    writeCrashLog(
+      "startup-state",
+      `lastScan: ${lastScanInfo} | historyEntries=${histCount} | indexFilesOnDisk=${indexFileCount}`,
+    );
+  } catch { /* non-fatal */ }
+
   // Sweep orphan pending-* index files left behind by crashed scans.
   // Done in the background so app startup isn't delayed; if it's
   // long-running (rare — there are usually <10 such files), the

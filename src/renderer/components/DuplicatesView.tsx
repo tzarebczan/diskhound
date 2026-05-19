@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "preact/hooks";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type {
   DuplicateAnalysis,
@@ -53,14 +53,54 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   // scan first) BEFORE they click and wait an hour. null = still
   // loading; true = fast path available; false = walk mode only.
   const [hasIndex, setHasIndex] = useState<boolean | null>(null);
-  useEffect(() => {
+  const refreshHasIndex = async () => {
     if (!effectiveScope) { setHasIndex(null); return; }
+    try {
+      const result = await nativeApi.hasScanIndexForPath(effectiveScope);
+      setHasIndex(result);
+    } catch { /* leave as-is */ }
+  };
+  useEffect(() => {
     let cancelled = false;
+    if (!effectiveScope) { setHasIndex(null); return; }
     void nativeApi.hasScanIndexForPath(effectiveScope).then((result) => {
       if (!cancelled) setHasIndex(result);
     });
     return () => { cancelled = true; };
   }, [effectiveScope]);
+
+  // Two-step scan state: when the user clicks "Scan for Duplicates"
+  // without an index, we offer to chain a regular scan first
+  // (~2 min for the MFT-based fast path on Windows) and then auto-
+  // trigger the duplicate scan once the regular one completes.
+  // `chainPhase` drives the progress copy:
+  //   - null: not chained, treat as a normal scan
+  //   - "regular": waiting for the regular scan to finish
+  //   - "duplicates": the chained duplicate scan is running
+  const [chainPhase, setChainPhase] = useState<null | "regular" | "duplicates">(null);
+  // Track the snapshot status transitions so we can detect "regular
+  // scan just finished" without firing on every render.
+  const lastSnapshotStatusRef = useRef<string>(snapshot.status);
+  useEffect(() => {
+    const prev = lastSnapshotStatusRef.current;
+    lastSnapshotStatusRef.current = snapshot.status;
+    if (chainPhase !== "regular") return;
+    // Regular scan just transitioned to "done" — kick off the
+    // duplicate scan on the freshly-built index.
+    if (prev === "running" && snapshot.status === "done") {
+      setChainPhase("duplicates");
+      // Refresh the hasIndex check so subsequent UI reflects the new
+      // index (and so re-running the duplicate scan after this one
+      // also sees it as fast-path).
+      void refreshHasIndex();
+      void nativeApi.startDuplicateScan(effectiveScope);
+    }
+    // If the regular scan errored, bail the chain so we don't sit
+    // waiting forever.
+    if (prev === "running" && snapshot.status === "error") {
+      setChainPhase(null);
+    }
+  }, [snapshot.status, chainPhase, effectiveScope]);
 
   const startScan = () => {
     if (!effectiveScope) return;
@@ -72,6 +112,33 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setExpanded(new Set());
     setSelectedPaths(new Set());
     void nativeApi.startDuplicateScan(effectiveScope);
+  };
+
+  /**
+   * Chain a regular scan → duplicate scan. Used when there's no
+   * scan index for the chosen scope. The regular scan uses the MFT
+   * fast path on Windows (~2 min for a 7M-file drive) and emits a
+   * proper folder-tree sidecar, so the chained duplicate scan then
+   * runs in seconds against the fresh index.
+   */
+  const startScanWithIndex = async () => {
+    if (!effectiveScope) return;
+    if (rootPath) onClearAnalysis(rootPath);
+    setDismissed(new Set());
+    setExpanded(new Set());
+    setSelectedPaths(new Set());
+    setChainPhase("regular");
+    // Reset the snapshot-status tracker to whatever status the snapshot
+    // is right NOW so the useEffect doesn't fire on a stale transition
+    // (e.g. if it was "done" from a previous scan).
+    lastSnapshotStatusRef.current = snapshot.status;
+    try {
+      await nativeApi.startScan(effectiveScope, {});
+    } catch {
+      // startScan rejection — undo the chain marker so the UI doesn't
+      // sit on "Building scan index" forever.
+      setChainPhase(null);
+    }
   };
 
   const togglePathSelected = (path: string) => {
@@ -110,7 +177,34 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     if (rootPath) {
       void nativeApi.cancelDuplicateScan(rootPath);
     }
+    // Also abort the chain (if any) so the UI doesn't sit on
+    // "Step 1/2: Building scan index..." after the user cancels.
+    // Note: this doesn't cancel the underlying regular scan if
+    // chainPhase === "regular" — that scan keeps running and will
+    // simply not trigger the duplicate step when it completes.
+    setChainPhase(null);
   };
+
+  // Clean up chainPhase when the duplicate scan ends (success or
+  // error). Use a ref-flagged "seen scanning at least once" guard so
+  // we don't immediately clear after entering chainPhase="duplicates"
+  // — the duplicate-scan IPC has a roundtrip delay before the
+  // renderer's isScanning state catches up, and clearing too early
+  // makes the "Step 2/2" label flicker off and back on.
+  const sawScanningRef = useRef(false);
+  useEffect(() => {
+    if (chainPhase !== "duplicates") {
+      sawScanningRef.current = false;
+      return;
+    }
+    if (isScanning) {
+      sawScanningRef.current = true;
+    } else if (sawScanningRef.current) {
+      // We saw isScanning=true at some point and it's now false →
+      // the chained duplicate scan finished.
+      setChainPhase(null);
+    }
+  }, [chainPhase, isScanning]);
 
   const toggleExpand = (hash: string) => {
     setExpanded((s) => {
@@ -342,8 +436,17 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               Change scope
             </button>
           )}
-          {isScanning ? (
+          {isScanning || chainPhase === "regular" ? (
             <button className="scan-btn scan-btn-stop" onClick={cancelScan}>Cancel</button>
+          ) : hasIndex === false ? (
+            <button
+              className="scan-btn scan-btn-primary"
+              onClick={() => void startScanWithIndex()}
+              disabled={!effectiveScope}
+              title="Runs a regular scan first (~2 min on a 7M-file drive), then automatically checks for duplicates using the fresh index"
+            >
+              Scan drive + find duplicates
+            </button>
           ) : (
             <button
               className="scan-btn scan-btn-primary"
@@ -357,6 +460,27 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
       </div>
 
       {/* ── Progress ── */}
+      {chainPhase === "regular" && (
+        <div className="duplicates-progress">
+          <div className="duplicates-progress-bar">
+            <div className="duplicates-progress-fill" />
+          </div>
+          <div className="duplicates-progress-text">
+            <span>
+              <strong>Step 1 / 2:</strong>{" "}
+              {snapshot.status === "running"
+                ? `Building scan index… ${snapshot.filesVisited.toLocaleString()} files`
+                : "Starting scan…"}
+            </span>
+            <span>
+              {snapshot.bytesSeen > 0 && `${(snapshot.bytesSeen / 1024 / 1024 / 1024).toFixed(1)} GB so far`}
+            </span>
+          </div>
+          <div className="duplicates-walk-hint">
+            Using MFT on Windows — usually a couple of minutes. Duplicate check starts automatically when this finishes.
+          </div>
+        </div>
+      )}
       {isScanning && progress && (
         <div className="duplicates-progress">
           <div className="duplicates-progress-bar">
@@ -364,6 +488,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
           </div>
           <div className="duplicates-progress-text">
             <span>
+              {chainPhase === "duplicates" && <strong>Step 2 / 2: </strong>}
               {progress.status === "walking"
                 ? `Cataloging files... ${progress.filesWalked.toLocaleString()} scanned`
                 : `Comparing... ${progress.filesHashed.toLocaleString()} hashed`}
@@ -381,11 +506,10 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               Without a prior regular scan there's no index to use, so
               we fall back to walk. The user doesn't see that
               distinction in the UI; surface it here so a 30-min wait
-              isn't a mystery, and link to the Overview tab where they
-              can kick off a regular scan to populate the index. */}
+              isn't a mystery. */}
           {progress.status === "walking" && progress.source === "walk" && (
             <div className="duplicates-walk-hint">
-              <strong>Slow scan:</strong> no recent index for this drive — walking the live filesystem. On big drives (1 M+ files) this can take 10-60 min. For future runs, scan the drive from the <strong>Overview</strong> tab first; subsequent duplicate scans read the index in seconds.
+              <strong>Slow scan:</strong> no recent index for this drive — walking the live filesystem. On big drives (1 M+ files) this can take 10-60 min. The "Scan drive + find duplicates" button on the empty-state page chains a fast MFT scan first; use it next time.
             </div>
           )}
         </div>
@@ -452,16 +576,16 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
                 scare anyone while the IPC is still in flight. */}
             {hasIndex === false && effectiveScope && (
               <div className="duplicates-walk-warning">
-                <div className="duplicates-walk-warning-title">⚠ Slow scan ahead</div>
+                <div className="duplicates-walk-warning-title">No scan index for this drive yet</div>
                 <div className="duplicates-walk-warning-body">
-                  No scan index for <code>{effectiveScope}</code> — the duplicate scanner
-                  will walk the live filesystem. On big drives (1 M+ files) this can
-                  take 10–60 min.
+                  Duplicate detection needs to know what's on disk. There's no scan index
+                  for <code>{effectiveScope}</code> yet.
                 </div>
                 <div className="duplicates-walk-warning-tip">
-                  <strong>Tip:</strong> Run a regular scan from the <strong>Overview</strong> tab
-                  first. It uses the NTFS master file table directly and finishes in a few
-                  minutes; subsequent duplicate scans then read the index in seconds.
+                  The button above runs a quick regular scan first (~2 min on a 7 M-file
+                  drive using NTFS' master file table on Windows), then automatically
+                  checks for duplicates using the fresh index. Subsequent duplicate
+                  scans on this drive read the index in seconds.
                 </div>
               </div>
             )}

@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.5.30 — 2026-05-19
+
+User feedback on v0.5.29:
+1. "A fresh scan only takes ~2 min on my machine — why force me
+   to manually run one before duplicates?"
+2. "I did not clear my data."
+
+Both addressed in this release.
+
+### Auto-chain: regular scan → duplicate scan when no index
+
+When the duplicate scan has no index for the chosen scope, the
+button now reads **"Scan drive + find duplicates"** instead of
+the previous "go to Overview tab first" tip. Clicking it:
+
+1. Kicks off a regular scan (~2 min on a 7M-file drive via the
+   MFT fast path on Windows).
+2. UI shows **"Step 1 / 2: Building scan index… N files"** with
+   a live count.
+3. When the regular scan completes (`snapshot.status === "done"`),
+   the duplicate scan starts automatically.
+4. UI shows **"Step 2 / 2: Cataloging files…"** then progresses
+   through the same hash phases as a direct duplicate scan.
+
+If the regular scan errors out, the chain aborts cleanly (no
+dangling "Step 1/2" label). Cancel button cancels the duplicate
+side of the chain; the regular scan continues independently
+because it's the user's main scan and might be wanted regardless.
+
+### Startup-state diagnostic — find out why state vanishes
+
+User reported the drive picker appeared on next launch despite
+not running "Clear all". To diagnose, every startup now logs one
+line to crash.log:
+
+```
+[startup-state] lastScan: status=done root=C:\ finishedAt=… | historyEntries=12 | indexFilesOnDisk=14
+```
+
+If a subsequent restart shows `lastScan: missing` or
+`historyEntries=0` without the user running Clear all, the log
+will tell us which file disappeared between sessions and we can
+trace the path. Without this we're guessing whether it was an
+auto-update artifact, a race with the orphan cleanup, or
+something else entirely.
+
 ## 0.5.29 — 2026-05-19
 
 After clearing scan history (via Settings → Storage → "Clear
