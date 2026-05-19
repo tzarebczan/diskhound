@@ -60,12 +60,15 @@ import {
   verifyEasyMoves,
 } from "./shared/easyMoveStore";
 import {
+  clearAllHistory,
   consumeLastPrunedIds,
+  getAllEntries,
   getScanHistory,
   getLatestPair,
   initScanHistory,
   loadHistoricalSnapshot,
   saveScanToHistory,
+  setMaxHistoryPerRoot,
 } from "./shared/scanHistory";
 import { computeDiff } from "./shared/scanDiff";
 import {
@@ -692,6 +695,13 @@ void app.whenReady().then(async () => {
   // updates `lastAppliedAt` from the main process automatically
   // flows through here).
   settingsStore.subscribe((settings) => {
+    // Push the retention cap into scanHistory so subsequent scans
+    // honor the user's preference. The retention is enforced on
+    // saveScanToHistory, so this only affects pruning of NEW scans —
+    // existing history beyond the new cap isn't auto-pruned (the
+    // user clears via the Storage panel's button instead). That's
+    // intentional: a settings change shouldn't surprise-delete data.
+    setMaxHistoryPerRoot(settings.storage.maxHistoryPerRoot);
     for (const win of BrowserWindow.getAllWindows()) {
       if (win.isDestroyed()) continue;
       try {
@@ -701,6 +711,36 @@ void app.whenReady().then(async () => {
       }
     }
   });
+  // Apply the current setting once at startup before any scan saves.
+  setMaxHistoryPerRoot(settingsStore.get().storage.maxHistoryPerRoot);
+
+  // Sweep orphan pending-* index files left behind by crashed scans.
+  // Done in the background so app startup isn't delayed; if it's
+  // long-running (rare — there are usually <10 such files), the
+  // user just sees their disk usage drop a moment later.
+  void (async () => {
+    try {
+      const indexesDir = Path.join(app.getPath("userData"), "scan-indexes");
+      const cutoff = Date.now() - 60 * 60 * 1000; // 1 hour old
+      const entries = await FS.readdir(indexesDir, { withFileTypes: true });
+      let removed = 0;
+      let bytesFreed = 0;
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.startsWith("pending-")) continue;
+        const full = Path.join(indexesDir, entry.name);
+        try {
+          const stat = await FS.stat(full);
+          if (stat.mtimeMs >= cutoff) continue;
+          await FS.unlink(full);
+          removed++;
+          bytesFreed += stat.size;
+        } catch { /* skip */ }
+      }
+      if (removed > 0) {
+        writeCrashLog("storage-cleanup", `startup sweep: pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
+      }
+    } catch { /* directory missing, fine */ }
+  })();
 
   // Initialize disk monitor with persistent baseline storage
   await initDiskMonitor(app.getPath("userData"));
@@ -2916,6 +2956,159 @@ void app.whenReady().then(async () => {
     // casing reliably — return the normalized keys, which matches how
     // the renderer normalizes them internally.
     return Array.from(activeDuplicateScans.keys());
+  });
+
+  // ── IPC: Storage management ───────────────────────────────
+  //
+  // Surfaces disk-usage stats for the Settings → Storage panel and
+  // provides the "Clear all scan history" action. Scan indexes are
+  // the biggest single chunk of DiskHound's own footprint — a 7M-file
+  // drive produces ~330 MB per scan + ~50 MB per folder-tree sidecar,
+  // so 20 scans of history was silently using 7 GB+ of disk before
+  // v0.5.24 reduced the default to 7.
+
+  ipcMain.handle("diskhound:get-storage-stats", async () => {
+    const userData = app.getPath("userData");
+    const indexesDir = Path.join(userData, "scan-indexes");
+    const historyDir = Path.join(userData, "scan-history");
+    const diffCacheDir = Path.join(userData, "full-diff-cache");
+
+    const sumDir = async (dir: string): Promise<{ bytes: number; count: number; orphanPending: { bytes: number; count: number } }> => {
+      let bytes = 0;
+      let count = 0;
+      let orphanBytes = 0;
+      let orphanCount = 0;
+      let entries: FS_SYNC.Dirent[] = [];
+      try {
+        entries = await FS.readdir(dir, { withFileTypes: true });
+      } catch { return { bytes, count, orphanPending: { bytes: orphanBytes, count: orphanCount } }; }
+      const orphanCutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        const full = Path.join(dir, entry.name);
+        try {
+          const stat = await FS.stat(full);
+          bytes += stat.size;
+          count++;
+          if (entry.name.startsWith("pending-") && stat.mtimeMs < orphanCutoff) {
+            orphanBytes += stat.size;
+            orphanCount++;
+          }
+        } catch { /* skipped */ }
+      }
+      return { bytes, count, orphanPending: { bytes: orphanBytes, count: orphanCount } };
+    };
+
+    const [indexes, history, diffCache] = await Promise.all([
+      sumDir(indexesDir),
+      sumDir(historyDir),
+      sumDir(diffCacheDir),
+    ]);
+    return {
+      totalIndexBytes: indexes.bytes,
+      totalHistoryBytes: history.bytes,
+      totalDiffCacheBytes: diffCache.bytes,
+      fileCount: indexes.count + history.count + diffCache.count,
+      orphanPendingCount: indexes.orphanPending.count,
+      orphanPendingBytes: indexes.orphanPending.bytes,
+    };
+  });
+
+  /**
+   * Wipe every scan-history snapshot, every scan-indexes file
+   * (including orphan pending-* files), and the full-diff-cache.
+   * Resets the Changes tab to "no previous scan to compare" until
+   * the next scan completes. Returns counts of what was removed so
+   * the UI can show a confirmation toast.
+   */
+  ipcMain.handle("diskhound:clear-scan-history", async () => {
+    const userData = app.getPath("userData");
+
+    // Step 1: collect IDs before clearing. clearAllHistory() deletes
+    // the per-snapshot JSON files but doesn't know about the
+    // index/sidecar/diff-cache companions. We delete those by ID
+    // afterwards.
+    const allEntries = getAllEntries();
+    const knownIds = allEntries.map((e) => e.id);
+
+    // Step 2: clear history (removes snapshot-*.json files and the
+    // in-memory index).
+    clearAllHistory();
+
+    // Step 3: drop each scan's index + sidecar + full-diff-cache
+    // entries via the existing per-scan cleanup helpers.
+    for (const id of knownIds) {
+      try { treemapCache.invalidateScan(id); } catch { /* ok */ }
+      try { invalidateFolderTree(id); } catch { /* ok */ }
+      try { await deleteFolderTreeSidecar(id); } catch { /* ok */ }
+      try { await deleteIndex(id); } catch { /* ok */ }
+      try { deleteFullDiffCachesForScan(id); } catch { /* ok */ }
+    }
+
+    // Step 4: nuke EVERY file in scan-indexes/ as a belt-and-suspenders
+    // pass. This catches orphan pending-* files and any sidecar that
+    // got out of sync with the history index. The directories
+    // themselves stay so the next scan doesn't have to recreate them.
+    const sweepDir = async (dir: string): Promise<number> => {
+      let removed = 0;
+      try {
+        const entries = await FS.readdir(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isFile()) continue;
+          // Preserve the scan-history index file — clearAllHistory()
+          // already truncated it but the file should exist.
+          if (entry.name === "scan-history-index.json") continue;
+          try {
+            await FS.unlink(Path.join(dir, entry.name));
+            removed++;
+          } catch { /* skip */ }
+        }
+      } catch { /* directory missing */ }
+      return removed;
+    };
+
+    const sweepCounts = await Promise.all([
+      sweepDir(Path.join(userData, "scan-indexes")),
+      sweepDir(Path.join(userData, "scan-history")),
+      sweepDir(Path.join(userData, "full-diff-cache")),
+    ]);
+
+    return {
+      removedHistoryIds: knownIds.length,
+      removedFiles: sweepCounts.reduce((a, b) => a + b, 0),
+    };
+  });
+
+  /**
+   * Just the orphan pending-* sweep — runs at startup (via the
+   * Settings panel can also trigger manually if we surface it).
+   * Pending files older than 1 hour are leftovers from crashed
+   * scans that should never be referenced again.
+   */
+  ipcMain.handle("diskhound:cleanup-orphan-pending", async () => {
+    const indexesDir = Path.join(app.getPath("userData"), "scan-indexes");
+    let removed = 0;
+    let bytesFreed = 0;
+    const orphanCutoff = Date.now() - 60 * 60 * 1000; // 1 hour
+    try {
+      const entries = await FS.readdir(indexesDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (!entry.name.startsWith("pending-")) continue;
+        const full = Path.join(indexesDir, entry.name);
+        try {
+          const stat = await FS.stat(full);
+          if (stat.mtimeMs >= orphanCutoff) continue;
+          await FS.unlink(full);
+          removed++;
+          bytesFreed += stat.size;
+        } catch { /* skip */ }
+      }
+    } catch { /* directory missing */ }
+    if (removed > 0) {
+      writeCrashLog("storage-cleanup", `pruned ${removed} orphan pending-* files, freed ${bytesFreed} bytes`);
+    }
+    return { removed, bytesFreed };
   });
 
   // ── IPC: Tray ─────────────────────────────────────────────

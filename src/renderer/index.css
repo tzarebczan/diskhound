@@ -3170,6 +3170,43 @@ button, input, select, textarea { font: inherit; }
   max-width: 540px;
 }
 
+/* Storage panel: read-only stats row + clear-all action row */
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+.settings-row-readonly,
+.settings-row-action {
+  border-top: 1px solid var(--border);
+}
+.settings-row-readonly:first-of-type,
+.settings-row-action:first-of-type {
+  border-top: none;
+}
+.settings-row-label {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--text);
+  font-weight: 500;
+}
+.settings-row-desc {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-weight: 400;
+  line-height: 1.45;
+  max-width: 540px;
+}
+.settings-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
 .monitoring-card {
   margin-bottom: 14px;
   padding: 12px;

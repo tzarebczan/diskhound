@@ -119,6 +119,7 @@ export interface AppSettings {
   monitoring: MonitoringSettings;
   notifications: NotificationSettings;
   cleanup: CleanupSettings;
+  storage: StorageSettings;
   recentScans: RecentScan[];
   /** Persistent CPU-affinity rules. Every process-monitor sample
    *  checks running processes against these rules and re-applies the
@@ -230,6 +231,44 @@ export interface CleanupSettings {
    * boolean polarity (true = safer / show confirm).
    */
   confirmPermanentDelete: boolean;
+}
+
+export interface StorageSettings {
+  /**
+   * How many completed scans we keep per root path. Each kept scan
+   * keeps both the gzipped NDJSON index AND its folder-tree sidecar;
+   * on a 7M-file drive that's ~330 MB + ~50 MB per scan, so the
+   * default of 7 lands at roughly 2.5 GB per root.
+   *
+   * Lower = less disk, but the Changes tab can only diff between
+   * scans that are still on disk; the 1w / 1M / 3M time-range pills
+   * grey out when their window pre-dates the oldest kept scan.
+   *
+   * Higher = richer history but proportionally more disk. 30 is the
+   * upper bound — beyond that the scan-history index file itself
+   * starts to be noticeable.
+   *
+   * Was hardcoded to 20 prior to v0.5.24; users with multi-GB
+   * indexes were silently accumulating tens of GB of history.
+   */
+  maxHistoryPerRoot: number;
+}
+
+/** Returned by `nativeApi.getStorageStats()` — surfaces disk usage
+ *  for the Storage settings panel so users can see what to clean up. */
+export interface StorageStats {
+  /** Sum of every file in scan-indexes/ (.ndjson.gz, .folder-tree.ndjson.gz, pending-*). */
+  totalIndexBytes: number;
+  /** Sum of every file in scan-history/ (the per-scan snapshot JSONs + index file). */
+  totalHistoryBytes: number;
+  /** Sum of every file in full-diff-cache/. Cleared whenever scan history clears. */
+  totalDiffCacheBytes: number;
+  /** Count of all files across the three directories above. */
+  fileCount: number;
+  /** Count of orphan pending-* files older than 1 hour (interrupted scans). */
+  orphanPendingCount: number;
+  /** Sum of orphan pending-* sizes (subset of totalIndexBytes). */
+  orphanPendingBytes: number;
 }
 
 // ── Monitoring / Delta Types ────────────────────────────────
@@ -945,6 +984,19 @@ export interface DiskhoundNativeApi {
   getLatestSnapshotForRoot: (rootPath: string) => Promise<ScanSnapshot | null>;
   computeScanDiff: (baselineId: string, currentId: string) => Promise<ScanDiffResult | null>;
   getLatestDiff: (rootPath: string) => Promise<ScanDiffResult | null>;
+  /** Storage stats for the Settings → Storage panel. Read-only; pure
+   *  reporting on disk usage of scan-indexes, scan-history, and
+   *  full-diff-cache. */
+  getStorageStats: () => Promise<StorageStats>;
+  /** Wipe every scan-history entry + matching index/sidecar/diff
+   *  files. The Changes tab resets to "no previous scan to compare"
+   *  until the next scan completes. Returns counts so the renderer
+   *  can show a confirmation toast. */
+  clearScanHistory: () => Promise<{ removedHistoryIds: number; removedFiles: number }>;
+  /** Prune orphan `pending-*` index files older than 1 hour
+   *  (interrupted scans). Runs automatically on startup; the
+   *  Settings panel can also trigger it manually. */
+  cleanupOrphanPending: () => Promise<{ removed: number; bytesFreed: number }>;
   getFullDiffStatus: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffStatus>;
   /** Compute the full per-file diff from the persisted index files (not top-N). */
   computeFullScanDiff: (baselineId: string, currentId: string, limit?: number) => Promise<FullDiffResult | null>;
@@ -1090,6 +1142,14 @@ export function defaultSettings(): AppSettings {
       oldFileThresholdDays: 90,
       confirmPermanentDelete: true,
     },
+    storage: {
+      // 7 = one week of daily scans, or two weeks of every-other-day.
+      // At ~330 MB per gzipped index + ~50 MB per folder-tree sidecar
+      // on a 7M-file drive, this caps history at ~2.6 GB per root —
+      // big enough to be useful, small enough that most users won't
+      // notice it on the disk. Was 20 (hardcoded) before v0.5.24.
+      maxHistoryPerRoot: 7,
+    },
     recentScans: [],
     affinityRules: [],
   };
@@ -1143,6 +1203,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
     monitoring: { ...defaults.monitoring, ...(input?.monitoring ?? {}) },
     notifications: { ...defaults.notifications, ...(input?.notifications ?? {}) },
     cleanup: { ...defaults.cleanup, ...(input?.cleanup ?? {}) },
+    storage: { ...defaults.storage, ...(input?.storage ?? {}) },
     recentScans: Array.isArray(input?.recentScans) ? input!.recentScans : defaults.recentScans,
     affinityRules: Array.isArray(input?.affinityRules)
       ? input!.affinityRules
@@ -1227,6 +1288,14 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         : typeof (merged.cleanup as { safeDeleteToTrash?: unknown }).safeDeleteToTrash === "boolean"
           ? Boolean((merged.cleanup as { safeDeleteToTrash?: boolean }).safeDeleteToTrash)
           : defaults.cleanup.confirmPermanentDelete,
+    },
+    storage: {
+      maxHistoryPerRoot: clampInteger(
+        merged.storage.maxHistoryPerRoot,
+        1,  // can't go below 1 — we need at least one scan to display
+        30, // upper bound — beyond this the history-index file grows large
+        defaults.storage.maxHistoryPerRoot,
+      ),
     },
     recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])
       .filter((scan): scan is RecentScan =>

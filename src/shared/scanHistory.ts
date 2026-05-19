@@ -8,10 +8,27 @@ import { normPath } from "./pathUtils";
 
 const INDEX_FILENAME = "scan-history-index.json";
 const SNAPSHOT_PREFIX = "scan-";
-const MAX_HISTORY_PER_ROOT = 20;
+/**
+ * Fallback retention when no user setting is wired (only happens
+ * during tests / standalone use of this module). The runtime value is
+ * supplied by main.ts via `setMaxHistoryPerRoot` whenever settings
+ * change, so this constant is just a safe default. Was 20 hardcoded
+ * before v0.5.24.
+ */
+const DEFAULT_MAX_HISTORY_PER_ROOT = 7;
 
 let historyDir = "";
 let index: ScanHistoryEntry[] = [];
+let maxHistoryPerRoot = DEFAULT_MAX_HISTORY_PER_ROOT;
+
+/** Override the retention cap. Called from main.ts whenever the
+ *  storage settings change so existing pruning logic respects the
+ *  user's preference. */
+export function setMaxHistoryPerRoot(value: number): void {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 1 && value <= 100) {
+    maxHistoryPerRoot = Math.round(value);
+  }
+}
 
 export function initScanHistory(dataDir: string): void {
   historyDir = Path.join(dataDir, "scan-history");
@@ -86,8 +103,8 @@ export async function saveScanToHistory(snapshot: ScanSnapshot): Promise<string 
     .sort((a, b) => b.scannedAt - a.scannedAt);
 
   lastPrunedIds = [];
-  if (rootEntries.length > MAX_HISTORY_PER_ROOT) {
-    const toRemove = rootEntries.slice(MAX_HISTORY_PER_ROOT);
+  if (rootEntries.length > maxHistoryPerRoot) {
+    const toRemove = rootEntries.slice(maxHistoryPerRoot);
     for (const old of toRemove) {
       index = index.filter((e) => e.id !== old.id);
       try { FS.unlinkSync(snapshotPath(old.id)); } catch { /* gone */ }
@@ -132,5 +149,35 @@ export function getLatestPair(rootPath: string): { current: ScanHistoryEntry; ba
   const entries = getScanHistory(rootPath);
   if (entries.length < 2) return null;
   return { current: entries[0], baseline: entries[1] };
+}
+
+/** Every history entry across all roots. Used by the Storage panel's
+ *  "Clear all" action and by the orphan-cleanup sweep. Returned in
+ *  insertion order (which matches scannedAt for any given root). */
+export function getAllEntries(): ReadonlyArray<ScanHistoryEntry> {
+  return index;
+}
+
+/**
+ * Drop every history entry + snapshot JSON. Returns the IDs that were
+ * removed so the caller can delete the matching index + sidecar files
+ * via deleteIndex(). After this:
+ *   - `getScanHistory()` for any root returns []
+ *   - the Changes tab shows "no previous scan to compare" until the
+ *     next scan completes
+ *   - the full-diff-cache should be cleared in parallel (by the caller)
+ *     since its entries reference IDs that no longer exist
+ */
+export function clearAllHistory(): string[] {
+  if (!historyDir) return [];
+  const removedIds = index.map((e) => e.id);
+  // Delete every snapshot JSON first (best effort — missing files are
+  // fine, we wanted them gone anyway).
+  for (const id of removedIds) {
+    try { FS.unlinkSync(snapshotPath(id)); } catch { /* already gone */ }
+  }
+  index = [];
+  persistIndex();
+  return removedIds;
 }
 

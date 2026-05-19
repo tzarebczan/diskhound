@@ -261,6 +261,144 @@ export function SettingsView() {
           value={settings.cleanup.confirmPermanentDelete}
           onChange={(v) => void save({ ...settings, cleanup: { ...settings.cleanup, confirmPermanentDelete: v } })} />
       </div>
+
+      {/* ── Storage ── */}
+      <StorageSection
+        settings={settings}
+        onChange={(next) => void save(next)}
+      />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Disk-usage panel for DiskHound's own data: scan-indexes,
+ * scan-history snapshot JSONs, and the full-diff cache. Shows total
+ * size + per-bucket breakdown, lets the user tune history retention,
+ * and exposes a "Clear all scan history" action.
+ *
+ * Stats refresh on mount + after every action so the numbers reflect
+ * disk reality without forcing a settings-tab reopen.
+ */
+function StorageSection({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (next: AppSettings) => void;
+}) {
+  const [stats, setStats] = useState<import("../../shared/contracts").StorageStats | null>(null);
+  const [clearing, setClearing] = useState(false);
+
+  const refresh = async () => {
+    try {
+      const s = await nativeApi.getStorageStats();
+      setStats(s);
+    } catch { /* best effort */ }
+  };
+  useEffect(() => { void refresh(); }, []);
+
+  const total = stats
+    ? stats.totalIndexBytes + stats.totalHistoryBytes + stats.totalDiffCacheBytes
+    : 0;
+
+  const handleClear = async () => {
+    const confirmMsg =
+      "Clear all scan history?\n\n" +
+      "This deletes every persisted scan index, snapshot, and diff cache. " +
+      "The Changes tab will reset to \"no previous scan to compare\" until " +
+      "you run a new scan. Open duplicate scans will lose their starting " +
+      "indexes too.\n\n" +
+      `Approx ${formatBytes(total)} will be freed.\n\nProceed?`;
+    if (!confirm(confirmMsg)) return;
+    setClearing(true);
+    try {
+      const result = await nativeApi.clearScanHistory();
+      toast(
+        "success",
+        "Scan history cleared",
+        `Removed ${result.removedHistoryIds} entries and ${result.removedFiles} files.`,
+      );
+      await refresh();
+    } catch {
+      toast("error", "Failed to clear scan history");
+    } finally {
+      setClearing(false);
+    }
+  };
+
+  const handleCleanupOrphans = async () => {
+    try {
+      const result = await nativeApi.cleanupOrphanPending();
+      if (result.removed === 0) {
+        toast("info", "No orphan pending scans to clean up");
+      } else {
+        toast(
+          "success",
+          `Cleaned up ${result.removed} orphan pending scans`,
+          `Freed ${formatBytes(result.bytesFreed)}.`,
+        );
+      }
+      await refresh();
+    } catch {
+      toast("error", "Failed to clean up orphans");
+    }
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">Storage</div>
+      <div className="settings-row settings-row-readonly">
+        <div className="settings-row-label">
+          DiskHound data on disk
+          <div className="settings-row-desc">
+            {stats
+              ? <>
+                  {formatBytes(total)} across {stats.fileCount} file{stats.fileCount === 1 ? "" : "s"}.
+                  {" "}Indexes {formatBytes(stats.totalIndexBytes)} · history {formatBytes(stats.totalHistoryBytes)} · diff cache {formatBytes(stats.totalDiffCacheBytes)}.
+                  {stats.orphanPendingCount > 0 && (
+                    <>
+                      {" "}<span style={{ color: "var(--amber)" }}>
+                        {stats.orphanPendingCount} orphan pending file{stats.orphanPendingCount === 1 ? "" : "s"} ({formatBytes(stats.orphanPendingBytes)}) from crashed scans.
+                      </span>
+                    </>
+                  )}
+                </>
+              : <>Calculating…</>}
+          </div>
+        </div>
+        <div className="settings-row-actions">
+          <button className="action-btn" onClick={() => void refresh()}>Refresh</button>
+          {stats && stats.orphanPendingCount > 0 && (
+            <button className="action-btn" onClick={() => void handleCleanupOrphans()}>
+              Clean orphans
+            </button>
+          )}
+        </div>
+      </div>
+      <NumberRow
+        label="Scans to keep per drive"
+        desc="How many completed scans we retain per root. Each scan is ~330 MB + ~50 MB sidecar on a 7M-file drive. Older scans are pruned on each new scan. The 1w/1M/3M time-range pills in the Changes tab only span as far back as the oldest kept scan."
+        value={settings.storage.maxHistoryPerRoot}
+        min={1}
+        max={30}
+        onChange={(v) => onChange({ ...settings, storage: { ...settings.storage, maxHistoryPerRoot: v } })}
+      />
+      <div className="settings-row settings-row-action">
+        <div className="settings-row-label">
+          Clear all scan history
+          <div className="settings-row-desc">
+            Removes every saved scan index, snapshot, and diff cache. The Changes tab resets until the next scan. Cannot be undone.
+          </div>
+        </div>
+        <button
+          className="action-btn danger"
+          onClick={() => void handleClear()}
+          disabled={clearing || !stats || stats.fileCount === 0}
+        >
+          {clearing ? "Clearing…" : "Clear all"}
+        </button>
       </div>
     </div>
   );

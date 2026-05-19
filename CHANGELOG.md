@@ -1,5 +1,59 @@
 # Changelog
 
+## 0.5.24 — 2026-05-19
+
+User noticed DiskHound was sitting on ~7 GB of its own scan
+indexes (333 MB × 20 scans on a 7M-file drive) with no visible
+control or accounting. Adds storage management.
+
+### New retention default: 7 scans per drive (was 20)
+
+20 was hardcoded since v0.2.x. On a 7M-file drive that's a ~330 MB
+gzipped index + ~50 MB folder-tree sidecar per scan = roughly
+7 GB per scan root. 7 is one week of daily scans, or two weeks
+of every-other-day, with the same hourly-monitoring cadence — a
+sensible default for anyone not actively diffing scans from a
+month ago.
+
+The cap is now configurable via Settings → Storage. Range
+1–30. Lowering the cap doesn't retroactively prune existing
+history (that would surprise-delete data on a settings change);
+the cap only applies as new scans push older ones over the line.
+To bulk-clear, use the new "Clear all" button.
+
+### New Settings → Storage panel
+
+Shows:
+
+- **Total disk usage** of DiskHound's own data — split into
+  indexes / history / diff cache, with a file count.
+- **Orphan pending file** count + size, surfaced when there are
+  any. Pending files are leftovers from interrupted scans;
+  they're auto-pruned on startup (any older than 1 hour) but
+  the panel also exposes a manual "Clean orphans" button.
+- **Scans-to-keep slider** (1–30).
+- **"Clear all" button** with a confirmation that explicitly
+  spells out the consequences: Changes tab resets to "no
+  previous scan to compare", open duplicate scans lose their
+  starting indexes, all diff-cache entries dropped. Returns
+  count of removed entries via a toast.
+
+### Auto-cleanup of orphan `pending-*` files on startup
+
+DiskHound writes scan indexes to `scan-indexes/pending-<UUID>.ndjson.gz`
+during a scan, then atomically renames to the final UUID on
+success. If the scan crashes (OOM, kill, power loss), the pending
+file is orphaned. Startup now sweeps any `pending-*` file older
+than 1 hour. A background task — doesn't delay app startup.
+
+### IPC surface
+
+Three new methods on `nativeApi`:
+
+- `getStorageStats()` — pure reporting, safe to call anytime
+- `clearScanHistory()` — wipes everything, returns counts
+- `cleanupOrphanPending()` — manual trigger for the orphan sweep
+
 ## 0.5.23 — 2026-05-19
 
 The v0.5.22 dialog suppression worked, but exposed a deeper

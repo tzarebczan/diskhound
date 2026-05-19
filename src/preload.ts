@@ -120,6 +120,9 @@ const api: DiskhoundNativeApi = {
   computeScanDiff: (baselineId, currentId) =>
     ipcRenderer.invoke("diskhound:compute-scan-diff", baselineId, currentId),
   getLatestDiff: (rootPath) => ipcRenderer.invoke("diskhound:get-latest-diff", rootPath),
+  getStorageStats: () => ipcRenderer.invoke("diskhound:get-storage-stats"),
+  clearScanHistory: () => ipcRenderer.invoke("diskhound:clear-scan-history"),
+  cleanupOrphanPending: () => ipcRenderer.invoke("diskhound:cleanup-orphan-pending"),
   getFullDiffStatus: (baselineId, currentId, limit) =>
     ipcRenderer.invoke("diskhound:get-full-diff-status", baselineId, currentId, limit),
   computeFullScanDiff: (baselineId, currentId, limit) =>
