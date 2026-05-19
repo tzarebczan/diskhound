@@ -164,11 +164,11 @@ export interface DuplicateScanOptions {
 async function mapConcurrent<T, R>(
   items: T[],
   concurrency: number,
-  fn: (item: T, index: number) => Promise<R>,
+  fn: (item: T, index: number) => Promise<R | null>,
   onTick: (() => void) | undefined,
   isCancelled: () => boolean,
-): Promise<R[]> {
-  const results: R[] = new Array(items.length);
+): Promise<Array<R | null>> {
+  const results: Array<R | null> = new Array(items.length).fill(null);
   let next = 0;
   const workers: Promise<void>[] = [];
   const workerCount = Math.min(concurrency, items.length);
@@ -180,20 +180,14 @@ async function mapConcurrent<T, R>(
           const i = next++;
           if (i >= items.length) return;
           try {
-            // Belt-and-suspenders: cap any individual task at 10 min so
-            // a stuck Promise (e.g. a stream that never resolves on a
-            // hung network drive) can't deadlock the whole worker pool.
-            // The hash functions have their own per-stream timeouts;
-            // this is the outermost safety net.
-            results[i] = await Promise.race([
-              fn(items[i]!, i),
-              new Promise<R>((resolve) => setTimeout(() => resolve(undefined as R), 10 * 60_000)),
-            ]);
+            results[i] = await fn(items[i]!, i);
           } catch {
-            // Hash functions resolve null on error; this catch only
-            // exists to keep one runaway worker from breaking the
-            // whole pool if a future refactor lets an exception
-            // escape.
+            // Slot is already initialised to null (see new Array().fill
+            // above), so we don't need to assign it here — but the
+            // SPARSE-undefined bug from v0.5.23-26 is now impossible
+            // because every slot starts as null. fn rejection → slot
+            // stays null instead of going undefined. Iterating loops
+            // can safely `if (!r || !r.field)` without crashing.
           }
           if (isCancelled()) return;
           onTick?.();
@@ -383,56 +377,33 @@ export function runDuplicateScan(
     for (const [size, files] of candidateEntries) {
       for (const file of files) allCandidates.push({ file, size });
     }
-    // Verbose breadcrumb just before Pass A — confirms we got past
-    // the flatten loop. If pass-a-done never fires but THIS line
-    // does, the failure is inside mapConcurrent (worker pool /
-    // hash function / Promise.race timeout). If even THIS line
-    // doesn't fire, the failure is in the flatten loop or
-    // sort/clear above it.
-    debugLog(`pass-a-start tasks=${allCandidates.length} concurrency=${HASH_CONCURRENCY}`);
-    // First-task probe — log the result of the FIRST file's prefix
-    // hash so we know whether even one file is getting processed.
-    // If the [dup] log shows pass-a-start but neither pass-a-first
-    // nor pass-a-done, every worker is stuck on its first task.
-    let firstTaskLogged = false;
 
     // ── Pass A: prefix hash, globally parallelised ──
-    let passAError: unknown = null;
-    let prefixResults: Array<{ file: FileCandidate; size: number; prefixHash: string | null }> = [];
-    try {
-      prefixResults = await mapConcurrent(
-        allCandidates,
-        HASH_CONCURRENCY,
-        async ({ file, size }) => {
-          if (cancelled) return { file, size, prefixHash: null };
-          const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled);
-          if (!firstTaskLogged) {
-            firstTaskLogged = true;
-            debugLog(`pass-a-first path=${file.path} size=${file.size} prefixHash=${prefixHash ? prefixHash.slice(0, 16) + "..." : "null"}`);
-          }
-          return { file, size, prefixHash };
-        },
-        () => {
-          filesHashed++;
-          emitProgress("hashing");
-        },
-        isCancelled,
-      );
-    } catch (err) {
-      passAError = err;
-      verboseLogger(
-        `pass-a-FAILED error=${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-      );
-      // Don't propagate — we'll emit a partial result so the UI
-      // doesn't reset to the pre-scan empty state. The user at
-      // least sees that the scan ran, even if Pass A blew up.
-    }
+    const prefixResults = await mapConcurrent(
+      allCandidates,
+      HASH_CONCURRENCY,
+      async ({ file, size }) => {
+        if (cancelled) return { file, size, prefixHash: null };
+        const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled);
+        return { file, size, prefixHash };
+      },
+      () => {
+        filesHashed++;
+        emitProgress("hashing");
+      },
+      isCancelled,
+    );
     if (cancelled) return;
-    void passAError;
     let prefixNullCount = 0;
     let prefixOkCount = 0;
     for (const r of prefixResults) {
-      if (!r.prefixHash) prefixNullCount++;
+      // Defensive: r can be null (mapConcurrent initialises every
+      // slot to null and a fn rejection leaves it null). A v0.5.26
+      // user hit `TypeError: Cannot read properties of undefined
+      // (reading 'prefixHash')` here because the old impl left
+      // sparse slots — fixed in v0.5.27 by .fill(null), but keep
+      // the null check as belt-and-suspenders.
+      if (!r || !r.prefixHash) prefixNullCount++;
       else prefixOkCount++;
     }
     debugLog(`pass-a-done prefixResults=${prefixResults.length} ok=${prefixOkCount} null=${prefixNullCount}`);
@@ -442,7 +413,7 @@ export function runDuplicateScan(
     // them separately and confirm groups immediately.
     const prefixBuckets = new Map<string, FileCandidate[]>();
     for (const r of prefixResults) {
-      if (!r.prefixHash) continue;
+      if (!r || !r.prefixHash) continue;
       const key = `${r.size}:${r.prefixHash}`;
       const bucket = prefixBuckets.get(key);
       if (bucket) bucket.push(r.file);
@@ -500,7 +471,8 @@ export function runDuplicateScan(
     let fullNullCount = 0;
     let fullOkCount = 0;
     for (const r of fullResults) {
-      if (!r.fullHash) fullNullCount++;
+      // Same defensive null check as the Pass A loop above.
+      if (!r || !r.fullHash) fullNullCount++;
       else fullOkCount++;
     }
     debugLog(`pass-b-done fullResults=${fullResults.length} ok=${fullOkCount} null=${fullNullCount} fullHashTasks=${fullHashTasks.length}`);
@@ -509,7 +481,7 @@ export function runDuplicateScan(
     // groups. Same-hash + same-size → duplicate.
     const fullBuckets = new Map<string, FileCandidate[]>();
     for (const r of fullResults) {
-      if (!r.fullHash) continue;
+      if (!r || !r.fullHash) continue;
       const key = `${r.size}:${r.fullHash}`;
       const bucket = fullBuckets.get(key);
       if (bucket) bucket.push(r.file);

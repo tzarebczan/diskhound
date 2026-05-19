@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.5.27 — 2026-05-19
+
+User found the bug with v0.5.26's verbose logging:
+
+```
+[dup] phase-1-done … candidateFiles=30065
+[dup] pass-a-start tasks=30065 concurrency=16
+[dup-scan-error] root=C:\ error=TypeError: Cannot read properties of undefined (reading 'prefixHash')
+```
+
+### Root cause
+
+`mapConcurrent` initialised its result array with `new Array(N)`,
+which creates a sparse array — every slot holds `undefined`
+until a worker writes to it. The worker's `try { results[i] =
+await fn(…) } catch {}` block then absorbed any task rejection,
+leaving the slot as sparse-undefined. With 30k tasks, ONE failed
+hash was enough to leave a hole in the array.
+
+The downstream loop `for (const r of prefixResults) { if
+(!r.prefixHash) … }` then iterated the undefined slot and threw
+`Cannot read properties of undefined (reading 'prefixHash')`,
+rejecting the whole `run()` Promise and emitting a `status:
+error` event that the UI doesn't display anywhere — the user
+saw a silent reset to the pre-scan empty state.
+
+This bug has existed since v0.5.18's `mapConcurrent` refactor.
+It only manifested for the user because every previous test had
+< 100 candidates and at least one of the synthetic file paths
+never triggered an fn rejection. The real-world drive (7.8M
+files, 30k candidates) hit a path that did.
+
+### Fix
+
+`mapConcurrent` now initialises with `new Array(N).fill(null)`.
+The worker's catch block doesn't need to assign — the slot is
+already null. fn return type relaxed from `Promise<R>` to
+`Promise<R | null>` so the contract matches reality.
+
+Every downstream loop got a `if (!r || !r.field)` guard as
+belt-and-suspenders so a future regression with the same shape
+would degrade to "skipped" instead of "scan crashes silently".
+
+### Cleanup
+
+Removed v0.5.26's one-off probes (`pass-a-start`,
+`pass-a-first`, the try/catch around `mapConcurrent` that
+existed only to capture the rejection we now don't get). The
+general verbose infrastructure (toggle, `[dup]` lines for each
+phase boundary, the always-on scan-complete summary, the
+`[dup-scan-error]` crash-log path) stays — useful next time.
+
 ## 0.5.26 — 2026-05-19
 
 User's v0.5.25 verbose log narrowed the duplicate-scan failure
