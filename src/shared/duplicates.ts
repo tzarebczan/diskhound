@@ -383,23 +383,52 @@ export function runDuplicateScan(
     for (const [size, files] of candidateEntries) {
       for (const file of files) allCandidates.push({ file, size });
     }
+    // Verbose breadcrumb just before Pass A — confirms we got past
+    // the flatten loop. If pass-a-done never fires but THIS line
+    // does, the failure is inside mapConcurrent (worker pool /
+    // hash function / Promise.race timeout). If even THIS line
+    // doesn't fire, the failure is in the flatten loop or
+    // sort/clear above it.
+    debugLog(`pass-a-start tasks=${allCandidates.length} concurrency=${HASH_CONCURRENCY}`);
+    // First-task probe — log the result of the FIRST file's prefix
+    // hash so we know whether even one file is getting processed.
+    // If the [dup] log shows pass-a-start but neither pass-a-first
+    // nor pass-a-done, every worker is stuck on its first task.
+    let firstTaskLogged = false;
 
     // ── Pass A: prefix hash, globally parallelised ──
-    const prefixResults = await mapConcurrent(
-      allCandidates,
-      HASH_CONCURRENCY,
-      async ({ file, size }) => {
-        if (cancelled) return { file, size, prefixHash: null };
-        const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled);
-        return { file, size, prefixHash };
-      },
-      () => {
-        filesHashed++;
-        emitProgress("hashing");
-      },
-      isCancelled,
-    );
+    let passAError: unknown = null;
+    let prefixResults: Array<{ file: FileCandidate; size: number; prefixHash: string | null }> = [];
+    try {
+      prefixResults = await mapConcurrent(
+        allCandidates,
+        HASH_CONCURRENCY,
+        async ({ file, size }) => {
+          if (cancelled) return { file, size, prefixHash: null };
+          const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled);
+          if (!firstTaskLogged) {
+            firstTaskLogged = true;
+            debugLog(`pass-a-first path=${file.path} size=${file.size} prefixHash=${prefixHash ? prefixHash.slice(0, 16) + "..." : "null"}`);
+          }
+          return { file, size, prefixHash };
+        },
+        () => {
+          filesHashed++;
+          emitProgress("hashing");
+        },
+        isCancelled,
+      );
+    } catch (err) {
+      passAError = err;
+      verboseLogger(
+        `pass-a-FAILED error=${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+      );
+      // Don't propagate — we'll emit a partial result so the UI
+      // doesn't reset to the pre-scan empty state. The user at
+      // least sees that the scan ran, even if Pass A blew up.
+    }
     if (cancelled) return;
+    void passAError;
     let prefixNullCount = 0;
     let prefixOkCount = 0;
     for (const r of prefixResults) {

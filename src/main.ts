@@ -2844,6 +2844,17 @@ void app.whenReady().then(async () => {
             `Found ${result.totalGroups} group${result.totalGroups === 1 ? "" : "s"} in ${resolvedRoot}, ${formatBytesShort(result.totalWastedBytes)} reclaimable.`);
         },
         onError: (error) => {
+          // ALSO log to crash.log so the failure is visible in the
+          // Settings → Crash log viewer. Without this, a duplicate
+          // scan that rejected from run() showed up only as a
+          // status: "error" progress event in the renderer — which
+          // the UI doesn't display anywhere — leaving the user with
+          // a silent reset to the pre-scan empty state and no way
+          // to see the actual error.
+          writeCrashLog(
+            "dup-scan-error",
+            `root=${resolvedRoot} error=${error.stack ?? error.message ?? String(error)}`,
+          );
           mainWindow?.webContents.send(DUPLICATE_PROGRESS_CHANNEL, {
             rootPath: resolvedRoot,
             status: "error",

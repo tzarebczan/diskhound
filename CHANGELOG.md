@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.5.26 — 2026-05-19
+
+User's v0.5.25 verbose log narrowed the duplicate-scan failure
+to "between phase-1-done and pass-a-done". 30065 candidates
+across 9504 size groups collected successfully, then nothing.
+
+### More granular Pass A diagnostics
+
+Two new `[dup]` log lines that fire inside the gap:
+
+- **`pass-a-start tasks=N concurrency=K`** — confirms we got past
+  the candidate-flatten loop and reached `mapConcurrent`. Logs
+  before any worker starts.
+- **`pass-a-first path=… prefixHash=…`** — fires when the FIRST
+  candidate's prefix hash resolves (or returns null). Confirms at
+  least one worker is making forward progress through the pool.
+
+So the next [dup] sequence in a healthy run is:
+```
+phase-1-done … candidateFiles=N
+pass-a-start tasks=N concurrency=16
+pass-a-first path=… prefixHash=abc…
+pass-a-done prefixResults=N ok=X null=Y
+pass-a-buckets …
+```
+
+Where the chain breaks pinpoints the failure:
+- Only phase-1-done → flatten loop / sort / clear above pass-a
+- pass-a-start but no pass-a-first → every worker hung on first task
+- pass-a-first but no pass-a-done → some workers hung mid-pool
+  (the 10-min Promise.race timeout should backstop, but the log
+  will show how many tasks completed before stalling)
+
+### Pass A no longer rejects silently
+
+Wrapped the Pass A `await mapConcurrent(…)` in try/catch. If
+`mapConcurrent` rejects (e.g. an unwrapped exception escaped a
+worker), the error is logged as `pass-a-FAILED error=…` and the
+scan emits a result with whatever was collected so far — instead
+of rejecting the whole run() and resetting the UI to the pre-scan
+empty state with no diagnostic.
+
+### Duplicate-scan errors now logged to crash.log
+
+`runDuplicateScan`'s onError callback now writes to crash.log
+via `writeCrashLog("dup-scan-error", …)` before forwarding the
+"status: error" progress event to the renderer. The renderer
+doesn't display the error anywhere visible, so without this the
+user saw a silent reset to the pre-scan state and had no way to
+see what failed.
+
+### Known issue: full-diff-worker OOM on multi-million-file drives
+
+User's drive: 7.8M files, 1.16M dirs. The full-diff-worker loads
+both baseline + current indexes fully into its 8 GB heap and
+OOMs. Tracking separately — needs a streaming diff that walks
+both files in parallel without materializing them. Doesn't block
+duplicate scanning (different code path) but does break the
+Changes tab's full file diff for big drives.
+
 ## 0.5.25 — 2026-05-19
 
 Three Changes-tab fixes plus a way to debug duplicate scans
