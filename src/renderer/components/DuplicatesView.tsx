@@ -559,20 +559,18 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               {progress.groupsConfirmed > 0 && `, ${progress.groupsConfirmed} confirmed`}
             </span>
           </div>
-          {/* Walk-mode warning. The duplicate scanner has two paths:
-              - index: streams a previous scan's gzipped NDJSON
-                (~5 sec for a 7M-file drive)
-              - walk: enumerates the live filesystem via readdir+stat
-                (10-60 min for the same drive on Windows)
-              Without a prior regular scan there's no index to use, so
-              we fall back to walk. The user doesn't see that
-              distinction in the UI; surface it here so a 30-min wait
-              isn't a mystery. */}
-          {progress.status === "walking" && progress.source === "walk" && (
-            <div className="duplicates-walk-hint">
-              <strong>Slow scan:</strong> no recent index for this drive — walking the live filesystem. On big drives (1 M+ files) this can take 10-60 min. The "Scan drive + find duplicates" button on the empty-state page chains a fast MFT scan first; use it next time.
-            </div>
-          )}
+          {/* v0.5.36: the in-progress "no recent index" walk-mode hint
+              that lived here was ALSO a source of the user-reported
+              flash. Even when the user clicked a scan that uses the
+              fast index path, `source` defaults to "walk" in the
+              scanner and only flips to "index" AFTER the canUseIndex
+              check runs (a few hundred ms later). During that window,
+              the renderer sees status="walking" + source="walk" and
+              showed this banner — exactly the "no index" flash the
+              user complained about across v0.5.33-35.
+              The chained "Scan drive + find duplicates" button
+              already covers the slow-scan-prevention story; this
+              standalone banner just doubled as a flash bug. Gone. */}
         </div>
       )}
 

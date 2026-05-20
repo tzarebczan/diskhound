@@ -429,7 +429,6 @@ export function runDuplicateScan(
     }
 
     if (cancelled) return;
-    emitProgress("walking", true);
 
     // ── Phase 1: collect candidates (either via index or fs walk) ──
     //
@@ -449,9 +448,17 @@ export function runDuplicateScan(
       ? normalizedRoot
       : normalizedRoot + Path.sep;
 
+    // v0.5.36: figure out the source BEFORE the first progress emit.
+    // Pre-v0.5.36 we emitted "walking" with the default source="walk"
+    // and only set source="index" inside the if-block below. The
+    // renderer's first progress event therefore saw source="walk" even
+    // on index-path scans, and the walk-mode warning banner flashed
+    // briefly. Determining source first eliminates that window.
     const canUseIndex = options.indexPath && FS.existsSync(options.indexPath);
+    source = canUseIndex ? "index" : "walk";
+    emitProgress("walking", true);
+
     if (canUseIndex) {
-      source = "index";
       sizeMap = await collectFromIndex(options.indexPath!, {
         minSizeBytes,
         rootNorm: normalizedRoot,
@@ -466,7 +473,7 @@ export function runDuplicateScan(
         },
       });
     } else {
-      source = "walk";
+      // source already set to "walk" above
       sizeMap = await collectFromWalk(rootPath, {
         minSizeBytes,
         userDataPrefixNorm: options.cacheDir ? normPath(Path.resolve(options.cacheDir)) : undefined,
@@ -545,13 +552,31 @@ export function runDuplicateScan(
       allCandidates,
       HASH_CONCURRENCY,
       async ({ file, size }) => {
-        if (cancelled) {
-          prefixCounters.workerCancelAtTop++;
-          workerObservedCancelledBefore++;
+        // v0.5.36: workerEntered tracks wrapper invocations. If this
+        // matches items.length AND every other counter is 0, the
+        // wrapper IS running but cachedHashPrefix is throwing
+        // synchronously before any other counter increments. The
+        // try/catch below catches that case so we can see it instead
+        // of silently failing.
+        try {
+          prefixCounters.workerEntered++;
+          if (cancelled) {
+            prefixCounters.workerCancelAtTop++;
+            workerObservedCancelledBefore++;
+            return { file, size, prefixHash: null };
+          }
+          const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled, prefixCounters);
+          return { file, size, prefixHash };
+        } catch (err) {
+          // Surfaces any throw that previously bypassed all counters
+          // (e.g. a sync TypeError from cachedHashPrefix's
+          // `file.path` access). logFirstFailure goes to crash.log AND
+          // bumps the failure-bucket summary, so we'll finally see
+          // what's going on.
+          prefixCounters.workerThrewBeforeCounter++;
+          logFirstFailure("worker-wrapper-throw", file?.path ?? "<no-file>", err);
           return { file, size, prefixHash: null };
         }
-        const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled, prefixCounters);
-        return { file, size, prefixHash };
       },
       () => {
         filesHashed++;
@@ -582,11 +607,16 @@ export function runDuplicateScan(
     // also log the cancel-at-end-of-stream counter from hashFilePrefix
     // (see silentCancelEndTotal/silentCancelMidDataTotal globals).
     debugLog(
-      `pass-a-null-paths cachedHitOk=${prefixCounters.cachedHitOk} ` +
+      `pass-a-null-paths ` +
+      `workerEntered=${prefixCounters.workerEntered} ` +
+      `cachedHashPrefixEntered=${prefixCounters.cachedHashPrefixEntered} ` +
+      `hashFilePrefixEntered=${prefixCounters.hashFilePrefixEntered} ` +
+      `cachedHitOk=${prefixCounters.cachedHitOk} ` +
       `cachedMissOk=${prefixCounters.cachedMissOk} ` +
       `cachedMissNull=${prefixCounters.cachedMissNull} ` +
       `cancelAtTop=${prefixCounters.cancelAtTop} ` +
       `workerCancelAtTop=${prefixCounters.workerCancelAtTop} ` +
+      `workerThrewBeforeCounter=${prefixCounters.workerThrewBeforeCounter} ` +
       `silentCancelMidData=${silentCancelMidData} ` +
       `silentCancelAtEnd=${silentCancelAtEnd} ` +
       `cancelledBeforePassA=${workerObservedCancelledBefore}`,
@@ -1098,21 +1128,29 @@ async function collectFromWalk(
  * the missing 23 k results.
  */
 interface NullPathCounters {
+  workerEntered: number;     // wrapper function was invoked at all
+  cachedHashPrefixEntered: number; // cachedHashPrefix function body started
+  hashFilePrefixEntered: number;   // hashFilePrefix function body started
   cachedHitOk: number;       // cache returned a real hash
   cachedHitNullStored: number; // (should never happen — defensive)
   cachedMissOk: number;      // hashFilePrefix returned a real hash
   cachedMissNull: number;    // hashFilePrefix returned null (with log)
   cancelAtTop: number;       // `if (isCancelled()) return null` at top of cachedHashPrefix
   workerCancelAtTop: number; // `if (cancelled) return ...null` in the worker wrapper
+  workerThrewBeforeCounter: number; // wrapper's catch site picked up a sync throw
 }
 function makeNullPathCounters(): NullPathCounters {
   return {
+    workerEntered: 0,
+    cachedHashPrefixEntered: 0,
+    hashFilePrefixEntered: 0,
     cachedHitOk: 0,
     cachedHitNullStored: 0,
     cachedMissOk: 0,
     cachedMissNull: 0,
     cancelAtTop: 0,
     workerCancelAtTop: 0,
+    workerThrewBeforeCounter: 0,
   };
 }
 
@@ -1128,6 +1166,9 @@ async function cachedHashPrefix(
   isCancelled: () => boolean,
   counters: NullPathCounters,
 ): Promise<string | null> {
+  // v0.5.36: entered counter is the first thing — confirms the
+  // function body was reached regardless of what happens next.
+  counters.cachedHashPrefixEntered++;
   if (isCancelled()) {
     counters.cancelAtTop++;
     return null;
@@ -1143,6 +1184,7 @@ async function cachedHashPrefix(
   // proceed normally. Nothing to log here — the counter is just for
   // the impossible-but-possible scenario where cached is null but
   // shouldn't be (would mean code-flow surprise).
+  counters.hashFilePrefixEntered++;
   const hash = await hashFilePrefix(file.path, active, isCancelled);
   if (hash) {
     counters.cachedMissOk++;

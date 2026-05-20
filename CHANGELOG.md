@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.36 — 2026-05-20
+
+### Root cause of the v0.5.34/v0.5.35 flash: the IN-PROGRESS walk warning
+
+v0.5.35 killed the empty-state warning. User retested and STILL saw
+a brief "no index" flash. After more digging: there were TWO "no
+index" warnings. The first was the empty-state one (gone in v0.5.35).
+The second lived inside the progress UI:
+
+```tsx
+{progress.status === "walking" && progress.source === "walk" && (
+  <div className="duplicates-walk-hint">
+    Slow scan: no recent index for this drive — walking the live filesystem...
+  </div>
+)}
+```
+
+This shows during scan progress when `source === "walk"`. The scanner
+sets `source = "walk"` by default and only flips it to `"index"`
+AFTER `FS.existsSync(options.indexPath)` returns true — which happens
+INSIDE the `run()` async function, AFTER the first `emitProgress`
+call. So the very first progress event the renderer sees on an
+index-path scan has `source="walk"`, briefly triggering the warning.
+
+Two fixes:
+
+1. Killed that in-progress warning too. The user explicitly asked to
+   remove it permanently — the chained "Scan drive + find duplicates"
+   button already covers the slow-walk-scan story.
+2. Moved the `canUseIndex` check + `source` assignment to BEFORE the
+   first `emitProgress` call, so the renderer NEVER sees source="walk"
+   on an index-path scan.
+
+### Bedrock null-path diagnostics for the v0.5.35 zero-counters mystery
+
+User's v0.5.35 log showed `cachedHitOk=0 cachedMissOk=0 cachedMissNull=0
+cancelAtTop=0 workerCancelAtTop=0 silentCancelMidData=0
+silentCancelAtEnd=0` — ALL counters zero but 23,660 null results.
+This is only possible if either:
+
+  a. The wrapper function isn't running at all
+  b. The wrapper IS running but `cachedHashPrefix` is throwing
+     synchronously before any counter increment, with mapConcurrent's
+     try/catch silently absorbing the throw
+
+To distinguish, v0.5.36 adds three "entered" counters incremented
+at the FIRST line of each function:
+
+- `workerEntered` — wrapper invoked (proves mapConcurrent calls it)
+- `cachedHashPrefixEntered` — body of cachedHashPrefix started
+- `hashFilePrefixEntered` — body of hashFilePrefix started
+
+Plus a try/catch around the entire wrapper body that calls
+`logFirstFailure` with a new `worker-wrapper-throw` kind — so any
+sync throw that previously bypassed every counter will now appear
+in both `hash-fail` AND increment `workerThrewBeforeCounter`. After
+this scan, the user's log will pinpoint the exact culprit.
+
 ## 0.5.35 — 2026-05-20
 
 User retested v0.5.34 and reported BOTH bugs still present. Time
