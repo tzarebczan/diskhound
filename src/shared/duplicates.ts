@@ -311,6 +311,7 @@ export function runDuplicateScan(
         minSizeBytes,
         rootNorm: normalizedRoot,
         rootPrefix,
+        userDataPrefixNorm: options.cacheDir ? normPath(Path.resolve(options.cacheDir)) : undefined,
         isCancelled,
         onProgress: (walked, candGroups) => {
           filesWalked = walked;
@@ -322,6 +323,7 @@ export function runDuplicateScan(
       source = "walk";
       sizeMap = await collectFromWalk(rootPath, {
         minSizeBytes,
+        userDataPrefixNorm: options.cacheDir ? normPath(Path.resolve(options.cacheDir)) : undefined,
         isCancelled,
         onProgress: (walked, candGroups) => {
           filesWalked = walked;
@@ -413,6 +415,9 @@ export function runDuplicateScan(
       else prefixOkCount++;
     }
     debugLog(`pass-a-done prefixResults=${prefixResults.length} ok=${prefixOkCount} null=${prefixNullCount}`);
+    // One-line breakdown of what went wrong in Pass A — useful when
+    // null dominates (means hashing is failing systematically).
+    logFailureSummary();
 
     // Re-bucket by (size, prefix). Small files (≤ PREFIX_BYTES) skip
     // Pass B — their prefix hash IS the full hash — so we collect
@@ -643,6 +648,14 @@ interface CollectCallbacks {
   minSizeBytes: number;
   rootNorm: string;
   rootPrefix: string;
+  /** normPath(userData) — when set, paths under this prefix are
+   *  skipped as candidates. DiskHound's own scan-indexes / sidecars
+   *  / diff caches are not useful duplicates to report on, and some
+   *  of them (sidecars of pruned scans) deliberately get deleted
+   *  immediately after a new scan completes, generating spurious
+   *  ENOENTs in Pass A when the just-built index still references
+   *  them. Excluding them upfront is cleaner than chasing the race. */
+  userDataPrefixNorm?: string;
   onProgress: (walked: number, candidateGroups: number) => void;
   isCancelled: () => boolean;
 }
@@ -671,6 +684,7 @@ async function collectFromIndex(
     const size = rec.s;
     if (typeof size !== "number" || size < cbs.minSizeBytes) return true;
     if (!pathIsUnderRoot(rec.p, cbs.rootNorm, cbs.rootPrefix)) return true;
+    if (cbs.userDataPrefixNorm && pathIsUnderPrefix(rec.p, cbs.userDataPrefixNorm)) return true;
     walked++;
     sizeCounts.set(size, (sizeCounts.get(size) ?? 0) + 1);
     if (walked % 5_000 === 0) {
@@ -705,6 +719,7 @@ async function collectFromIndex(
     if (typeof size !== "number" || size < cbs.minSizeBytes) return true;
     if (!candidateSizes.has(size)) return true;
     if (!pathIsUnderRoot(rec.p, cbs.rootNorm, cbs.rootPrefix)) return true;
+    if (cbs.userDataPrefixNorm && pathIsUnderPrefix(rec.p, cbs.userDataPrefixNorm)) return true;
     walkedB++;
     const bucket = sizeMap.get(size);
     const candidate: FileCandidate = {
@@ -773,10 +788,25 @@ function pathIsUnderRoot(path: string, rootNorm: string, rootPrefix: string): bo
   return n === rootNorm || n.startsWith(rootPrefix);
 }
 
+/**
+ * True if `path` is at or under the given (already-normalised)
+ * prefix. Used to exclude DiskHound's own userData files from
+ * duplicate scanning — they're noise and some are mid-rotation
+ * (sidecars get deleted right after a scan completes, generating
+ * spurious ENOENTs for the just-built scan's own index references).
+ */
+function pathIsUnderPrefix(path: string, prefixNorm: string): boolean {
+  const n = normPath(path);
+  if (n === prefixNorm) return true;
+  const withSep = prefixNorm.endsWith(Path.sep) ? prefixNorm : prefixNorm + Path.sep;
+  return n.startsWith(withSep);
+}
+
 // ── Candidate collection: filesystem-walk fallback ───────────────────────
 
 interface WalkCallbacks {
   minSizeBytes: number;
+  userDataPrefixNorm?: string;
   onProgress: (walked: number, candidateGroups: number) => void;
   isCancelled: () => boolean;
 }
@@ -826,6 +856,7 @@ async function collectFromWalk(
       try { stat = await FSP.stat(fullPath); }
       catch { continue; }
       if (stat.size < cbs.minSizeBytes) continue;
+      if (cbs.userDataPrefixNorm && pathIsUnderPrefix(fullPath, cbs.userDataPrefixNorm)) continue;
 
       walked++;
       sizeCounts.set(stat.size, (sizeCounts.get(stat.size) ?? 0) + 1);
@@ -1027,29 +1058,59 @@ function hashFilePrefix(
 }
 
 /**
- * One-time diagnostic log for the first N hash failures we see, so a
- * "no duplicates found" report includes the actual error code +
- * sample path. Without this we could only see "ok=0 null=30065" with
- * no clue WHY. Cleared on each scan via resetFailureLogger() called
- * from runDuplicateScan's setup.
+ * Per-scan diagnostic for hash failures. v0.5.28 dedup'd by `kind`
+ * which only showed ONE error-event entry even when 30k files all
+ * failed. v0.5.31 dedup's by `kind:code` so distinct error codes
+ * each get logged, and bumps the sample limit per bucket so we
+ * see a variety of paths (helps spot systematic patterns like
+ * "all in C:\Windows\System32" vs "all under DiskHound's own
+ * userData").
+ *
+ * Also tracks totals per bucket so we can emit one summary line
+ * at scan end: "hash-fail summary: error-event/ENOENT=29900,
+ * error-event/EPERM=5, …". Without that we'd see the first 5 of
+ * each but no count of how many overall.
  */
-let failuresLogged = 0;
-const MAX_FAILURE_LOGS = 5; // one per "kind", roughly
-const failureKindsLogged = new Set<string>();
+const MAX_SAMPLES_PER_BUCKET = 5;
+const MAX_FAILURE_BUCKETS = 8;
+let failureBuckets: Map<string, { count: number; samplesLogged: number }> = new Map();
 function resetFailureLogger(): void {
-  failuresLogged = 0;
-  failureKindsLogged.clear();
+  failureBuckets = new Map();
 }
 function logFirstFailure(kind: string, path: string, err: unknown): void {
-  // De-dupe by (kind) so a flood of ENOENTs only logs once but a
-  // mixed flood logs all distinct causes.
-  if (failureKindsLogged.has(kind)) return;
-  if (failuresLogged >= MAX_FAILURE_LOGS) return;
-  failureKindsLogged.add(kind);
-  failuresLogged++;
   const code = (err as { code?: string })?.code ?? "";
-  const msg = err instanceof Error ? err.message : String(err);
-  verboseLogger(`hash-fail kind=${kind} code=${code} path=${path} err=${msg}`);
+  const bucketKey = `${kind}/${code || "?"}`;
+  let bucket = failureBuckets.get(bucketKey);
+  if (!bucket) {
+    if (failureBuckets.size >= MAX_FAILURE_BUCKETS) {
+      // Too many distinct buckets — stop tracking new ones to keep
+      // the summary line short. The catch-all kicks in for genuinely
+      // weird cases (different error code per file).
+      return;
+    }
+    bucket = { count: 0, samplesLogged: 0 };
+    failureBuckets.set(bucketKey, bucket);
+  }
+  bucket.count++;
+  if (bucket.samplesLogged < MAX_SAMPLES_PER_BUCKET) {
+    bucket.samplesLogged++;
+    const msg = err instanceof Error ? err.message : String(err);
+    verboseLogger(`hash-fail kind=${kind} code=${code} path=${path} err=${msg}`);
+  }
+}
+/**
+ * Emit a one-line summary of all hash failures observed during the
+ * scan. Called at the end of Pass A so the user's crash log has a
+ * compact accounting of WHAT went wrong en masse, not just the
+ * first 5 samples. Skipped when no failures occurred.
+ */
+function logFailureSummary(): void {
+  if (failureBuckets.size === 0) return;
+  const parts: string[] = [];
+  for (const [bucketKey, bucket] of failureBuckets) {
+    parts.push(`${bucketKey}=${bucket.count}`);
+  }
+  verboseLogger(`hash-fail summary: ${parts.join(", ")}`);
 }
 
 /**

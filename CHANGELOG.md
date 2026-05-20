@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.5.31 — 2026-05-19
+
+User's v0.5.28+ verbose log showed exactly ONE `hash-fail` entry
+for a duplicate scan that produced ok=0 / null=29907:
+
+```
+[dup] hash-fail kind=error-event code=ENOENT path=…\diskhound\scan-indexes\a89d258e-…folder-tree.ndjson.gz
+```
+
+Two takeaways:
+
+1. The failure cause was masked. The dedup was per `kind`, so a
+   flood of ENOENTs only logged once and we couldn't see whether
+   the other 29,906 also failed with ENOENT or had different
+   codes / paths.
+
+2. The leaked path is a **DiskHound internal file** — a
+   folder-tree sidecar for a scan that was pruned by retention.
+   The native scanner walked the whole C:\ drive, indexed
+   DiskHound's own `userData/scan-indexes/` directory, and now
+   the duplicate scanner is trying to hash sidecars whose
+   matching scans have been deleted.
+
+### Per-(kind, code) dedup with samples + summary line
+
+Dedup is now per `kind:code` pair, with up to 5 sample paths
+logged per bucket and a one-line summary at the end of Pass A:
+
+```
+[dup] hash-fail summary: error-event/ENOENT=29900, error-event/EPERM=5, ctor-throw/?=2
+```
+
+That tells us at a glance whether the failures are systematic
+(all one cause) or mixed.
+
+### Skip DiskHound's own userData from candidates
+
+Paths under `app.getPath("userData")` are now filtered out before
+candidate collection — both for the index path and the walk
+fallback. Rationale:
+
+- These files (scan indexes, folder-tree sidecars, diff cache)
+  are not useful duplicates to surface to the user. They're
+  noise.
+- Some of them (sidecars of pruned scans) are deleted
+  immediately after a new scan completes, generating spurious
+  ENOENTs in Pass A when the just-built index still references
+  them. Excluding them upfront beats chasing the race.
+
+This will drop the candidate count slightly but should clean
+out the deterministic-ENOENT sources at the same time.
+
 ## 0.5.30 — 2026-05-19
 
 User feedback on v0.5.29:
