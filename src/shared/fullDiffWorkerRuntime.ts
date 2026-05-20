@@ -18,6 +18,31 @@ interface FileIndexRecord {
   s: number;
 }
 
+/**
+ * Compact map entry used for the loaded-fully side of the diff.
+ * v0.5.39 collapses the previous `Map<string, FileIndexRecord>` into
+ * `Map<string, CompactMapValue>` to shave memory on 7M+ file drives.
+ *
+ *   Was: Map<key, {p: string, s: number}>
+ *        ~ 200B key + 32B object header + 200B p ref + 8B s = ~440B/entry
+ *
+ *   Now: Map<key, [origPath: string | null, size: number]>
+ *        ~ 200B key + 24B array + 200B p ref + 8B s = ~432B/entry
+ *        AND we set origPath = null when key === origPath (POSIX
+ *        case-sensitive volumes always; Windows when no case-folding
+ *        happened) — which on POSIX saves the entire 200B duplicate
+ *        path string.
+ *
+ * For a 7M-file POSIX scan that's ~1.4 GB freed. On Windows the
+ * saving is smaller (the lowercased key differs from the original
+ * path) but still meaningful for ASCII-only paths where some
+ * segments are already lowercase.
+ *
+ * Tuple chosen over an object because V8 optimises small in-bounds
+ * arrays as packed elements — no per-property descriptors.
+ */
+type CompactMapValue = readonly [origPath: string | null, size: number];
+
 const DEFAULT_LIMIT = 500;
 const WINDOWS_PLATFORM = "win32";
 
@@ -82,13 +107,20 @@ async function streamFileIndexRecords(
 async function loadFileIndexMap(
   filePath: string,
   caseSensitive: boolean,
-): Promise<Map<string, FileIndexRecord>> {
-  const entries = new Map<string, FileIndexRecord>();
+): Promise<Map<string, CompactMapValue>> {
+  const entries = new Map<string, CompactMapValue>();
 
   await streamFileIndexRecords(
     filePath,
     (record, key) => {
-      entries.set(key, record);
+      // v0.5.39: when the normalised key matches the original path
+      // byte-for-byte (POSIX, or Windows paths that happened to be
+      // all-lowercase), we don't need to store the original path
+      // separately — null means "use the key". On a 7M-file POSIX
+      // scan this is every entry; saves ~1.4 GB of duplicate path
+      // strings.
+      const origPath = record.p === key ? null : record.p;
+      entries.set(key, [origPath, record.s]);
     },
     caseSensitive,
   );
@@ -258,8 +290,8 @@ export async function computeFullDiffFromIndexFiles(
     await streamFileIndexRecords(
       input.currentPath,
       (currentRecord, key) => {
-        const baselineRecord = baselineByPath.get(key);
-        if (!baselineRecord) {
+        const baselineEntry = baselineByPath.get(key);
+        if (!baselineEntry) {
           accumulator.addChange({
             path: currentRecord.p,
             kind: "added",
@@ -271,30 +303,34 @@ export async function computeFullDiffFromIndexFiles(
         }
 
         baselineByPath.delete(key);
-
-        if (currentRecord.s === baselineRecord.s) {
+        const [, baselineSizeBytes] = baselineEntry;
+        if (currentRecord.s === baselineSizeBytes) {
           return;
         }
 
-        const deltaBytes = currentRecord.s - baselineRecord.s;
+        const deltaBytes = currentRecord.s - baselineSizeBytes;
         accumulator.addChange({
           path: currentRecord.p,
           kind: deltaBytes > 0 ? "grew" : "shrank",
           size: currentRecord.s,
-          previousSize: baselineRecord.s,
+          previousSize: baselineSizeBytes,
           deltaBytes,
         });
       },
       caseSensitive,
     );
 
-    for (const record of baselineByPath.values()) {
+    // Whatever's left in the baseline map was never seen in current
+    // → removed. Use the stored original path when present (case-
+    // folded entries on Windows), else fall back to the map key which
+    // IS the original path (POSIX, or all-lowercase Windows paths).
+    for (const [key, [origPath, size]] of baselineByPath) {
       accumulator.addChange({
-        path: record.p,
+        path: origPath ?? key,
         kind: "removed",
         size: 0,
-        previousSize: record.s,
-        deltaBytes: -record.s,
+        previousSize: size,
+        deltaBytes: -size,
       });
     }
   } else {
@@ -303,8 +339,8 @@ export async function computeFullDiffFromIndexFiles(
     await streamFileIndexRecords(
       input.baselinePath,
       (baselineRecord, key) => {
-        const currentRecord = currentByPath.get(key);
-        if (!currentRecord) {
+        const currentEntry = currentByPath.get(key);
+        if (!currentEntry) {
           accumulator.addChange({
             path: baselineRecord.p,
             kind: "removed",
@@ -316,16 +352,19 @@ export async function computeFullDiffFromIndexFiles(
         }
 
         currentByPath.delete(key);
-
-        if (currentRecord.s === baselineRecord.s) {
+        const [currentOrigPath, currentSizeBytes] = currentEntry;
+        if (currentSizeBytes === baselineRecord.s) {
           return;
         }
 
-        const deltaBytes = currentRecord.s - baselineRecord.s;
+        const deltaBytes = currentSizeBytes - baselineRecord.s;
         accumulator.addChange({
-          path: currentRecord.p,
+          // Original-case path from the current scan (if differs from
+          // the normalised key) — same precedence the streaming-current
+          // branch above uses.
+          path: currentOrigPath ?? key,
           kind: deltaBytes > 0 ? "grew" : "shrank",
-          size: currentRecord.s,
+          size: currentSizeBytes,
           previousSize: baselineRecord.s,
           deltaBytes,
         });
@@ -333,13 +372,13 @@ export async function computeFullDiffFromIndexFiles(
       caseSensitive,
     );
 
-    for (const record of currentByPath.values()) {
+    for (const [key, [origPath, size]] of currentByPath) {
       accumulator.addChange({
-        path: record.p,
+        path: origPath ?? key,
         kind: "added",
-        size: record.s,
+        size,
         previousSize: 0,
-        deltaBytes: record.s,
+        deltaBytes: size,
       });
     }
   }
@@ -360,24 +399,21 @@ export async function runFullDiffWorker(
   input: FullDiffWorkerInput,
   options: RunFullDiffWorkerOptions,
 ): Promise<FullDiffResult | null> {
-  // Bump the worker's old-generation heap to 4 GB. Default in Node
-  // worker threads is ~2 GB, which a C:\-scale full diff can blow
-  // while parsing both indexes into Map<path, record> — we saw one
-  // real crash in the wild (14:40:20.468Z entry, "Full diff worker
-  // exited with code 1") caused by exactly this.
+  // Worker old-gen heap evolution:
+  //   Default Node:      ~2 GB — OOMed on 4M-file drives
+  //   v0.5.x:            4 GB  — OOMed on 7M-file drives
+  //   v0.5.20-ish:       8 GB  — held until a 7.8M-file drive hit it
+  //   v0.5.39:           12 GB — paired with the compact-value map
+  //                              encoding below
   //
-  // Raising the limit doesn't actually commit the memory until it's
-  // touched, so the cost in the common "small diff" case is zero.
-  // V8 will still abort if the OS actually runs out, but on a modern
-  // Windows box with ~16+ GB RAM this gives us comfortable headroom.
-  // 8 GB old-gen ceiling — matches the folder-tree worker bump.
-  // On 8M-file drives the full-diff worker builds two path→size maps
-  // plus a merged delta array, working set ~5-6 GB; 4 GB OOMed
-  // repeatedly. Reserved pages don't commit until touched, so small
-  // diffs still pay zero extra cost.
+  // Reserved pages don't commit until touched, so small diffs still
+  // pay zero extra cost. The 12 GB ceiling means the worker is safe
+  // up to roughly 10M-file index pairs on a box with 16+ GB RAM.
+  // Beyond that we'd need an external-sort-style streaming merge,
+  // which is a much bigger architectural change (tracked separately).
   const worker = new Worker(options.workerPath, {
     resourceLimits: {
-      maxOldGenerationSizeMb: 8192,
+      maxOldGenerationSizeMb: 12288,
       maxYoungGenerationSizeMb: 256,
     },
   });
@@ -433,7 +469,7 @@ export async function runFullDiffWorker(
         // the crash log line reads as a diagnosis rather than a
         // generic "exited with code 1."
         const detail = code === 1
-          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 8 GB heap — consider a smaller diff pair.`
+          ? `Full diff worker out of memory (exit code 1). The inputs may exceed the worker's 12 GB heap — this drive is at the edge of what the in-memory diff can handle. The fast top-N summary still works.`
           : `Full diff worker exited with code ${code}`;
         settle(() => reject(new Error(detail)));
       }
