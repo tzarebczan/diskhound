@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.5.33 — 2026-05-20
+
+User's v0.5.32 log narrowed the remaining noise to two more
+cases that the previous path-prefix filter didn't catch:
+
+```
+hash-fail kind=error-event code=EBUSY path=C:\Users\thoma\NTUSER.DAT
+hash-fail kind=error-event code=EBUSY path=C:\Users\thoma\AppData\Local\Comms\UnistoreDB\USS.jtx
+```
+
+`NTUSER.DAT` is the user's registry hive — sits at the top
+level of their profile, not inside any "noise" directory.
+`USS.jtx` is the Mail / People / Calendar ESE database journal,
+in `AppData\Local\Comms\`.
+
+### Extended noise filter
+
+Three additions:
+
+1. **More noise directories**: `AppData\Local\Comms\`,
+   `AppData\Local\ConnectedDevicesPlatform\`,
+   `AppData\Local\PackageStaging\`,
+   `AppData\Roaming\Microsoft\Windows\`.
+2. **Filename-suffix filter** for registry hives + their rotating
+   sidecars regardless of directory: `NTUSER.DAT`,
+   `USRCLASS.DAT` (+ `.LOG1`, `.LOG2`), `.regtrans-ms`, `.blf`,
+   `.tmcontainer`. These are always EBUSY while the user is
+   logged in.
+3. Verified with the dev test harness — the noise filter has an
+   opt-out (`disableNoiseFilter`) so the harness's `os.tmpdir()`-
+   based fixtures (which match the path filter) still produce
+   results.
+
+### Fix "no index" warning flashing on scan start
+
+User reported the yellow "no scan index for this drive yet"
+warning briefly flashing every time they clicked Scan — even
+though they HAD an index. Two causes, both fixed:
+
+1. **Stale state.** The `hasIndex` query only ran on mount.
+   After the user ran a regular scan (which built an index),
+   `hasIndex` stayed at its old value. Now it refreshes
+   whenever `snapshot.status === "done"`.
+2. **IPC roundtrip gap.** There's a ~50-200 ms window between
+   the user clicking Scan and the renderer's `isScanning`
+   state flipping to true. The empty-state warning was
+   visible during that window. Added a `scanStarting` local
+   flag set in the click handler — suppresses the warning
+   immediately and clears once real scan progress takes over.
+
 ## 0.5.32 — 2026-05-19
 
 The v0.5.31 sample logs finally told us what 29,907 nulls were:

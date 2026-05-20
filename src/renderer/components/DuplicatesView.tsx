@@ -68,6 +68,23 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     });
     return () => { cancelled = true; };
   }, [effectiveScope]);
+  // Refresh hasIndex whenever a regular scan finishes — without this
+  // the renderer would keep the stale "no index" state from mount
+  // time, even after a fresh scan that built an index. User saw the
+  // yellow warning flash on every duplicate scan click despite
+  // having a perfectly good index.
+  useEffect(() => {
+    if (snapshot.status === "done") void refreshHasIndex();
+  }, [snapshot.status, effectiveScope]);
+  // Local "scan starting" guard. There's a ~50-200 ms IPC roundtrip
+  // between click and `isScanning` flipping to true. During that
+  // window the empty-state warning was visible, producing the flash
+  // the user reported. Suppress it once the user has committed to
+  // a scan.
+  const [scanStarting, setScanStarting] = useState(false);
+  useEffect(() => {
+    if (isScanning) setScanStarting(false); // real progress took over
+  }, [isScanning]);
 
   // Two-step scan state: when the user clicks "Scan for Duplicates"
   // without an index, we offer to chain a regular scan first
@@ -111,6 +128,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setDismissed(new Set());
     setExpanded(new Set());
     setSelectedPaths(new Set());
+    setScanStarting(true); // suppresses the "no index" warning during the IPC roundtrip
     void nativeApi.startDuplicateScan(effectiveScope);
   };
 
@@ -127,6 +145,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setDismissed(new Set());
     setExpanded(new Set());
     setSelectedPaths(new Set());
+    setScanStarting(true); // suppress the "no index" warning while we set up the chain
     setChainPhase("regular");
     // Reset the snapshot-status tracker to whatever status the snapshot
     // is right NOW so the useEffect doesn't fire on a stale transition
@@ -574,7 +593,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
                 fallback, much slower). Only render the warning when
                 we know for sure (false), so we don't pre-emptively
                 scare anyone while the IPC is still in flight. */}
-            {hasIndex === false && effectiveScope && (
+            {hasIndex === false && effectiveScope && !scanStarting && (
               <div className="duplicates-walk-warning">
                 <div className="duplicates-walk-warning-title">No scan index for this drive yet</div>
                 <div className="duplicates-walk-warning-body">

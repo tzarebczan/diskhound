@@ -124,10 +124,15 @@ const NOISE_PATH_PATTERNS: ReadonlyArray<string> = [
   "\\$recycle.bin\\",
   "\\system volume information\\",
   "\\recovery\\",
-  // Windows Store sandbox
+  // Windows Store sandbox + staging
   "\\appdata\\local\\packages\\",
-  // Windows internal state cache
+  "\\appdata\\local\\packagestaging\\",
+  // Windows internal state cache (Local + Roaming)
   "\\appdata\\local\\microsoft\\windows\\",
+  "\\appdata\\roaming\\microsoft\\windows\\",
+  "\\appdata\\local\\connecteddevicesplatform\\",
+  // Mail / People / Calendar database (USS.jtx ESE store, locked EBUSY)
+  "\\appdata\\local\\comms\\",
   // Temp dirs
   "\\appdata\\local\\temp\\",
   // Browser caches (rotate constantly; ENOENT by the time we hash)
@@ -145,6 +150,40 @@ const NOISE_PATH_PATTERNS: ReadonlyArray<string> = [
 ];
 
 /**
+ * Filename-suffix patterns that are noise regardless of which
+ * directory they live in. The NTUSER.DAT registry hive sits at the
+ * top level of every user's profile, and its rotating LOG / TM /
+ * BLF / regtrans-ms sidecars accompany it — none are hashable
+ * (always EBUSY while the user is logged in). Same for ESE
+ * database journals (.jtx, .edb) which live wherever the
+ * owning app put them.
+ *
+ * Compared against the basename of the normalised path so paths
+ * like `\users\thoma\ntuser.dat` and `\…\appdata\local\comms\
+ * unistoredb\uss.jtx` both fall in. Cheap — one
+ * lastIndexOf + endsWith per candidate.
+ */
+const NOISE_FILENAME_PATTERNS: ReadonlyArray<string> = [
+  "\\ntuser.dat",
+  "\\ntuser.dat.log1",
+  "\\ntuser.dat.log2",
+  "\\usrclass.dat",
+  "\\usrclass.dat.log1",
+  "\\usrclass.dat.log2",
+  ".regtrans-ms",
+  ".blf",
+  ".tmcontainer", // transaction manager container
+];
+function isNoiseFilename(normalisedPath: string): boolean {
+  for (const pattern of NOISE_FILENAME_PATTERNS) {
+    if (normalisedPath.endsWith(pattern)) return true;
+    // pattern starts with backslash → also count the basename match
+    if (pattern.startsWith("\\") && normalisedPath.endsWith(pattern.slice(1))) return true;
+  }
+  return false;
+}
+
+/**
  * O(1)-friendly check using indexOf on the normalised path. We
  * intentionally do NOT regex-match — for 30 k candidates × 15
  * patterns that's 450 k regex tests vs. 450 k substring searches;
@@ -155,7 +194,7 @@ function isNoiseCandidatePath(normalisedPath: string): boolean {
   for (const pattern of NOISE_PATH_PATTERNS) {
     if (normalisedPath.indexOf(pattern) !== -1) return true;
   }
-  return false;
+  return isNoiseFilename(normalisedPath);
 }
 
 /**
