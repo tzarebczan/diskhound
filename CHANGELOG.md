@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.5.35 — 2026-05-20
+
+User retested v0.5.34 and reported BOTH bugs still present. Time
+to stop reasoning from logs and instrument the silent paths.
+
+### Kill the warning banner entirely
+
+v0.5.33 added one defensive gate, v0.5.34 added three more, and
+the yellow "No scan index" warning STILL flashed for ~1 sec on
+scan-click. Rather than play whack-a-mole with race windows, just
+don't render the banner at all. The "Scan drive + find duplicates"
+button label already conveys the same information without a
+startling yellow box that flashes during IPC roundtrips. Users
+who want to know what the button does can hover for the title
+attribute.
+
+### Comprehensive null-path diagnostics
+
+User's v0.5.34 log showed 23,660 prefix-hash null results in
+436 ms with **zero** hash-fail entries — meaning every null came
+from a silent path (cancellation at top of `cachedHashPrefix`, at
+top of the worker wrapper, mid-`data`-event, or at `end`-event
+when `isCancelled()` returns true). None of those paths logged
+anything in v0.5.34 because cancellation isn't a failure mode.
+
+The problem: we can't distinguish "scan was cancelled mid-Pass-A"
+from "every file's stream silently never got data" from a buggy
+cache that returned null. So v0.5.35 adds:
+
+- Per-scan `NullPathCounters` tracking `cachedHitOk`,
+  `cachedMissOk`, `cachedMissNull`, `cancelAtTop`,
+  `workerCancelAtTop`.
+- Global `silentCancelMidData` / `silentCancelAtEnd` counters
+  incremented from `hashFilePrefix`'s previously-silent cancel
+  paths.
+- A new `pass-a-null-paths` log line emitted next to `pass-a-done`
+  with every counter's value.
+
+After the next "0 results" log, we'll see exactly which path is
+returning all the nulls — and the fix will be one-line.
+
 ## 0.5.34 — 2026-05-20
 
 Two issues from the v0.5.33 retest:

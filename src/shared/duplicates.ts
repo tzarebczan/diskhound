@@ -534,12 +534,23 @@ export function runDuplicateScan(
     }
 
     // ── Pass A: prefix hash, globally parallelised ──
+    const prefixCounters = makeNullPathCounters();
+    // Diagnostic: track the very-first item the worker pool processes
+    // so we know whether the scan was already cancelled before Pass A
+    // started (user reported 23 k silent nulls in 436 ms — explained
+    // only if cancelled became true before / during Pass A while the
+    // outer scan still completes normally to print pass-a-done).
+    let workerObservedCancelledBefore = 0;
     const prefixResults = await mapConcurrent(
       allCandidates,
       HASH_CONCURRENCY,
       async ({ file, size }) => {
-        if (cancelled) return { file, size, prefixHash: null };
-        const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled);
+        if (cancelled) {
+          prefixCounters.workerCancelAtTop++;
+          workerObservedCancelledBefore++;
+          return { file, size, prefixHash: null };
+        }
+        const prefixHash = await cachedHashPrefix(file, activeStreams, isCancelled, prefixCounters);
         return { file, size, prefixHash };
       },
       () => {
@@ -562,6 +573,24 @@ export function runDuplicateScan(
       else prefixOkCount++;
     }
     debugLog(`pass-a-done prefixResults=${prefixResults.length} ok=${prefixOkCount} null=${prefixNullCount}`);
+    // v0.5.35: comprehensive null-path breakdown. Each counter
+    // explains a different way a null can show up so we can finally
+    // diagnose the "23k nulls but zero hash-fail logs" mystery.
+    // workerObservedCancelledBefore is logged separately because it
+    // means cancellation hit BEFORE Pass A started — which would mean
+    // someone called cancel() between phase-1-done and Pass A. We
+    // also log the cancel-at-end-of-stream counter from hashFilePrefix
+    // (see silentCancelEndTotal/silentCancelMidDataTotal globals).
+    debugLog(
+      `pass-a-null-paths cachedHitOk=${prefixCounters.cachedHitOk} ` +
+      `cachedMissOk=${prefixCounters.cachedMissOk} ` +
+      `cachedMissNull=${prefixCounters.cachedMissNull} ` +
+      `cancelAtTop=${prefixCounters.cancelAtTop} ` +
+      `workerCancelAtTop=${prefixCounters.workerCancelAtTop} ` +
+      `silentCancelMidData=${silentCancelMidData} ` +
+      `silentCancelAtEnd=${silentCancelAtEnd} ` +
+      `cancelledBeforePassA=${workerObservedCancelledBefore}`,
+    );
     // One-line breakdown of what went wrong in Pass A — useful when
     // null dominates (means hashing is failing systematically).
     logFailureSummary();
@@ -1053,6 +1082,41 @@ async function collectFromWalk(
 // ── Hashing helpers ──────────────────────────────────────────────────────
 
 /**
+ * Per-scan counters that catch null-result paths the failure-bucket
+ * logger doesn't see. v0.5.35 added these after a user report showed
+ * 23,660 prefix-null results in 436 ms with ZERO hash-fail log lines
+ * — meaning every null was returned from a silent path (cancel-at-top
+ * or cancel-at-end), not from an `error` event or timeout. Without
+ * counting these explicitly we have no diagnostic to distinguish:
+ *
+ *   - "real" hash failures (caught by logFirstFailure / summary)
+ *   - cache hits (instant, returns string)
+ *   - cache misses → hash success (normal path)
+ *   - cache misses → hash null silently (the unaccounted bucket)
+ *
+ * Logged at end of Pass A so the user's crash log finally explains
+ * the missing 23 k results.
+ */
+interface NullPathCounters {
+  cachedHitOk: number;       // cache returned a real hash
+  cachedHitNullStored: number; // (should never happen — defensive)
+  cachedMissOk: number;      // hashFilePrefix returned a real hash
+  cachedMissNull: number;    // hashFilePrefix returned null (with log)
+  cancelAtTop: number;       // `if (isCancelled()) return null` at top of cachedHashPrefix
+  workerCancelAtTop: number; // `if (cancelled) return ...null` in the worker wrapper
+}
+function makeNullPathCounters(): NullPathCounters {
+  return {
+    cachedHitOk: 0,
+    cachedHitNullStored: 0,
+    cachedMissOk: 0,
+    cachedMissNull: 0,
+    cancelAtTop: 0,
+    workerCancelAtTop: 0,
+  };
+}
+
+/**
  * Prefix-hash with cache. Cache key = "prefix:" + path. If the file's
  * (size, mtime) matches the cached entry's, return the cached hash
  * without reading. Otherwise hash and cache. Prefix cache entries are
@@ -1062,14 +1126,31 @@ async function cachedHashPrefix(
   file: FileCandidate,
   active: Set<ReadStream>,
   isCancelled: () => boolean,
+  counters: NullPathCounters,
 ): Promise<string | null> {
-  if (isCancelled()) return null;
+  if (isCancelled()) {
+    counters.cancelAtTop++;
+    return null;
+  }
   const cacheKey = `prefix:${file.path}`;
   const cached = getCachedHash(cacheKey, file.size, file.mtime);
-  if (cached) return cached;
+  if (cached) {
+    counters.cachedHitOk++;
+    return cached;
+  }
+  // Belt-and-suspenders: if a buggy older version somehow stored an
+  // empty-string or whitespace-only hash, cached would be falsy and we
+  // proceed normally. Nothing to log here — the counter is just for
+  // the impossible-but-possible scenario where cached is null but
+  // shouldn't be (would mean code-flow surprise).
   const hash = await hashFilePrefix(file.path, active, isCancelled);
-  if (hash && !isCancelled()) {
-    setCachedHash(cacheKey, file.size, file.mtime, hash);
+  if (hash) {
+    counters.cachedMissOk++;
+    if (!isCancelled()) {
+      setCachedHash(cacheKey, file.size, file.mtime, hash);
+    }
+  } else {
+    counters.cachedMissNull++;
   }
   return hash;
 }
@@ -1168,6 +1249,7 @@ function hashFilePrefix(
     const hash = createHash(HASH_ALGO);
     stream.on("data", (chunk) => {
       if (isCancelled()) {
+        silentCancelMidData++;
         finish(null);
         return;
       }
@@ -1185,9 +1267,11 @@ function hashFilePrefix(
     stream.on("end", () => {
       endFired = true;
       try {
-        const digest = isCancelled() ? null : hash.digest("hex");
-        if (digest === null) {
-          // Cancelled. Don't log as failure.
+        const cancelledNow = isCancelled();
+        const digest = cancelledNow ? null : hash.digest("hex");
+        if (digest === null && cancelledNow) {
+          // Cancelled. Don't log as failure. Counter is the only trace.
+          silentCancelAtEnd++;
         } else if (hashUpdateCount === 0) {
           // end fired without ANY data chunks — empty file. Valid but
           // unusual for "candidates" (which are all > 1 MB by default).
@@ -1247,7 +1331,23 @@ function resetFailureLogger(): void {
   failurePathBuckets = new Map();
   failurePathOverflow = 0;
   failureDroppedBuckets = 0;
+  silentCancelMidData = 0;
+  silentCancelAtEnd = 0;
 }
+
+// ── v0.5.35 silent-cancel counters ──────────────────────────────
+//
+// Each hashFile{Prefix,Full} has two paths that return null WITHOUT
+// invoking logFirstFailure:
+//   1. data event sees isCancelled() === true → finish(null)
+//   2. end event sees isCancelled() === true → digest=null → finish(null)
+// Pre-v0.5.35 these were unaccounted for. A user report showed 23 k
+// silent nulls with zero hash-fail entries — we couldn't tell whether
+// cancellation hit mid-Pass-A or whether something else was going on.
+// Now each silent path increments a global counter, logged in
+// pass-a-null-paths so the next "0 results" log explains itself.
+let silentCancelMidData = 0;
+let silentCancelAtEnd = 0;
 /**
  * Aggregate a path into a fixed-depth parent prefix so 10 k distinct
  * filenames in one cache directory collapse into a single counter.

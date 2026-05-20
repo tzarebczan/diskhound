@@ -611,7 +611,14 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
 
       {/* ── Results ── */}
       <div className="duplicates-list-scroll">
-        {!analysis && !isScanning && (
+        {/* Hide the empty state during the click-to-isScanning roundtrip.
+            Without this, clicking Rescan would clear analysis, leaving
+            !analysis && !isScanning briefly true, which flashes the
+            "Find duplicate files" placeholder for 50-200 ms. Also
+            suppress while chained scans are in progress so the regular
+            scan's wait doesn't render the empty state behind the
+            progress UI. */}
+        {!analysis && !isScanning && !scanStarting && chainPhase === null && (
           <div className="duplicates-empty">
             <div className="duplicates-empty-icon">
               <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1" opacity="0.3">
@@ -629,40 +636,16 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
                   : "current scan root — change above"}
               </span>
             </div>
-            {/* Walk-mode warning shown BEFORE the user clicks scan.
-                Multiple gates here are intentional. Each closes a
-                different flash window seen in earlier versions:
-                  - hasIndex === false      : the actual signal
-                  - hasIndexCheckedAtLeastOnce : don't render while
-                      the IPC is in flight (would show a stale `false`
-                      that flips to `true` 50-200 ms later — that was
-                      the v0.5.33 user-reported flash root cause)
-                  - effectiveScope           : nothing to warn about
-                      if there's no scope picked
-                  - !scanStarting           : user already committed
-                  - chainPhase === null     : we're not in the middle
-                      of a chained regular→duplicate scan (where the
-                      regular leg's completion briefly resurfaces the
-                      empty state before the duplicate leg starts) */}
-            {hasIndex === false
-              && hasIndexCheckedAtLeastOnce
-              && effectiveScope
-              && !scanStarting
-              && chainPhase === null && (
-              <div className="duplicates-walk-warning">
-                <div className="duplicates-walk-warning-title">No scan index for this drive yet</div>
-                <div className="duplicates-walk-warning-body">
-                  Duplicate detection needs to know what's on disk. There's no scan index
-                  for <code>{effectiveScope}</code> yet.
-                </div>
-                <div className="duplicates-walk-warning-tip">
-                  The button above runs a quick regular scan first (~2 min on a 7 M-file
-                  drive using NTFS' master file table on Windows), then automatically
-                  checks for duplicates using the fresh index. Subsequent duplicate
-                  scans on this drive read the index in seconds.
-                </div>
-              </div>
-            )}
+            {/* No yellow warning banner here.
+                v0.5.33 added a `scanStarting` gate.
+                v0.5.34 added `hasIndexCheckedAtLeastOnce` + `chainPhase === null` gates.
+                v0.5.35: user STILL reported a 1-second flash with all those defenses
+                in place. Rather than play whack-a-mole with race windows, just don't
+                render an alarm banner at all. The "Scan drive + find duplicates"
+                button label (when the no-index path is active) already conveys the
+                same information without a startling yellow box that flashes during
+                IPC roundtrips. If users want more context, the button's title
+                attribute explains the chained-scan behaviour. */}
           </div>
         )}
 

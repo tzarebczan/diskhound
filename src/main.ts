@@ -2849,9 +2849,24 @@ void app.whenReady().then(async () => {
     // asks in v0.3.1.
     const existing = activeDuplicateScans.get(key);
     if (existing) {
+      // v0.5.35: log this. A user's v0.5.34 log showed 23k silent nulls
+      // — one hypothesis is that the renderer double-fires the start IPC
+      // (e.g. effect re-runs on snapshot.status changes that race with
+      // the click handler), and the second invocation cancels the first
+      // mid-Pass-A. The cancelled first scan's worker pool then
+      // short-circuits to null without logging, while the second scan
+      // runs normally. This log line lets us see if that's happening.
+      writeCrashLog(
+        "dup-scan-existing-cancelled",
+        `root=${resolvedRoot} — a new start-duplicate-scan IPC arrived while a previous scan was still running; cancelling the previous one`,
+      );
       try { existing.cancel(); } catch { /* runDuplicateScan's cancel already self-wraps; defense in depth */ }
       activeDuplicateScans.delete(key);
     }
+    writeCrashLog(
+      "dup-scan-start",
+      `root=${resolvedRoot}`,
+    );
 
     // Try to find an existing scan index whose root is an ancestor of the
     // duplicates scope — streaming that index is much faster and lower
@@ -2987,6 +3002,14 @@ void app.whenReady().then(async () => {
       if (rootPath) {
         const key = scanKey(Path.resolve(rootPath));
         const handle = activeDuplicateScans.get(key);
+        // v0.5.35: log every cancel so we can correlate with the
+        // null-path counters in pass-a-null-paths. A cancel arriving
+        // during Pass A explains workerCancelAtTop / cancelAtTop /
+        // silentCancel* spiking.
+        writeCrashLog(
+          "dup-scan-cancel-request",
+          `root=${rootPath} resolved=${Path.resolve(rootPath)} hasActiveHandle=${!!handle}`,
+        );
         if (handle) {
           try { handle.cancel(); } catch { /* defensive */ }
           activeDuplicateScans.delete(key);
@@ -2994,6 +3017,10 @@ void app.whenReady().then(async () => {
         return;
       }
       // No rootPath → cancel all (e.g. app quit, or renderer asking for a full stop).
+      writeCrashLog(
+        "dup-scan-cancel-all",
+        `active=${activeDuplicateScans.size}`,
+      );
       for (const handle of activeDuplicateScans.values()) {
         try { handle.cancel(); } catch { /* defensive */ }
       }
