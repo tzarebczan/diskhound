@@ -2,7 +2,7 @@
   "name": "diskhound",
   "private": true,
   "type": "module",
-  "version": "0.5.36",
+  "version": "0.5.37",
   "description": "Fast disk space analyzer — find and clean up large files",
   "author": "DiskHound",
   "homepage": "https://github.com/tzarebczan/diskhound",
@@ -31,6 +31,7 @@
     "dist": "bun run build:native && bun run build && electron-builder --config electron-builder.yml"
   },
   "dependencies": {
+    "blake2": "^5.0.1",
     "electron-updater": "^6.6.2",
     "preact": "^10.26.9"
   },
@@ -44,5 +45,8 @@
     "typescript": "^5.7.3",
     "vite": "^7.1.12",
     "wait-on": "^8.0.2"
-  }
+  },
+  "trustedDependencies": [
+    "blake2"
+  ]
 }

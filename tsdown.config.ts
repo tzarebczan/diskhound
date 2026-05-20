@@ -5,7 +5,11 @@ const shared = {
   outDir: "dist-electron",
   sourcemap: true,
   outExtensions: () => ({ js: ".cjs" }),
-  external: ["electron", "electron-updater"],
+  // blake2 is a native addon (vrza/node-blake2) — keep it external so
+  // the bundler doesn't try to inline the require, and so the runtime
+  // resolves it from node_modules/blake2/ at load time (which is
+  // app.asar.unpacked/node_modules/blake2/ once electron-builder runs).
+  external: ["electron", "electron-updater", "blake2"],
 };
 
 export default defineConfig([

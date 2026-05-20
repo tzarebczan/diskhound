@@ -31,6 +31,15 @@ extraResources:
       - "*.png"
 
 asar: true
+# Native modules (.node binaries) must live OUTSIDE the asar archive
+# so dlopen() / LoadLibrary() can access them. blake2 ships a
+# .node file under node_modules/blake2/build/Release/. electron-
+# builder usually auto-unpacks **/*.node files, but being explicit
+# here guarantees the binary makes it into app.asar.unpacked/ where
+# our runtime `require("blake2")` will find it via node-pre-gyp's
+# resolution logic.
+asarUnpack:
+  - "node_modules/blake2/**/*"
 compression: maximum
 
 publish:

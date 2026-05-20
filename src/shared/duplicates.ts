@@ -6,6 +6,16 @@ import { createReadStream, type ReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
 import { createInterface } from "node:readline";
 
+// CommonJS `require` declared so we can load the native `blake2`
+// addon without going through ESM dynamic import. Both runtime
+// contexts that ever execute this file are CommonJS:
+//   - production: tsdown bundles to dist-electron/main.cjs (CJS)
+//   - dev harness: scripts/debug-dup.mjs drops a `{"type": "commonjs"}`
+//     package.json next to the transpiled .js so Node loads it as CJS
+// In TS source the tsconfig says module=ESNext, so without this
+// declaration TypeScript complains that `require` is not defined.
+declare const require: NodeRequire;
+
 import type {
   DuplicateAnalysis,
   DuplicateFileEntry,
@@ -57,14 +67,84 @@ const SAMPLE_BYTES_EACH = 64 * 1024;
 const FULL_HASH_HIGH_WATER_MARK = 1024 * 1024;
 
 /**
- * Hash algorithm. BLAKE2b at ~1.5 GB/s/core is ~3× faster than
- * SHA-256 on Node + Electron and is cryptographically as strong
- * — overkill for duplicate detection but a zero-risk drop-in.
- * If you change this, ALSO bump the cache filename in
- * duplicateHashCache.ts so stale SHA-256 entries don't shadow
- * fresh BLAKE2b hashes.
+ * Hash algorithm — runtime-selected with three-tier fallback.
+ *
+ * v0.5.18 hardcoded `createHash("blake2b512")`. Passed in regular
+ * Node. The shipped Electron app silently threw "Digest method not
+ * supported" for every candidate (Electron 40 bundles Node 22 /
+ * OpenSSL 3.x, which puts BLAKE2 in the legacy provider — not
+ * loaded by default in Electron). v0.5.36 surfaced this via
+ * worker-wrapper-throw logging.
+ *
+ * v0.5.37: pull in the `blake2` npm package (vrza/node-blake2),
+ * a native addon shipping its own BLAKE2 implementation. Doesn't
+ * depend on OpenSSL's legacy provider; works in Electron. Falls
+ * back gracefully if the native binary isn't present (e.g. fresh
+ * checkout before `bun install` rebuilt against Electron's ABI):
+ *
+ *   1. native `blake2`   — ~1.5 GB/s, primary path
+ *   2. `crypto.createHash("blake2b512")` — same speed, works on
+ *      vanilla Node where OpenSSL has BLAKE2 enabled
+ *   3. `crypto.createHash("sha256")` — universally available,
+ *      ~3× slower but correct
+ *
+ * The selected mode is logged at scan start so we can tell at a
+ * glance which path the user is on.
+ *
+ * Cache keys include HASH_ALGO so entries from different algos
+ * don't collide (see cachedHashPrefix / cachedHashContent below).
  */
-const HASH_ALGO = "blake2b512";
+/**
+ * Hash interface our code uses. Both Node's `crypto.Hash` and
+ * `blake2`'s hash object implement these methods with identical
+ * semantics. Both return `this` from `update()` for chaining, but
+ * we don't rely on the return value (some forks of node-blake2
+ * return undefined) — calls are made statement-by-statement.
+ */
+interface HashLike {
+  update(data: Buffer | string): unknown;
+  digest(encoding: "hex"): string;
+}
+
+let nativeBlake2: { createHash: (name: string, opts?: { digestLength?: number }) => HashLike } | null = null;
+let nativeBlake2LoadError: string | null = null;
+try {
+  nativeBlake2 = require("blake2");
+  // Smoke-test the binary BEFORE committing to it. If the
+  // require succeeds but the .node binary isn't loadable (ABI
+  // mismatch — e.g. built against Node 22 but loaded by
+  // Electron 40, before electron-builder rebuilds for the right
+  // ABI), the createHash call below throws. We catch and downgrade
+  // to crypto.createHash gracefully.
+  const probe = nativeBlake2!.createHash("blake2b");
+  probe.update(Buffer.from("diskhound-blake2-probe"));
+  if (typeof probe.digest("hex") !== "string") throw new Error("blake2 probe returned non-string");
+} catch (err) {
+  nativeBlake2 = null;
+  nativeBlake2LoadError = err instanceof Error ? err.message : String(err);
+}
+
+export const HASH_ALGO: string = (() => {
+  if (nativeBlake2) return "blake2b-native";
+  try {
+    createHash("blake2b512");
+    return "blake2b512";
+  } catch {
+    return "sha256";
+  }
+})();
+
+/**
+ * Create a hasher matching HASH_ALGO. Centralised so call sites
+ * don't repeat the three-tier selection logic and so future
+ * additions (BLAKE3 etc.) drop into one place.
+ */
+function createHasher(): HashLike {
+  if (nativeBlake2) {
+    return nativeBlake2.createHash("blake2b");
+  }
+  return createHash(HASH_ALGO) as unknown as HashLike;
+}
 
 // Parallel hash workers. Bumped from 8 → 16 — modern NVMe SSDs
 // handle 16+ concurrent streaming reads without seek contention,
@@ -418,6 +498,16 @@ export function runDuplicateScan(
     // scan and silently swallow the rest, making "all null" reports
     // from later scans impossible to diagnose.
     resetFailureLogger();
+    // v0.5.37: surface the active hash algo so the user's log
+    // unambiguously shows what's being used. Pre-v0.5.37 we
+    // hardcoded blake2b512, which Electron silently failed on.
+    // Also surface the native-blake2 load error (if any) so we
+    // can see whether the fallback was driven by a missing module,
+    // an ABI mismatch, or a runtime probe failure.
+    verboseLogger(
+      `scan starting: algo=${HASH_ALGO}` +
+      (nativeBlake2LoadError ? ` (native-blake2-load-error: ${nativeBlake2LoadError})` : ""),
+    );
 
     // Kick off hash cache load. Non-fatal if this fails (cache
     // module falls back to in-memory on I/O errors). We don't await
@@ -1173,7 +1263,11 @@ async function cachedHashPrefix(
     counters.cancelAtTop++;
     return null;
   }
-  const cacheKey = `prefix:${file.path}`;
+  // v0.5.37: HASH_ALGO baked into the cache key so existing BLAKE2b
+  // entries from prior versions don't get returned as SHA-256 hashes
+  // (or vice versa). Old entries become unreachable and naturally
+  // age out via the cache's LRU pruning.
+  const cacheKey = `prefix-${HASH_ALGO}:${file.path}`;
   const cached = getCachedHash(cacheKey, file.size, file.mtime);
   if (cached) {
     counters.cachedHitOk++;
@@ -1211,7 +1305,11 @@ async function cachedHashContent(
 ): Promise<string | null> {
   if (isCancelled()) return null;
   const useSampling = file.size > SAMPLE_HASH_THRESHOLD_BYTES;
-  const cacheKey = useSampling ? `sample:${file.path}` : `full:${file.path}`;
+  // v0.5.37: HASH_ALGO baked into the cache key — same reason as
+  // cachedHashPrefix above.
+  const cacheKey = useSampling
+    ? `sample-${HASH_ALGO}:${file.path}`
+    : `full-${HASH_ALGO}:${file.path}`;
   const cached = getCachedHash(cacheKey, file.size, file.mtime);
   if (cached) return cached;
   const hash = useSampling
@@ -1288,7 +1386,7 @@ function hashFilePrefix(
 
     active.add(stream);
 
-    const hash = createHash(HASH_ALGO);
+    const hash = createHasher();
     stream.on("data", (chunk) => {
       if (isCancelled()) {
         silentCancelMidData++;
@@ -1533,7 +1631,7 @@ function hashFileFull(
 
     active.add(stream);
 
-    const hash = createHash(HASH_ALGO);
+    const hash = createHasher();
     stream.on("data", (chunk) => {
       if (isCancelled()) {
         finish(null);
@@ -1587,8 +1685,16 @@ async function hashFileSample(
   try {
     handle = await FSP.open(filePath, "r");
     if (isCancelled()) return null;
-    const hash = createHash(HASH_ALGO);
-    const buffer = Buffer.alloc(SAMPLE_BYTES_EACH);
+    const hash = createHasher();
+    // v0.5.37: dedicated buffer per read instead of reusing one.
+    // Native blake2 (vrza/node-blake2) holds a pointer to the Buffer
+    // passed to .update() and processes its contents at digest()
+    // time, NOT at update() time. With a reused buffer, the first two
+    // updates' bytes would be silently overwritten by the third read
+    // before the digest ever runs — making two identical files
+    // produce different hashes. Node's crypto.Hash copies eagerly and
+    // didn't show this bug. Caught in the harness: 6 / 9 groups
+    // detected (the 70 MB sample-hashed pairs all mismatched).
     // Three windows: start, middle-aligned, end-aligned. Clamp to
     // sane offsets if the file is just barely over the sample
     // threshold so windows don't overlap.
@@ -1600,15 +1706,30 @@ async function hashFileSample(
     // Hash the byte-length as a salt so a sampled hash can never
     // collide with a full hash of a different file that happened
     // to start with the same 192 KB. Cheap insurance.
-    hash.update(`size:${size}|`);
+    //
+    // v0.5.37: Buffer.from(string) instead of passing the string
+    // directly. Native blake2 (vrza/node-blake2) doesn't accept
+    // string arguments to update() — it expects a Buffer. Passing
+    // a string makes it throw, which the outer catch swallows as
+    // a null hash. That made every 70 MB sample-hashed pair return
+    // null in the harness. Node's crypto.Hash accepted the string
+    // (auto-converts to UTF-8) so this was invisible until the
+    // native module landed.
+    hash.update(Buffer.from(`size:${size}|`, "utf8"));
     for (const offset of positions) {
       if (isCancelled()) return null;
+      const buffer = Buffer.alloc(SAMPLE_BYTES_EACH);
       const { bytesRead } = await handle.read(buffer, 0, SAMPLE_BYTES_EACH, offset);
       if (bytesRead > 0) hash.update(buffer.subarray(0, bytesRead));
     }
     if (isCancelled()) return null;
     return hash.digest("hex");
-  } catch {
+  } catch (err) {
+    // v0.5.37: route through logFirstFailure so we see what went
+    // wrong instead of silently null-ing. The previous bare catch
+    // hid the "blake2 doesn't accept strings" TypeError that
+    // emptied every 70 MB sample-hash result on the native path.
+    logFirstFailure("sample-hash-throw", filePath, err);
     return null;
   } finally {
     if (handle) {

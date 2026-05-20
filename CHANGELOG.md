@@ -1,5 +1,126 @@
 # Changelog
 
+## 0.5.37 — 2026-05-20
+
+### THE root cause of "0 duplicates found" since v0.5.18 — BLAKE2b not in Electron
+
+v0.5.36's `worker-wrapper-throw` catch finally caught it:
+
+```
+hash-fail kind=worker-wrapper-throw err=Digest method not supported
+```
+
+**`createHash("blake2b512")` throws synchronously in Electron 40.6.0.**
+
+Electron 40 bundles Node 22 / OpenSSL 3.x. OpenSSL 3 moved BLAKE2 to
+the *legacy provider*, which is not loaded by default in many
+Electron builds. Node's `crypto.createHash` doesn't expose provider
+state, so the only way to know the algo isn't available is to call
+it and catch the throw. v0.5.18 switched SHA-256 → BLAKE2b for the
+~3× speedup; the dev harness (regular Node) passed every test; the
+shipped Electron app silently failed on every single hash and pre-
+v0.5.35 left the user with 0 duplicates and no actionable log.
+
+### Fix: ship a self-contained BLAKE2 native module
+
+Pulled in [vrza/node-blake2](https://github.com/vrza/node-blake2), a
+native addon shipping its own BLAKE2 implementation. Doesn't depend
+on OpenSSL's legacy provider, doesn't depend on Electron's crypto
+bindings — just a small C++ module loaded via N-API/NAN. Works
+identically in Node and Electron once electron-builder rebuilds it
+against the right ABI.
+
+Three-tier algorithm probe at module load:
+
+```ts
+let nativeBlake2 = null;
+try {
+  nativeBlake2 = require("blake2");
+  // smoke-test the binary actually loads + hashes
+  const probe = nativeBlake2.createHash("blake2b");
+  probe.update(Buffer.from("diskhound-blake2-probe"));
+  probe.digest("hex");
+} catch { nativeBlake2 = null; }
+
+export const HASH_ALGO = (() => {
+  if (nativeBlake2) return "blake2b-native";    // primary
+  try { createHash("blake2b512"); return "blake2b512"; }  // 2nd
+  catch { return "sha256"; }                    // last resort
+})();
+```
+
+The chosen mode (with any load error) is logged at scan start so
+the user's log unambiguously shows what's being used:
+
+```
+[dup] scan starting: algo=blake2b-native
+```
+
+### Native module integration
+
+- `package.json` declares `trustedDependencies: ["blake2"]` so bun
+  runs the post-install node-gyp build automatically.
+- `electron-builder.yml` adds `asarUnpack: ["node_modules/blake2/**/*"]`
+  so the `.node` binary lives outside the asar archive where
+  `dlopen()`/`LoadLibrary()` can reach it.
+- `tsdown.config.ts` lists `blake2` as `external` so the bundler
+  emits a runtime `require("blake2")` instead of trying to inline a
+  native binary.
+- electron-builder's default `npmRebuild: true` triggers
+  `@electron/rebuild` to compile the .node against Electron 40's
+  Node ABI during packaging — same mechanism we already rely on
+  for any future native dep.
+
+### Two harness-found bugs in `hashFileSample` exposed by the native path
+
+The harness (run under regular Node) hit 6/9 expected groups on the
+first native run — exactly the count if every 70 MB sample-hashed
+file pair failed. Two bugs surfaced now that we have a strict
+native module:
+
+1. **String passed to `update()`**: `hash.update(\`size:${size}|\`)`.
+   Node's `crypto.Hash.update` accepts strings (auto-UTF-8). Native
+   blake2's `update` requires a `Buffer` and throws on strings. The
+   throw was swallowed by `hashFileSample`'s bare catch, returning
+   null for every sample-hashed candidate.
+   Fix: `hash.update(Buffer.from(\`size:${size}|\`, "utf8"))`.
+2. **Reused buffer aliasing**: the sample-hash loop reused one
+   `Buffer.alloc(SAMPLE_BYTES_EACH)` across all three reads. Native
+   blake2 might hold the buffer pointer past `update()` return; the
+   second/third read overwrites the bytes the first/second
+   `update()` thought it was hashing. Node's crypto copies eagerly
+   and didn't show this. Fix: allocate a fresh buffer per read.
+3. Replaced the bare catch with `logFirstFailure("sample-hash-throw",
+   ...)` so future regressions surface instead of silently nulling.
+
+### Cache invalidation across the algo switch
+
+Cache keys now include the algo name:
+
+```
+prefix-blake2b-native:<path>  ← v0.5.37 native blake2 in Electron
+prefix-blake2b512:<path>      ← regular Node fallback
+prefix-sha256:<path>          ← last-resort fallback
+prefix:<path>                 ← v0.5.18-v0.5.36 (stale; unreachable)
+```
+
+Old entries become unreachable and age out via the cache's LRU
+pruning.
+
+### Also fixed: the persistent "no index" flash
+
+v0.5.33–v0.5.36 chased the empty-state warning. v0.5.36 found a
+second warning living inside the progress UI (gated on
+`progress.source === "walk"`). Removed that one too — the user
+explicitly asked to remove all no-index warnings, since the chained
+"Scan drive + find duplicates" button is the only flow that matters
+for first-time users.
+
+Also fixed the `source` field race that drove the flash even on
+index-path scans: `canUseIndex` is now resolved BEFORE the first
+`emitProgress`, so the renderer never sees `source="walk"`
+transiently on a scan that's about to use the index.
+
 ## 0.5.36 — 2026-05-20
 
 ### Root cause of the v0.5.34/v0.5.35 flash: the IN-PROGRESS walk warning

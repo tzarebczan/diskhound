@@ -13,6 +13,12 @@ import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
 
+// The transpiled-into-tmpdir copy of duplicates.js needs to be able
+// to resolve project deps (notably the native blake2 module).
+// Solution: put the transpiled files inside the project tree rather
+// than os.tmpdir(), so Node's module resolution walks up and finds
+// the project's node_modules naturally. See `compileDir` below.
+
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "dh-dup-test-"));
 const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "dh-dup-cache-"));
 console.log("tmp:", tmpRoot);
@@ -76,8 +82,18 @@ function transpile(p) {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
   }).outputText;
 }
-const work = path.join(tmpRoot, "_compiled");
+// Put the transpiled files INSIDE the project tree (not os.tmpdir())
+// so `require("blake2")` from the compiled duplicates.js resolves
+// via the project's node_modules. Cleaned up after the run.
+const work = path.resolve(".harness-compile");
+fs.rmSync(work, { recursive: true, force: true });
 fs.mkdirSync(work, { recursive: true });
+// Override the project's `"type": "module"` by dropping a local
+// package.json that switches the harness output to CommonJS. Without
+// this, .js files in .harness-compile/ are loaded as ESM (no
+// `require`), and the transpiled-from-TS-with-CJS-target code
+// crashes immediately — masking whether blake2 native loads.
+fs.writeFileSync(path.join(work, "package.json"), JSON.stringify({ type: "commonjs" }));
 fs.writeFileSync(path.join(work, "contracts.js"), "module.exports = {};\n");
 fs.writeFileSync(path.join(work, "duplicateHashCache.js"), transpile(path.resolve("src/shared/duplicateHashCache.ts")));
 fs.writeFileSync(path.join(work, "pathUtils.js"), transpile(path.resolve("src/shared/pathUtils.ts")));
@@ -167,6 +183,7 @@ async function main() {
   console.log("\nALL OK");
   fs.rmSync(tmpRoot, { recursive: true, force: true });
   fs.rmSync(cacheDir, { recursive: true, force: true });
+  fs.rmSync(work, { recursive: true, force: true });
   process.exit(0);
 }
 
