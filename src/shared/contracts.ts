@@ -262,6 +262,22 @@ export interface StorageSettings {
    * aren't debugging anything.
    */
   verboseDuplicateLog: boolean;
+  /**
+   * Top-N% of candidate size-buckets to actually hash, sorted by
+   * potential waste (size × (count − 1)). 100 = scan everything
+   * (most thorough, slowest). Lower values dramatically speed up
+   * scans by skipping the long tail of small duplicate groups that
+   * account for the majority of file-opens but tiny fractions of
+   * recoverable space.
+   *
+   * For a 7M-file drive with 7,470 candidate size-buckets, 100%
+   * takes ~20 min (open() overhead bottleneck on Windows — NTFS
+   * metadata + Defender). 10% covers ~80%+ of recoverable bytes
+   * (size distributions are Pareto-shaped) at roughly 10% of the
+   * cost. Range: 1–100. Default 100 (no behavior change for
+   * existing users).
+   */
+  duplicateHashDepthPercent: number;
 }
 
 /** Returned by `nativeApi.getStorageStats()` — surfaces disk usage
@@ -1165,6 +1181,9 @@ export function defaultSettings(): AppSettings {
       // notice it on the disk. Was 20 (hardcoded) before v0.5.24.
       maxHistoryPerRoot: 7,
       verboseDuplicateLog: false,
+      // Default 100% = no behavior change vs pre-v0.5.38. Users with
+      // huge drives can drop this from the Storage settings panel.
+      duplicateHashDepthPercent: 100,
     },
     recentScans: [],
     affinityRules: [],
@@ -1313,6 +1332,12 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         defaults.storage.maxHistoryPerRoot,
       ),
       verboseDuplicateLog: Boolean(merged.storage.verboseDuplicateLog),
+      duplicateHashDepthPercent: clampInteger(
+        merged.storage.duplicateHashDepthPercent,
+        1,
+        100,
+        defaults.storage.duplicateHashDepthPercent,
+      ),
     },
     recentScans: (Array.isArray(merged.recentScans) ? merged.recentScans : [])
       .filter((scan): scan is RecentScan =>

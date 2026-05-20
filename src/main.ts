@@ -2926,6 +2926,12 @@ void app.whenReady().then(async () => {
         // (path, size, mtime) and finish in seconds for unchanged
         // files.
         cacheDir: app.getPath("userData"),
+        // v0.5.38: pipe through the user-configured Hash Depth setting.
+        // 100 = scan every candidate bucket (default, unchanged
+        // behavior). <100 = top-N% only, sorted by potential waste —
+        // dramatically faster on big drives at the cost of recall in
+        // the long tail of small duplicate groups.
+        hashDepthPercent: settingsStore?.get().storage.duplicateHashDepthPercent ?? 100,
       },
     );
     activeDuplicateScans.set(key, handle);

@@ -391,6 +391,14 @@ function StorageSection({
         value={settings.storage.verboseDuplicateLog}
         onChange={(v) => onChange({ ...settings, storage: { ...settings.storage, verboseDuplicateLog: v } })}
       />
+      <NumberRow
+        label="Duplicate scan depth (%)"
+        desc="Top-N% of candidate size-buckets to actually hash, sorted by reclaimable bytes per group. 100 = scan everything (most thorough, slowest). Lower values trade recall for speed by skipping the long tail of small duplicate groups. On 7 M+ file drives, 10–25% recovers most reclaimable bytes in a fraction of the time."
+        value={settings.storage.duplicateHashDepthPercent}
+        min={1}
+        max={100}
+        onChange={(v) => onChange({ ...settings, storage: { ...settings.storage, duplicateHashDepthPercent: v } })}
+      />
       <div className="settings-row settings-row-action">
         <div className="settings-row-label">
           Clear all scan history

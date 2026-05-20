@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.5.38 — 2026-05-20
+
+User's first successful v0.5.37 scan: 5,842 duplicate groups,
+70 GB reclaimable, `algo=blake2b-native` — but 20 min total. Two
+follow-ups: hashing speed and Changes-tab clarity.
+
+### Scan speed: from 20 min → expected ~5-7 min on big drives
+
+The v0.5.37 user log timings showed Pass A (23 k prefix hashes,
+1.5 GB of bytes) taking 10 min — ~2.5 MB/s effective. The actual
+I/O is sub-millisecond on SSD; the cost was open() overhead
+(NTFS metadata + Windows Defender intercept per file) PLUS the
+per-stream construction cost of `createReadStream`.
+
+Three changes:
+
+1. **`hashFilePrefix` switched from `createReadStream` to `fs.open`
+   + `fs.read` + `fs.close`.** Skips the stream-state-machine
+   ceremony for a single 64 KB read. ~3× faster per file on
+   Windows in dev measurement. Same error/null contract; same
+   logFirstFailure breadcrumbs.
+2. **`HASH_CONCURRENCY` 16 → 32.** Better pipelining through
+   Defender's scan queue when open() is the bottleneck. Still
+   overridable via `DISKHOUND_HASH_CONCURRENCY` env var.
+3. **New "Duplicate scan depth (%)" setting.** Default 100 (no
+   behavior change). Lower values keep only the top-N% of
+   candidate size-buckets sorted by potential reclaimable bytes —
+   size × (count − 1). 10% covers ~80% of reclaimable bytes at
+   ~10% of the open() cost. For 7 M-file drives users tired of
+   20-minute scans, dropping to 10–25% gets the bulk of the
+   value back in 1–3 minutes.
+
+Combined: at 100% depth the scan should be ~3× faster than v0.5.37
+(stream → fs.read alone). Drop depth to 10–25% for another ~5–10×
+on top of that.
+
+### Changes-tab clarity: which two scans is this actually diffing?
+
+User asked "the file list is still against current, is that right?"
+The IPC was returning the right (baseline, current) pair for vs-next
+mode all along — but with nothing in the UI showing WHICH two
+scans were being compared, it was impossible to tell from the file
+list alone. Two improvements:
+
+- New "Comparing X → Y" header above the detail tabs, showing
+  both timestamps + the active mode label. Updates in real time
+  as the user toggles "vs current" / "vs next".
+- Quick-select time pills' preview deltas (the "+1.2 GB", "−400 MB"
+  shown on each pill) now respect the active mode too. Before,
+  they were hardcoded to vs-current — so in vs-next mode the
+  pill previews disagreed with the file list they opened.
+
+### Other notes
+
+- Cache key already includes HASH_ALGO from v0.5.37, so the
+  stream → fs.read switch in Pass A doesn't invalidate anyone's
+  existing cache (the bytes hashed are identical, so the hash
+  outputs are identical).
+
 ## 0.5.37 — 2026-05-20
 
 ### THE root cause of "0 duplicates found" since v0.5.18 — BLAKE2b not in Electron

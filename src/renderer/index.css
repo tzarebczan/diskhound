@@ -5750,6 +5750,43 @@ button, input, select, textarea { font: inherit; }
 .changes-range-delta.negative { color: var(--red-dim); }
 .changes-range-delta.neutral { color: var(--text-muted); }
 
+/* v0.5.38: "Comparing X → Y" header above the detail tabs.
+ * Surfaces which two scans are being diffed so the file list isn't
+ * ambiguous when the user toggles vs-current / vs-next. */
+.changes-comparing-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--bg-deep);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.changes-comparing-label {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  font-size: 10px;
+  opacity: 0.7;
+}
+.changes-comparing-side {
+  color: var(--text);
+  font-weight: 500;
+}
+.changes-comparing-arrow {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.changes-comparing-mode {
+  margin-left: auto;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  text-transform: lowercase;
+  font-size: 10px;
+}
+
 /* Detail tabs */
 .changes-detail-tabs {
   display: flex;

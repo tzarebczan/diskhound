@@ -57,8 +57,17 @@ interface ResolvedRange {
   disabled: boolean;
 }
 
-/** Find the history entry closest to `range.ms` ago from the latest scan. */
-function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[]): ResolvedRange {
+type DiffMode = "cumulative" | "per-scan";
+
+/**
+ * Find the history entry closest to `range.ms` ago from the latest
+ * scan. previewDelta respects diffMode so the pill numbers match what
+ * the file list will actually display when the pill is clicked.
+ *
+ * - cumulative (vs-current): preview = latest − baseline
+ * - per-scan (vs-next): preview = scan-after-baseline − baseline
+ */
+function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[], diffMode: DiffMode): ResolvedRange {
   const base = { range, entry: null, previewDelta: 0, disabled: true };
   if (history.length < 2) return base;
 
@@ -67,12 +76,14 @@ function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[]): Resolv
   const toleranceMs = range.ms * 0.5;
 
   // Find the entry with scannedAt closest to targetTime (skip index 0 = latest)
+  let bestIdx = 1;
   let best = history[1];
   let bestDist = Math.abs(best.scannedAt - targetTime);
 
   for (let i = 2; i < history.length; i++) {
     const dist = Math.abs(history[i].scannedAt - targetTime);
     if (dist < bestDist) {
+      bestIdx = i;
       best = history[i];
       bestDist = dist;
     }
@@ -83,10 +94,19 @@ function resolveTimeRange(range: TimeRange, history: ScanHistoryEntry[]): Resolv
   // point at scans weeks or months away.
   if (bestDist > toleranceMs) return base;
 
+  // v0.5.38: pick the "current" side that matches diffMode so the
+  // pill's preview delta lines up with the file list that opens when
+  // it's clicked. Before this, the pill showed vs-current bytes even
+  // when the view was in vs-next mode — same number for every pill in
+  // some histories, confusing.
+  const currentForPreview = diffMode === "cumulative"
+    ? latest
+    : (bestIdx > 0 ? history[bestIdx - 1] : latest);
+
   return {
     range,
     entry: best,
-    previewDelta: latest.bytesSeen - best.bytesSeen,
+    previewDelta: currentForPreview.bytesSeen - best.bytesSeen,
     disabled: false,
   };
 }
@@ -179,10 +199,45 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
     }
   }, [refreshScheduleInfo]);
 
-  // Resolve all time ranges from history (pure, no IPC)
+  /**
+   * Diff mode toggle. Declared before `resolvedRanges` (which reads
+   * `diffMode`) so we don't TDZ-violate. See the full doc on the
+   * setter callbacks below.
+   *
+   * - "cumulative" (default): every history row diffs against the
+   *   CURRENT scan. Clicking "6h ago" answers "what changed in the
+   *   last 6 hours". Same file growing across multiple time-points
+   *   shows up in every row that pre-dates the growth.
+   *
+   * - "per-scan": every history row diffs against the scan
+   *   chronologically AFTER it. Clicking "6h ago" answers "what
+   *   changed between the 6h-ago scan and the next scan after it".
+   *   A file that grew once shows up exactly once — in the row for
+   *   the scan immediately before the growth.
+   *
+   * Persisted to localStorage so the preference survives reopens.
+   */
+  const DIFF_MODE_KEY = "diskhound:changes-diff-mode";
+  const [diffMode, setDiffMode] = useState<DiffMode>(() => {
+    if (typeof window === "undefined") return "cumulative";
+    const v = window.localStorage.getItem(DIFF_MODE_KEY);
+    return v === "per-scan" ? "per-scan" : "cumulative";
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem(DIFF_MODE_KEY, diffMode); } catch { /* ok */ }
+    // When the user flips the mode, every cached diff becomes stale
+    // because the meaning of (baseline, current) pair changes. Drop
+    // the cache so subsequent selectBaseline calls re-fetch with
+    // the right "current" side.
+    diffCache.current.clear();
+  }, [diffMode]);
+
+  // Resolve all time ranges from history (pure, no IPC).
+  // v0.5.38: thread diffMode through so pill previews match the file
+  // list that opens when clicked.
   const resolvedRanges = useMemo(
-    () => TIME_RANGES.map((r) => resolveTimeRange(r, history)),
-    [history],
+    () => TIME_RANGES.map((r) => resolveTimeRange(r, history, diffMode)),
+    [history, diffMode],
   );
 
   // Shared load function — used on mount and after scan completes
@@ -230,7 +285,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
         setDiff(data.diff);
         setSelectedBaseline(data.diff.baselineId);
         const matchingQuickSelect = TIME_RANGES
-          .map((range) => resolveTimeRange(range, data.history))
+          .map((range) => resolveTimeRange(range, data.history, diffMode))
           .find((resolved) => resolved.entry?.id === data.diff!.baselineId);
         setActiveQuickSelect(matchingQuickSelect?.range.id ?? null);
       }
@@ -258,7 +313,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
           setDiff(data.diff);
           setSelectedBaseline(data.diff.baselineId);
           const matchingQuickSelect = TIME_RANGES
-            .map((range) => resolveTimeRange(range, data.history))
+            .map((range) => resolveTimeRange(range, data.history, diffMode))
             .find((resolved) => resolved.entry?.id === data.diff!.baselineId);
           setActiveQuickSelect(matchingQuickSelect?.range.id ?? null);
         }
@@ -274,38 +329,9 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
   const switchSeqRef = useRef(0);
   const [switching, setSwitching] = useState(false);
 
-  /**
-   * Diff mode toggle.
-   *
-   * - "cumulative" (default): every history row diffs against the
-   *   CURRENT scan. Clicking "6h ago" answers "what changed in the
-   *   last 6 hours". Same file growing across multiple time-points
-   *   shows up in every row that pre-dates the growth.
-   *
-   * - "per-scan": every history row diffs against the scan
-   *   chronologically AFTER it. Clicking "6h ago" answers "what
-   *   changed between the 6h-ago scan and the next scan after it".
-   *   A file that grew once shows up exactly once — in the row for
-   *   the scan immediately before the growth.
-   *
-   * User asked for both. Persisted to localStorage so the
-   * preference survives reopens.
-   */
-  type DiffMode = "cumulative" | "per-scan";
-  const DIFF_MODE_KEY = "diskhound:changes-diff-mode";
-  const [diffMode, setDiffMode] = useState<DiffMode>(() => {
-    if (typeof window === "undefined") return "cumulative";
-    const v = window.localStorage.getItem(DIFF_MODE_KEY);
-    return v === "per-scan" ? "per-scan" : "cumulative";
-  });
-  useEffect(() => {
-    try { window.localStorage.setItem(DIFF_MODE_KEY, diffMode); } catch { /* ok */ }
-    // When the user flips the mode, every cached diff becomes stale
-    // because the meaning of (baseline, current) pair changes. Drop
-    // the cache so subsequent selectBaseline calls re-fetch with
-    // the right "current" side.
-    diffCache.current.clear();
-  }, [diffMode]);
+  // diffMode declared earlier (see "Diff mode toggle" block above
+  // `resolvedRanges`). Removed the duplicate declaration block here
+  // in v0.5.38.
 
   /**
    * Pick the "current" side of a diff given a baseline ID + the mode.
@@ -726,6 +752,20 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
 
         {/* Detail panel */}
         <div className="changes-detail">
+          {/* v0.5.38: explicit "Comparing X → Y" header so the user
+              can tell which two scans are actually being diffed. A
+              user reported "the file list is still against current"
+              when in vs-next mode — the IPC was already returning
+              the right pair, but with no visible indication of which
+              pair, it was hard to tell. This header makes the active
+              comparison unambiguous: the timestamps and the mode
+              both change as you toggle the radio. */}
+          <ComparingHeader
+            history={history}
+            baselineId={diff.baselineId}
+            currentId={diff.currentId}
+            diffMode={diffMode}
+          />
           {/* Detail tabs */}
           <div className="changes-detail-tabs">
             <button
@@ -826,6 +866,48 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
 }
 
 // ── Sub-components ─────────────────────────────────────────
+
+/**
+ * Header showing exactly which two scans are being compared, in the
+ * active diff mode. Surfaces the (baseline → current) pair so the
+ * file list below isn't ambiguous when the user toggles vs-current
+ * vs-next. v0.5.38 addition.
+ */
+function ComparingHeader({
+  history,
+  baselineId,
+  currentId,
+  diffMode,
+}: {
+  history: ScanHistoryEntry[];
+  baselineId: string;
+  currentId: string;
+  diffMode: DiffMode;
+}) {
+  const baseline = history.find((h) => h.id === baselineId);
+  const current = history.find((h) => h.id === currentId);
+  if (!baseline || !current) return null;
+  const isLatestCurrent = current.id === history[0]?.id;
+  // Label distinguishes the two modes at a glance.
+  const modeLabel = diffMode === "cumulative"
+    ? (isLatestCurrent ? "vs current" : "cumulative")
+    : "vs next scan";
+  return (
+    <div
+      className="changes-comparing-header"
+      title="The two scans being compared in the lists below. Toggle 'vs current' / 'vs next' in the sidebar to change."
+    >
+      <span className="changes-comparing-label">Comparing</span>
+      <span className="changes-comparing-side">{relativeTime(baseline.scannedAt)}</span>
+      <span className="changes-comparing-arrow">→</span>
+      <span className="changes-comparing-side">
+        {isLatestCurrent ? "current" : relativeTime(current.scannedAt)}
+      </span>
+      <span className="changes-comparing-mode">{modeLabel}</span>
+    </div>
+  );
+}
+
 
 /**
  * Top-of-Changes-tab strip that makes the scanning schedule legible: when the
