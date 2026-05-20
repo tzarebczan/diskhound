@@ -91,6 +91,74 @@ const HASH_CONCURRENCY = (() => {
 const DEFAULT_MIN_SIZE_BYTES = 1 * 1024 * 1024;
 
 /**
+ * Well-known system + cache directories on Windows that produce
+ * nothing but noise in the duplicate-detection candidate list:
+ *
+ *   - System hives (registry / config) are locked under EBUSY
+ *   - Browser caches rotate continuously, so ENOENT by the time we
+ *     hash them
+ *   - Windows Store packages are ACL'd EPERM and aren't user data
+ *   - $Recycle.Bin / System Volume Information / Recovery are
+ *     system-owned and the user can't act on duplicates there anyway
+ *
+ * A v0.5.31 user report showed every single Pass A failure was a
+ * file in one of these locations: 30 k candidates, 0 results.
+ * Excluding these patterns upfront drops the candidate count to
+ * something useful, AND stops 30 k ENOENT/EPERM/EBUSY error
+ * events from cluttering crash.log.
+ *
+ * Paths are checked against the candidate's path (after normPath
+ * lowercasing on Windows) as substring matches. The patterns are
+ * intentionally narrow: e.g. `\appdata\local\google\chrome\user
+ * data\default\cache\` is specific enough to never collide with a
+ * user folder called "Cache" elsewhere.
+ *
+ * Cross-platform note: these only match on Windows path layouts.
+ * Linux / macOS install paths are different and currently aren't
+ * filtered — if usage grows there we'd add /System, /proc, etc.
+ */
+const NOISE_PATH_PATTERNS: ReadonlyArray<string> = [
+  // OS internals
+  "\\windows\\",
+  "\\programdata\\microsoft\\",
+  "\\$recycle.bin\\",
+  "\\system volume information\\",
+  "\\recovery\\",
+  // Windows Store sandbox
+  "\\appdata\\local\\packages\\",
+  // Windows internal state cache
+  "\\appdata\\local\\microsoft\\windows\\",
+  // Temp dirs
+  "\\appdata\\local\\temp\\",
+  // Browser caches (rotate constantly; ENOENT by the time we hash)
+  "\\appdata\\local\\google\\chrome\\user data\\default\\cache\\",
+  "\\appdata\\local\\google\\chrome\\user data\\default\\code cache\\",
+  "\\appdata\\local\\microsoft\\edge\\user data\\default\\cache\\",
+  "\\appdata\\local\\microsoft\\edge\\user data\\default\\code cache\\",
+  "\\appdata\\local\\bravesoftware\\brave-browser\\user data\\default\\cache\\",
+  "\\appdata\\local\\bravesoftware\\brave-browser\\user data\\default\\code cache\\",
+  "\\appdata\\local\\mozilla\\firefox\\profiles\\",
+  // Linux mounts (no-op on Windows where backslashes win)
+  "/proc/",
+  "/sys/",
+  "/dev/",
+];
+
+/**
+ * O(1)-friendly check using indexOf on the normalised path. We
+ * intentionally do NOT regex-match — for 30 k candidates × 15
+ * patterns that's 450 k regex tests vs. 450 k substring searches;
+ * substring is ~3× faster in V8 for short needles, and we don't
+ * need anchoring.
+ */
+function isNoiseCandidatePath(normalisedPath: string): boolean {
+  for (const pattern of NOISE_PATH_PATTERNS) {
+    if (normalisedPath.indexOf(pattern) !== -1) return true;
+  }
+  return false;
+}
+
+/**
  * Opt-in verbose logging. Two ways to enable:
  *   1. Env var DISKHOUND_DUP_DEBUG=1 (dev / power users)
  *   2. Runtime toggle via setDuplicateVerbose() — called by
@@ -148,6 +216,16 @@ export interface DuplicateScanOptions {
   /** userData directory for persisting the hash cache. When absent the
    *  cache is in-memory only (lost at exit). */
   cacheDir?: string;
+  /**
+   * Skip the well-known-noise path filter (Windows system / browser
+   * caches / temp / etc). Used by the dev test harness which scans
+   * under `os.tmpdir()` — that path matches the filter so without the
+   * opt-out the harness collects 0 candidates.
+   *
+   * Production callers (main.ts's IPC handler) leave this undefined /
+   * false so end users get the filter.
+   */
+  disableNoiseFilter?: boolean;
 }
 
 /**
@@ -312,6 +390,7 @@ export function runDuplicateScan(
         rootNorm: normalizedRoot,
         rootPrefix,
         userDataPrefixNorm: options.cacheDir ? normPath(Path.resolve(options.cacheDir)) : undefined,
+        applyNoiseFilter: !options.disableNoiseFilter,
         isCancelled,
         onProgress: (walked, candGroups) => {
           filesWalked = walked;
@@ -324,6 +403,7 @@ export function runDuplicateScan(
       sizeMap = await collectFromWalk(rootPath, {
         minSizeBytes,
         userDataPrefixNorm: options.cacheDir ? normPath(Path.resolve(options.cacheDir)) : undefined,
+        applyNoiseFilter: !options.disableNoiseFilter,
         isCancelled,
         onProgress: (walked, candGroups) => {
           filesWalked = walked;
@@ -656,6 +736,10 @@ interface CollectCallbacks {
    *  ENOENTs in Pass A when the just-built index still references
    *  them. Excluding them upfront is cleaner than chasing the race. */
   userDataPrefixNorm?: string;
+  /** When true (default in production), filter out the well-known
+   *  Windows system + cache paths (NOISE_PATH_PATTERNS) that
+   *  produce nothing but ENOENT/EPERM/EBUSY noise. */
+  applyNoiseFilter?: boolean;
   onProgress: (walked: number, candidateGroups: number) => void;
   isCancelled: () => boolean;
 }
@@ -685,6 +769,7 @@ async function collectFromIndex(
     if (typeof size !== "number" || size < cbs.minSizeBytes) return true;
     if (!pathIsUnderRoot(rec.p, cbs.rootNorm, cbs.rootPrefix)) return true;
     if (cbs.userDataPrefixNorm && pathIsUnderPrefix(rec.p, cbs.userDataPrefixNorm)) return true;
+    if (cbs.applyNoiseFilter !== false && isNoiseCandidatePath(normPath(rec.p))) return true;
     walked++;
     sizeCounts.set(size, (sizeCounts.get(size) ?? 0) + 1);
     if (walked % 5_000 === 0) {
@@ -720,6 +805,7 @@ async function collectFromIndex(
     if (!candidateSizes.has(size)) return true;
     if (!pathIsUnderRoot(rec.p, cbs.rootNorm, cbs.rootPrefix)) return true;
     if (cbs.userDataPrefixNorm && pathIsUnderPrefix(rec.p, cbs.userDataPrefixNorm)) return true;
+    if (cbs.applyNoiseFilter !== false && isNoiseCandidatePath(normPath(rec.p))) return true;
     walkedB++;
     const bucket = sizeMap.get(size);
     const candidate: FileCandidate = {
@@ -807,6 +893,7 @@ function pathIsUnderPrefix(path: string, prefixNorm: string): boolean {
 interface WalkCallbacks {
   minSizeBytes: number;
   userDataPrefixNorm?: string;
+  applyNoiseFilter?: boolean;
   onProgress: (walked: number, candidateGroups: number) => void;
   isCancelled: () => boolean;
 }
@@ -857,6 +944,7 @@ async function collectFromWalk(
       catch { continue; }
       if (stat.size < cbs.minSizeBytes) continue;
       if (cbs.userDataPrefixNorm && pathIsUnderPrefix(fullPath, cbs.userDataPrefixNorm)) continue;
+      if (cbs.applyNoiseFilter !== false && isNoiseCandidatePath(normPath(fullPath))) continue;
 
       walked++;
       sizeCounts.set(stat.size, (sizeCounts.get(stat.size) ?? 0) + 1);

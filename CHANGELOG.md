@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.5.32 — 2026-05-19
+
+The v0.5.31 sample logs finally told us what 29,907 nulls were:
+
+- **ENOENT** → Chrome cache files (`AppData\Local\Google\Chrome\
+  User Data\Default\Cache\Cache_Data\f_…`) that rotate
+  continuously
+- **EPERM** → Windows ACL'd files like `CapabilityAccessManager.db`
+- **EBUSY** → Locked registry hives (`SYSTEM.LOG1`,
+  `NTUSER.DAT.LOG2`, `SOFTWARE.LOG1`, `Amcache.hve.LOG2`, …)
+
+All of it is system/cache noise, none of it is user content the
+duplicate scanner should be wasting cycles on.
+
+### Skip well-known system + cache directories from candidates
+
+A new `NOISE_PATH_PATTERNS` list filters candidate paths whose
+normalised form contains any of:
+
+```
+\windows\
+\programdata\microsoft\
+\$recycle.bin\
+\system volume information\
+\recovery\
+\appdata\local\packages\
+\appdata\local\microsoft\windows\
+\appdata\local\temp\
+\appdata\local\google\chrome\user data\default\cache\
+\appdata\local\google\chrome\user data\default\code cache\
+\appdata\local\microsoft\edge\user data\default\cache\
+\appdata\local\microsoft\edge\user data\default\code cache\
+\appdata\local\bravesoftware\brave-browser\user data\default\cache\
+\appdata\local\bravesoftware\brave-browser\user data\default\code cache\
+\appdata\local\mozilla\firefox\profiles\
+```
+
+Applied at candidate collection (both index and walk paths) so
+the 30k mostly-noise candidate count should drop to whatever
+the user actually has — likely a few hundred to a few thousand
+real candidates.
+
+### Fix: "no index" warning flashing despite having an index
+
+`findIndexCoveringPath` iterated `settings.recentScans` to look
+up known roots. If that list was empty for any reason (settings
+drift / migration / fresh-install timing) the function returned
+null even though `scan-history` had actual entries on disk.
+
+Now it iterates `getAllEntries()` from `scan-history` directly —
+the actual source of truth for what's on disk — so an empty
+`recentScans` doesn't masquerade as "no index".
+
+This is also the most likely root cause of the user's earlier
+"drive picker appeared after restart" report. `recentScans`
+backed the drive-picker's "recent" list AND the duplicate
+scanner's index lookup, so a single drift broke both.
+
 ## 0.5.31 — 2026-05-19
 
 User's v0.5.28+ verbose log showed exactly ONE `hash-fail` entry

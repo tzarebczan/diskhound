@@ -116,11 +116,11 @@ function scenario(name, options) {
 
 async function main() {
   console.log("\n=== walk path, cold cache ===");
-  await scenario("walk", { cacheDir });
+  await scenario("walk", { cacheDir, disableNoiseFilter: true });
   console.log("\n=== walk path, warm cache ===");
-  await scenario("walk2", { cacheDir });
+  await scenario("walk2", { cacheDir, disableNoiseFilter: true });
   console.log("\n=== index path, warm cache ===");
-  await scenario("index", { indexPath, cacheDir });
+  await scenario("index", { indexPath, cacheDir, disableNoiseFilter: true });
 
   // Cancel mid-scan test
   console.log("\n=== cancel mid-scan ===");
@@ -160,7 +160,7 @@ async function main() {
         onResult: () => { resultFired = true; },
         onError: (e) => console.log(`  error: ${e.message}`),
       },
-      { cacheDir },
+      { cacheDir, disableNoiseFilter: true },
     );
   });
 

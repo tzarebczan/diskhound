@@ -2952,37 +2952,33 @@ void app.whenReady().then(async () => {
     // match them, causing the duplicates scan to stream the wrong
     // index.
     const normalizedTarget = normPath(Path.resolve(path));
-    // Walk all known history entries, pick the best (shortest root path
-    // that still covers our target, most recently scanned among those).
+    // Walk ALL known history entries (not just settings.recentScans —
+    // a user reported the duplicates view briefly flashing "no index"
+    // even though they had history. Root cause: settings.recentScans
+    // was empty but scan-history had entries. recentScans is populated
+    // when the user picks a drive; it can drift out of sync with the
+    // scan-history index if settings got reset or the user added scans
+    // via the IPC without picker round-trip). Iterate the actual scan
+    // history's entries and pick the best (shortest root that still
+    // covers the target, most recently scanned among those).
     let best: { id: string; rootLen: number; scannedAt: number } | null = null;
-    const now = Date.now();
-    // Iterate through all roots we've ever scanned. The history store
-    // doesn't expose "all roots", so we scan the settings' recent list
-    // (which is bounded) and fall back to no-match.
-    const currentSettings = settingsStore?.get();
-    const recent = currentSettings?.recentScans ?? [];
-    for (const r of recent) {
-      const normalizedRoot = normPath(Path.resolve(r.path));
+    for (const entry of getAllEntries()) {
+      const normalizedRoot = normPath(Path.resolve(entry.rootPath));
       const isUnder = normalizedTarget === normalizedRoot ||
         normalizedTarget.startsWith(normalizedRoot + Path.sep) ||
         normalizedTarget.startsWith(normalizedRoot + "/");
       if (!isUnder) continue;
-      const history = getScanHistory(r.path);
-      const latest = history[0];
-      if (!latest) continue;
-      const candidate = indexFilePath(latest.id);
+      const candidate = indexFilePath(entry.id);
       if (!FS_SYNC.existsSync(candidate)) continue;
       // Prefer shorter root. Among equal lengths, most recent wins.
       if (
         !best ||
         normalizedRoot.length < best.rootLen ||
-        (normalizedRoot.length === best.rootLen && latest.scannedAt > best.scannedAt)
+        (normalizedRoot.length === best.rootLen && entry.scannedAt > best.scannedAt)
       ) {
-        best = { id: latest.id, rootLen: normalizedRoot.length, scannedAt: latest.scannedAt };
+        best = { id: entry.id, rootLen: normalizedRoot.length, scannedAt: entry.scannedAt };
       }
     }
-    // Unused — keeps "now" available if we later add age cutoffs.
-    void now;
     return best ? indexFilePath(best.id) : null;
   }
 
