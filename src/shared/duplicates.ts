@@ -135,14 +135,42 @@ const NOISE_PATH_PATTERNS: ReadonlyArray<string> = [
   "\\appdata\\local\\comms\\",
   // Temp dirs
   "\\appdata\\local\\temp\\",
-  // Browser caches (rotate constantly; ENOENT by the time we hash)
-  "\\appdata\\local\\google\\chrome\\user data\\default\\cache\\",
-  "\\appdata\\local\\google\\chrome\\user data\\default\\code cache\\",
-  "\\appdata\\local\\microsoft\\edge\\user data\\default\\cache\\",
-  "\\appdata\\local\\microsoft\\edge\\user data\\default\\code cache\\",
-  "\\appdata\\local\\bravesoftware\\brave-browser\\user data\\default\\cache\\",
-  "\\appdata\\local\\bravesoftware\\brave-browser\\user data\\default\\code cache\\",
+  // ── Browser profile dirs ──────────────────────────────────
+  //
+  // v0.5.33 tried narrow Default\Cache + Default\Code Cache patterns.
+  // The user's v0.5.33 log still showed ENOENT on
+  // `\appdata\local\google\chrome\user data\extensions_crx_cache\…`
+  // and `\appdata\local\bravesoftware\…\extensions_crx_cache\…`.
+  // Those aren't under Default\ — they're at the profile root.
+  // Rather than play whack-a-mole with each new cache subdir Chrome
+  // invents, broaden to the entire User Data directory. Real user data
+  // worth deduping (downloaded files, etc.) lives elsewhere; everything
+  // under "User Data" is browser-managed state that rotates
+  // continuously and produces nothing but ENOENT on hash.
+  "\\appdata\\local\\google\\chrome\\user data\\",
+  "\\appdata\\local\\microsoft\\edge\\user data\\",
+  "\\appdata\\local\\bravesoftware\\brave-browser\\user data\\",
+  "\\appdata\\local\\bravesoftware\\brave-browser-beta\\user data\\",
+  "\\appdata\\local\\bravesoftware\\brave-browser-nightly\\user data\\",
+  "\\appdata\\local\\chromium\\user data\\",
+  "\\appdata\\local\\vivaldi\\user data\\",
+  "\\appdata\\local\\opera software\\",
   "\\appdata\\local\\mozilla\\firefox\\profiles\\",
+  "\\appdata\\roaming\\mozilla\\firefox\\profiles\\",
+  // Electron app caches (Slack, Discord, Teams, VS Code, etc.) —
+  // they all ship Chromium so the same rotating cache problem applies.
+  "\\appdata\\roaming\\slack\\cache\\",
+  "\\appdata\\roaming\\slack\\code cache\\",
+  "\\appdata\\roaming\\slack\\service worker\\",
+  "\\appdata\\roaming\\discord\\cache\\",
+  "\\appdata\\roaming\\discord\\code cache\\",
+  "\\appdata\\roaming\\code\\cache\\",
+  "\\appdata\\roaming\\code\\cachedata\\",
+  "\\appdata\\roaming\\microsoft\\teams\\",
+  // Steam / Epic / common game launchers (manifests rotate)
+  "\\steam\\appcache\\",
+  "\\steam\\logs\\",
+  "\\epic games\\launcher\\saved\\",
   // Linux mounts (no-op on Windows where backslashes win)
   "/proc/",
   "/sys/",
@@ -1185,24 +1213,67 @@ function hashFilePrefix(
 }
 
 /**
- * Per-scan diagnostic for hash failures. v0.5.28 dedup'd by `kind`
- * which only showed ONE error-event entry even when 30k files all
- * failed. v0.5.31 dedup's by `kind:code` so distinct error codes
- * each get logged, and bumps the sample limit per bucket so we
- * see a variety of paths (helps spot systematic patterns like
- * "all in C:\Windows\System32" vs "all under DiskHound's own
- * userData").
+ * Per-scan diagnostic for hash failures.
  *
- * Also tracks totals per bucket so we can emit one summary line
- * at scan end: "hash-fail summary: error-event/ENOENT=29900,
- * error-event/EPERM=5, …". Without that we'd see the first 5 of
- * each but no count of how many overall.
+ * v0.5.28: dedup'd by `kind` — too coarse (one error-event entry for
+ *          30 k different files).
+ * v0.5.31: switched to `kind/code`, capped at 8 buckets, 5 samples
+ *          each. Helped spot ENOENT vs EPERM vs EBUSY breakdowns.
+ * v0.5.34: bumped MAX_FAILURE_BUCKETS to 32 because real-world drives
+ *          easily hit >8 distinct (kind, code) pairs (close-before-end
+ *          / ctor-throw / error-event × ENOENT/EPERM/EACCES/EBUSY
+ *          /EMFILE/etc), and we were silently dropping the 9th+.
+ *          Also added per-directory aggregation so the summary line
+ *          tells us WHERE failures cluster — directly actionable for
+ *          adding new noise patterns. Without it the user would see
+ *          "29 k ENOENTs" and we still wouldn't know which dirs.
  */
 const MAX_SAMPLES_PER_BUCKET = 5;
-const MAX_FAILURE_BUCKETS = 8;
+const MAX_FAILURE_BUCKETS = 32;
+/** How deep to aggregate parent-dir paths in the summary. 4 segments
+ *  is `c:\users\thoma\appdata\` — enough to identify the offender
+ *  without leaking individual filenames into telemetry. */
+const FAIL_PATH_DEPTH = 4;
+/** Cap on distinct parent-dir buckets we track. Once we hit this many,
+ *  new dirs go into an "other" lump. 64 is plenty — 99% of failure
+ *  locations cluster into <20 dirs on real drives. */
+const MAX_PATH_BUCKETS = 64;
 let failureBuckets: Map<string, { count: number; samplesLogged: number }> = new Map();
+let failurePathBuckets: Map<string, number> = new Map();
+let failurePathOverflow = 0;
+let failureDroppedBuckets = 0;
 function resetFailureLogger(): void {
   failureBuckets = new Map();
+  failurePathBuckets = new Map();
+  failurePathOverflow = 0;
+  failureDroppedBuckets = 0;
+}
+/**
+ * Aggregate a path into a fixed-depth parent prefix so 10 k distinct
+ * filenames in one cache directory collapse into a single counter.
+ * Always uses backslash on Windows-normalised paths; on POSIX paths
+ * the normaliser leaves '/' alone so we split on both.
+ */
+function aggregateFailurePath(normalisedPath: string): string {
+  // Find the FAIL_PATH_DEPTH'th separator from the start. Everything
+  // up to (and including) that separator is the bucket key.
+  let count = 0;
+  for (let i = 0; i < normalisedPath.length; i++) {
+    const ch = normalisedPath.charCodeAt(i);
+    if (ch === 92 /* \ */ || ch === 47 /* / */) {
+      count++;
+      if (count === FAIL_PATH_DEPTH) {
+        return normalisedPath.substring(0, i + 1);
+      }
+    }
+  }
+  // Shorter than the depth — use the whole parent path, less the
+  // final segment so we don't leak the filename.
+  const lastSep = Math.max(
+    normalisedPath.lastIndexOf("\\"),
+    normalisedPath.lastIndexOf("/"),
+  );
+  return lastSep >= 0 ? normalisedPath.substring(0, lastSep + 1) : normalisedPath;
 }
 function logFirstFailure(kind: string, path: string, err: unknown): void {
   const code = (err as { code?: string })?.code ?? "";
@@ -1210,34 +1281,71 @@ function logFirstFailure(kind: string, path: string, err: unknown): void {
   let bucket = failureBuckets.get(bucketKey);
   if (!bucket) {
     if (failureBuckets.size >= MAX_FAILURE_BUCKETS) {
-      // Too many distinct buckets — stop tracking new ones to keep
-      // the summary line short. The catch-all kicks in for genuinely
-      // weird cases (different error code per file).
-      return;
+      // Out of bucket slots. Still count it in `failureDroppedBuckets`
+      // so the summary's "other" line is honest.
+      failureDroppedBuckets++;
+    } else {
+      bucket = { count: 0, samplesLogged: 0 };
+      failureBuckets.set(bucketKey, bucket);
     }
-    bucket = { count: 0, samplesLogged: 0 };
-    failureBuckets.set(bucketKey, bucket);
   }
-  bucket.count++;
-  if (bucket.samplesLogged < MAX_SAMPLES_PER_BUCKET) {
-    bucket.samplesLogged++;
-    const msg = err instanceof Error ? err.message : String(err);
-    verboseLogger(`hash-fail kind=${kind} code=${code} path=${path} err=${msg}`);
+  if (bucket) {
+    bucket.count++;
+    if (bucket.samplesLogged < MAX_SAMPLES_PER_BUCKET) {
+      bucket.samplesLogged++;
+      const msg = err instanceof Error ? err.message : String(err);
+      verboseLogger(`hash-fail kind=${kind} code=${code} path=${path} err=${msg}`);
+    }
+  }
+  // Always count in the per-directory aggregation, even when the
+  // (kind, code) bucket is full — that's the actionable telemetry.
+  const dirKey = aggregateFailurePath(normPath(path));
+  const existing = failurePathBuckets.get(dirKey);
+  if (existing !== undefined) {
+    failurePathBuckets.set(dirKey, existing + 1);
+  } else if (failurePathBuckets.size < MAX_PATH_BUCKETS) {
+    failurePathBuckets.set(dirKey, 1);
+  } else {
+    failurePathOverflow++;
   }
 }
 /**
- * Emit a one-line summary of all hash failures observed during the
- * scan. Called at the end of Pass A so the user's crash log has a
- * compact accounting of WHAT went wrong en masse, not just the
- * first 5 samples. Skipped when no failures occurred.
+ * Emit a summary at the end of Pass A. Two lines:
+ *
+ *   1. hash-fail summary: <kind/code>=count, …
+ *      Shows error-mode breakdown so we can see if it's mostly ENOENT
+ *      (stale index entries) vs EPERM (permissions) vs EBUSY (locks).
+ *   2. hash-fail top-dirs: <dir>=count, …
+ *      Shows the top-10 parent dirs by failure count. Directly tells
+ *      us which dirs to add to NOISE_PATH_PATTERNS.
+ *
+ * Both lines are skipped when no failures occurred.
  */
 function logFailureSummary(): void {
-  if (failureBuckets.size === 0) return;
-  const parts: string[] = [];
-  for (const [bucketKey, bucket] of failureBuckets) {
-    parts.push(`${bucketKey}=${bucket.count}`);
+  if (failureBuckets.size === 0 && failurePathBuckets.size === 0) return;
+  // Kind/code breakdown, sorted by count descending so the most
+  // common failure mode is first — most informative bit of the line.
+  const kindParts: string[] = [];
+  const sortedKinds = Array.from(failureBuckets.entries()).sort(
+    (a, b) => b[1].count - a[1].count,
+  );
+  for (const [bucketKey, bucket] of sortedKinds) {
+    kindParts.push(`${bucketKey}=${bucket.count}`);
   }
-  verboseLogger(`hash-fail summary: ${parts.join(", ")}`);
+  if (failureDroppedBuckets > 0) kindParts.push(`other-kinds=${failureDroppedBuckets}`);
+  verboseLogger(`hash-fail summary: ${kindParts.join(", ")}`);
+  // Top-10 parent dirs by count — directly actionable.
+  const sortedDirs = Array.from(failurePathBuckets.entries()).sort((a, b) => b[1] - a[1]);
+  const TOP_DIRS = 10;
+  const top = sortedDirs.slice(0, TOP_DIRS);
+  const dirParts = top.map(([dir, count]) => `${dir}=${count}`);
+  if (sortedDirs.length > TOP_DIRS) {
+    let rest = 0;
+    for (let i = TOP_DIRS; i < sortedDirs.length; i++) rest += sortedDirs[i]![1];
+    dirParts.push(`other-dirs=${rest}`);
+  }
+  if (failurePathOverflow > 0) dirParts.push(`overflow=${failurePathOverflow}`);
+  verboseLogger(`hash-fail top-dirs: ${dirParts.join(", ")}`);
 }
 
 /**

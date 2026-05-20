@@ -53,18 +53,45 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   // scan first) BEFORE they click and wait an hour. null = still
   // loading; true = fast path available; false = walk mode only.
   const [hasIndex, setHasIndex] = useState<boolean | null>(null);
+  // Has the IPC query EVER returned a result for the current scope?
+  // We use this to gate the no-index warning — without it, the warning
+  // could flash briefly during the IPC roundtrip (because hasIndex
+  // starts as null, but ALSO because earlier code paths could leave
+  // hasIndex=false from a stale previous scope). v0.5.33 fixed the
+  // common case by tracking scanStarting; v0.5.34 closes the gap for
+  // the post-chain-scan refresh, where snapshot.status="done" triggers
+  // a re-check whose stale `false` flashes before the new `true`
+  // arrives. Only show the warning when we have a CURRENT positive
+  // confirmation that no index exists.
+  const [hasIndexCheckedAtLeastOnce, setHasIndexCheckedAtLeastOnce] = useState(false);
   const refreshHasIndex = async () => {
-    if (!effectiveScope) { setHasIndex(null); return; }
+    if (!effectiveScope) {
+      setHasIndex(null);
+      setHasIndexCheckedAtLeastOnce(false);
+      return;
+    }
     try {
       const result = await nativeApi.hasScanIndexForPath(effectiveScope);
       setHasIndex(result);
+      setHasIndexCheckedAtLeastOnce(true);
     } catch { /* leave as-is */ }
   };
   useEffect(() => {
     let cancelled = false;
-    if (!effectiveScope) { setHasIndex(null); return; }
+    if (!effectiveScope) {
+      setHasIndex(null);
+      setHasIndexCheckedAtLeastOnce(false);
+      return;
+    }
+    // Reset the "checked" gate when the scope changes — we haven't
+    // verified the NEW scope yet so we shouldn't show a warning based
+    // on the previous scope's result.
+    setHasIndexCheckedAtLeastOnce(false);
     void nativeApi.hasScanIndexForPath(effectiveScope).then((result) => {
-      if (!cancelled) setHasIndex(result);
+      if (!cancelled) {
+        setHasIndex(result);
+        setHasIndexCheckedAtLeastOnce(true);
+      }
     });
     return () => { cancelled = true; };
   }, [effectiveScope]);
@@ -73,8 +100,17 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   // time, even after a fresh scan that built an index. User saw the
   // yellow warning flash on every duplicate scan click despite
   // having a perfectly good index.
+  //
+  // Critically, ALSO reset hasIndexCheckedAtLeastOnce while the
+  // refresh is in flight. Otherwise, on transition from "no index"
+  // → fresh regular scan → done, the stale `hasIndex === false`
+  // would render the warning during the IPC roundtrip. Now the
+  // warning is suppressed until the new result lands.
   useEffect(() => {
-    if (snapshot.status === "done") void refreshHasIndex();
+    if (snapshot.status === "done") {
+      setHasIndexCheckedAtLeastOnce(false);
+      void refreshHasIndex();
+    }
   }, [snapshot.status, effectiveScope]);
   // Local "scan starting" guard. There's a ~50-200 ms IPC roundtrip
   // between click and `isScanning` flipping to true. During that
@@ -457,7 +493,13 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
           )}
           {isScanning || chainPhase === "regular" ? (
             <button className="scan-btn scan-btn-stop" onClick={cancelScan}>Cancel</button>
-          ) : hasIndex === false ? (
+          ) : (hasIndex === false && hasIndexCheckedAtLeastOnce) ? (
+            // Same defensive gating as the warning block: only show the
+            // "Scan drive + find duplicates" variant when we have a
+            // CURRENT positive confirmation that no index exists.
+            // Default to the regular "Scan" button otherwise so the
+            // label doesn't flash between variants during the IPC
+            // roundtrip.
             <button
               className="scan-btn scan-btn-primary"
               onClick={() => void startScanWithIndex()}
@@ -588,12 +630,25 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
               </span>
             </div>
             {/* Walk-mode warning shown BEFORE the user clicks scan.
-                hasIndex is null while loading, true if a regular scan
-                covers this scope (fast path), false if not (walk
-                fallback, much slower). Only render the warning when
-                we know for sure (false), so we don't pre-emptively
-                scare anyone while the IPC is still in flight. */}
-            {hasIndex === false && effectiveScope && !scanStarting && (
+                Multiple gates here are intentional. Each closes a
+                different flash window seen in earlier versions:
+                  - hasIndex === false      : the actual signal
+                  - hasIndexCheckedAtLeastOnce : don't render while
+                      the IPC is in flight (would show a stale `false`
+                      that flips to `true` 50-200 ms later — that was
+                      the v0.5.33 user-reported flash root cause)
+                  - effectiveScope           : nothing to warn about
+                      if there's no scope picked
+                  - !scanStarting           : user already committed
+                  - chainPhase === null     : we're not in the middle
+                      of a chained regular→duplicate scan (where the
+                      regular leg's completion briefly resurfaces the
+                      empty state before the duplicate leg starts) */}
+            {hasIndex === false
+              && hasIndexCheckedAtLeastOnce
+              && effectiveScope
+              && !scanStarting
+              && chainPhase === null && (
               <div className="duplicates-walk-warning">
                 <div className="duplicates-walk-warning-title">No scan index for this drive yet</div>
                 <div className="duplicates-walk-warning-body">

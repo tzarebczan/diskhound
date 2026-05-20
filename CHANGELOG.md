@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.5.34 — 2026-05-20
+
+Two issues from the v0.5.33 retest:
+
+1. The "no index" warning was still flashing on duplicate-scan start
+   — v0.5.33's `scanStarting` guard closed the user-click roundtrip
+   window but left the *snapshot-completion refresh* window open
+   (the IPC roundtrip after `snapshot.status === "done"`).
+2. The scanner returned 0 duplicates on a drive with 7,700 candidate
+   size buckets / 24 k hashed files. The v0.5.33 noise filter only
+   dropped 12 files vs. v0.5.32 — way too narrow. User's log showed
+   ENOENTs on `AppData\Local\Google\Chrome\User Data\extensions_crx_cache\…`
+   and the Brave equivalent, neither of which matched our existing
+   `Default\Cache\` patterns.
+
+### Root cause — the warning flash (defenses)
+
+`hasIndex === false` was visible to the renderer during the
+`hasScanIndexForPath` IPC roundtrip triggered by the post-scan
+refresh. v0.5.33 cleared the IPC roundtrip from the user-click
+direction, but if the user had just finished a regular scan
+(meaning `hasIndex === false` was stale and about to flip to
+`true`), the warning rendered between status="done" and the new
+result.
+
+Added `hasIndexCheckedAtLeastOnce` — a strict gate that resets
+whenever a refresh is in flight. The warning (and the "Scan drive
++ find duplicates" button variant) now only render when we have a
+CURRENT positive confirmation of no index. Also tightened the
+warning gate to suppress during `chainPhase !== null` (the
+regular→duplicate chain has a brief gap where both prior gates
+permit rendering).
+
+### Root cause — 100% hash failure (better diagnostics + broader filter)
+
+The `MAX_FAILURE_BUCKETS = 8` cap silently dropped any 9th+
+`(kind, code)` failure type. On a real drive with browser caches,
+registry hives, ESE databases, and rotating logs we easily hit
+>8 distinct error modes — so we were flying blind on the
+remaining failure population.
+
+**Diagnostic upgrades** (in `duplicates.ts`):
+- `MAX_FAILURE_BUCKETS`: 8 → 32. Captures every realistic error mode.
+- New `hash-fail top-dirs` summary line aggregating failures by the
+  first 4 path segments. Directly tells us "23 k failures in
+  `c:\users\foo\appdata\local\google\`" instead of just totals.
+- Summary lines sorted by count descending — most common failure
+  first.
+- Overflow counters (`other-kinds`, `other-dirs`, `overflow`) so the
+  total stays honest when caps are hit.
+
+**Broadened noise filter**: instead of whack-a-mole'ing each new
+Chrome cache subdirectory, the filter now matches the entire
+browser User Data dir for Chrome, Edge, Brave (stable / beta /
+nightly), Chromium, Vivaldi, Opera, Firefox. Real user data
+duplicates worth surfacing don't live there — everything under
+those paths is browser-managed state that rotates faster than we
+can hash it.
+
+Also added Electron-app cache dirs (Slack, Discord, Teams, VS
+Code) and game-launcher caches (Steam, Epic). Same root cause:
+they ship Chromium with the same rotating cache scheme.
+
+After this, the user's next "0 groups" scan (if it still happens)
+will produce a `hash-fail top-dirs:` line we can act on
+immediately — no more guessing.
+
 ## 0.5.33 — 2026-05-20
 
 User's v0.5.32 log narrowed the remaining noise to two more
