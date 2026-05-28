@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.5.40 — 2026-05-28
+
+DiskHound now protects operating-system folders from accidental cleanup
+while still counting their space in scan totals. This keeps disk-usage
+math honest without putting risky system paths directly in the normal
+cleanup flow.
+
+### Protected folder guardrails
+
+- Added default protected folders for Windows, macOS, and Linux system
+  locations.
+- The Folders tab hides protected direct children by default, but parent
+  totals still include their bytes and item counts.
+- Trash, permanent delete, Easy Move, cleanup suggestions, duplicate
+  cleanup, Changes, Overview, Treemap, and folder/file lists now refuse
+  protected paths.
+- Parent folders that contain a protected subtree are blocked too, so
+  moving or deleting a higher-level folder cannot carry protected files
+  along by accident.
+
+### Settings and context menus
+
+- Added Settings > Protected Folders with add, remove, browse, reset
+  defaults, and a Folders-tab visibility toggle.
+- Added right-click protection actions on file and folder surfaces:
+  protect this folder for directories, or protect parent folder for
+  files.
+- Protected rows show badges and disabled destructive actions instead of
+  relying only on backend refusal.
+
+### Tests
+
+Added shared path-protection coverage for default folders, path
+normalization, exact/nested matching, parent derivation, and destructive
+action blockers.
+
 ## 0.5.39 — 2026-05-20
 
 User confirmed v0.5.38 hit the long-standing full-diff-worker OOM on

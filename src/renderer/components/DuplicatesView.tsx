@@ -7,7 +7,7 @@ import type {
   ScanSnapshot,
 } from "../../shared/contracts";
 import { formatBytes, formatElapsed, humanAge } from "../lib/format";
-import { useConfirmPermanentDelete, usePathActions } from "../lib/hooks";
+import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
 import { toast } from "./Toasts";
@@ -37,6 +37,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   // outlive the groups they came from.
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const { busy, runAction, handleEasyMove } = usePathActions();
+  const { findProtectedFolder, isProtectedPath } = useExcludedFolderProtection();
   const [sortMode, setSortMode] = useState<SortMode>("wasted");
   const confirmDelete = useConfirmPermanentDelete();
   // Optional narrower scope — lets the user scan a subfolder of the
@@ -209,7 +210,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setSelectedPaths((s) => {
       const n = new Set(s);
       for (const f of group.files) {
-        if (on) n.add(f.path);
+        if (on && !isProtectedPath(f.path)) n.add(f.path);
         else n.delete(f.path);
       }
       return n;
@@ -273,15 +274,27 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     const sorted = [...group.files].sort((a, b) =>
       which === "newest" ? b.modifiedAt - a.modifiedAt : a.modifiedAt - b.modifiedAt,
     );
-    const toTrash = sorted.slice(1);
+    const candidates = sorted.slice(1);
+    const toTrash = candidates.filter((f) => !isProtectedPath(f.path));
+    const blocked = candidates.length - toTrash.length;
+    if (toTrash.length === 0) {
+      if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before trashing.");
+      return;
+    }
     let ok = 0;
     for (const f of toTrash) {
       const r = await runAction(f.path, () => nativeApi.trashPath(f.path));
       if (r.ok) ok++;
     }
     if (ok > 0) {
-      toast("success", `Trashed ${ok} duplicate${ok === 1 ? "" : "s"}`);
-      setDismissed((d) => { const n = new Set(d); n.add(group.hash); return n; });
+      toast(
+        blocked > 0 ? "warning" : "success",
+        `Trashed ${ok} duplicate${ok === 1 ? "" : "s"}`,
+        blocked > 0 ? `${blocked} protected duplicate${blocked === 1 ? "" : "s"} skipped.` : undefined,
+      );
+      if (ok === candidates.length) {
+        setDismissed((d) => { const n = new Set(d); n.add(group.hash); return n; });
+      }
     }
   };
 
@@ -320,7 +333,9 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
           which === "newest" ? b.modifiedAt - a.modifiedAt : a.modifiedAt - b.modifiedAt,
         );
         // sorted[0] = the one we keep; slice(1) goes into the selection.
-        for (const f of sorted.slice(1)) next.add(f.path);
+        for (const f of sorted.slice(1)) {
+          if (!isProtectedPath(f.path)) next.add(f.path);
+        }
       }
       return next;
     });
@@ -362,7 +377,13 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
 
   const bulkTrash = async () => {
     if (selectedPaths.size === 0) return;
-    const paths = Array.from(selectedPaths);
+    const selected = Array.from(selectedPaths);
+    const paths = selected.filter((p) => !isProtectedPath(p));
+    const blocked = selected.length - paths.length;
+    if (paths.length === 0) {
+      if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before trashing.");
+      return;
+    }
     let ok = 0;
     let fail = 0;
     for (const p of paths) {
@@ -378,7 +399,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         const hashToRemaining = new Map<string, number>();
         if (analysis) {
           for (const g of analysis.groups) {
-            const remaining = g.files.filter((f) => !selectedPaths.has(f.path) || !paths.includes(f.path)).length;
+            const remaining = g.files.filter((f) => !paths.includes(f.path)).length;
             hashToRemaining.set(g.hash, remaining);
           }
         }
@@ -388,10 +409,14 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         return n;
       });
       setSelectedPaths(new Set());
+      const detail = [
+        fail > 0 ? `${fail} failed` : "",
+        blocked > 0 ? `${blocked} protected skipped` : "",
+      ].filter(Boolean).join(" - ") || undefined;
       toast(
-        fail === 0 ? "success" : "warning",
+        fail === 0 && blocked === 0 ? "success" : "warning",
         `Trashed ${ok} duplicate${ok === 1 ? "" : "s"}`,
-        fail > 0 ? `${fail} failed — see Easy Move / file permissions.` : undefined,
+        detail,
       );
     } else if (fail > 0) {
       toast("error", `Couldn't trash ${fail} file${fail === 1 ? "" : "s"}`);
@@ -400,9 +425,15 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
 
   const bulkMove = async () => {
     if (selectedPaths.size === 0) return;
+    const selected = Array.from(selectedPaths);
+    const paths = selected.filter((p) => !isProtectedPath(p));
+    const blocked = selected.length - paths.length;
+    if (paths.length === 0) {
+      if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before moving.");
+      return;
+    }
     const dest = await nativeApi.pickMoveDestination();
     if (!dest) return;
-    const paths = Array.from(selectedPaths);
     let ok = 0;
     let fail = 0;
     for (const p of paths) {
@@ -419,6 +450,9 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
       );
     } else if (fail > 0) {
       toast("error", `Couldn't move ${fail} file${fail === 1 ? "" : "s"}`);
+    }
+    if (blocked > 0 && ok > 0) {
+      toast("warning", "Protected duplicates skipped", `${blocked} file${blocked === 1 ? "" : "s"} were not moved.`);
     }
     // Mark used `pathToHash` so TS doesn't complain about the unused
     // binding on builds that don't exercise the dismiss path here.
@@ -668,6 +702,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             busy={busy}
             confirmDelete={confirmDelete}
             selectedPaths={selectedPaths}
+            findProtectedFolder={findProtectedFolder}
             onToggle={() => toggleExpand(group.hash)}
             onKeepNewest={() => void keepOne(group, "newest")}
             onKeepOldest={() => void keepOne(group, "oldest")}
@@ -721,12 +756,13 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
 
 // ── Group card ─────────────────────────────────────────────
 
-function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onToggle, onKeepNewest, onKeepOldest, onReveal, onOpen, onTrash, onDelete, onMove, onToggleFileSelected, onToggleGroupSelected }: {
+function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, findProtectedFolder, onToggle, onKeepNewest, onKeepOldest, onReveal, onOpen, onTrash, onDelete, onMove, onToggleFileSelected, onToggleGroupSelected }: {
   group: DuplicateGroup;
   isExpanded: boolean;
   busy: Set<string>;
   confirmDelete: boolean;
   selectedPaths: Set<string>;
+  findProtectedFolder: (path: string) => string | null;
   onToggle: () => void;
   onKeepNewest: () => void;
   onKeepOldest: () => void;
@@ -744,11 +780,12 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
 
   // Tri-state header checkbox: unchecked / indeterminate / checked based
   // on how many of this group's files are currently selected.
-  const selectedInGroup = group.files.reduce(
+  const actionableGroupFiles = group.files.filter((f) => !findProtectedFolder(f.path));
+  const selectedInGroup = actionableGroupFiles.reduce(
     (n, f) => (selectedPaths.has(f.path) ? n + 1 : n),
     0,
   );
-  const allGroupSelected = selectedInGroup === group.files.length;
+  const allGroupSelected = actionableGroupFiles.length > 0 && selectedInGroup === actionableGroupFiles.length;
   const someGroupSelected = selectedInGroup > 0 && !allGroupSelected;
 
   return (
@@ -762,6 +799,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
           <input
             type="checkbox"
             checked={allGroupSelected}
+            disabled={actionableGroupFiles.length === 0}
             ref={(el) => {
               if (el) el.indeterminate = someGroupSelected;
             }}
@@ -812,6 +850,8 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
             .sort((a, b) => b.modifiedAt - a.modifiedAt)
             .map((file, idx) => {
               const isBusy = busy.has(file.path);
+              const protectedBy = findProtectedFolder(file.path);
+              const actionDisabled = isBusy || Boolean(protectedBy);
               const isSelected = selectedPaths.has(file.path);
               return (
                 <div
@@ -825,6 +865,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
                     <input
                       type="checkbox"
                       checked={isSelected}
+                      disabled={Boolean(protectedBy)}
                       onChange={() => onToggleFileSelected(file.path)}
                     />
                   </label>
@@ -834,16 +875,17 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
                     <span className="duplicate-file-meta">
                       {humanAge(file.modifiedAt)}
                       {idx === 0 && <span className="duplicate-newest-badge">newest</span>}
+                      {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
                     </span>
                   </div>
                   <div className="duplicate-file-actions">
                     <button className="action-btn" disabled={isBusy} onClick={() => onReveal(file.path)}>Reveal</button>
                     <button className="action-btn" disabled={isBusy} onClick={() => onOpen(file.path)}>Open</button>
-                    <button className="action-btn warn" disabled={isBusy} onClick={() => onTrash(file.path)}>Trash</button>
+                    <button className="action-btn warn" disabled={actionDisabled} onClick={() => onTrash(file.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>
                     <button
                       className="action-btn danger"
-                      disabled={isBusy}
-                      title="Permanently delete this copy (skips trash)"
+                      disabled={actionDisabled}
+                      title={protectedBy ? `Protected by ${protectedBy}` : "Permanently delete this copy (skips trash)"}
                       onClick={() => {
                         if (confirmDelete && !confirm(`Permanently delete this copy?\n${file.path}`)) return;
                         onDelete(file.path);
@@ -851,7 +893,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, onTo
                     >
                       Del
                     </button>
-                    <button className="action-btn" disabled={isBusy} onClick={() => onMove(file.path)}>Move</button>
+                    <button className="action-btn" disabled={actionDisabled} onClick={() => onMove(file.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
                   </div>
                 </div>
               );

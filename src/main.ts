@@ -85,6 +85,10 @@ import {
 } from "./shared/duplicates";
 import { randomUUID } from "node:crypto";
 import { normPath } from "./shared/pathUtils";
+import {
+  findExcludedFolderActionBlocker,
+  isPathExcluded,
+} from "./shared/pathProtection";
 import { analyzeForCleanup } from "./shared/suggestions";
 import { killProcess as killProcessImpl, sampleSystemMemory } from "./shared/processMonitor";
 import {
@@ -1430,6 +1434,21 @@ void app.whenReady().then(async () => {
     }
   };
 
+  const protectedPathBlock = (targetPath: string, actionLabel: string): PathActionResult | null => {
+    const excludedFolders = settingsStore?.get().scanning.excludedFolderPaths ?? [];
+    const block = findExcludedFolderActionBlocker(targetPath, excludedFolders, process.platform);
+    if (!block) return null;
+    const detail = block.reason === "inside"
+      ? `this path is inside excluded folder "${block.folder}"`
+      : `this path contains excluded folder "${block.folder}"`;
+    return {
+      ok: false,
+      message:
+        `${actionLabel} blocked: ${detail}. ` +
+        `Remove or narrow that exclusion in Settings > Protected Folders to allow this action.`,
+    };
+  };
+
   // ── IPC: Scan ─────────────────────────────────────────────
 
   ipcMain.handle("diskhound:pick-root", async () => {
@@ -1438,6 +1457,16 @@ void app.whenReady().then(async () => {
       properties: ["openDirectory"],
       title: "Choose a folder to scan",
       buttonLabel: "Scan folder",
+    });
+    return result.canceled ? null : result.filePaths[0] ?? null;
+  });
+
+  ipcMain.handle("diskhound:pick-protected-folder", async () => {
+    if (!mainWindow) return null;
+    const result = await dialog.showOpenDialog(mainWindow, {
+      properties: ["openDirectory"],
+      title: "Choose a folder to protect",
+      buttonLabel: "Protect folder",
     });
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
@@ -1877,21 +1906,25 @@ void app.whenReady().then(async () => {
       if (result) throw new Error(result);
     }),
   );
-  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) =>
-    pathAction("Moved to trash.", async () => {
+  ipcMain.handle("diskhound:trash-path", (_event, targetPath: string) => {
+    const blocked = protectedPathBlock(targetPath, "Trash");
+    if (blocked) return blocked;
+    return pathAction("Moved to trash.", async () => {
       await shell.trashItem(targetPath);
-    }),
-  );
-  ipcMain.handle("diskhound:permanent-delete-path", (_event, targetPath: string) =>
-    pathAction("Permanently deleted.", async () => {
+    });
+  });
+  ipcMain.handle("diskhound:permanent-delete-path", (_event, targetPath: string) => {
+    const blocked = protectedPathBlock(targetPath, "Delete");
+    if (blocked) return blocked;
+    return pathAction("Permanently deleted.", async () => {
       const stat = await FS.lstat(targetPath);
       await FS.rm(targetPath, {
         recursive: stat.isDirectory(),
         force: false,
         maxRetries: 2,
       });
-    }),
-  );
+    });
+  });
 
   // ── IPC: Crash logs ───────────────────────────────────────
   //
@@ -1965,6 +1998,8 @@ void app.whenReady().then(async () => {
   // ── IPC: Easy Move ───────────────────────────────────────
 
   ipcMain.handle("diskhound:easy-move", async (_event, sourcePath: string, destinationDir: string) => {
+    const blocked = protectedPathBlock(sourcePath, "Easy Move");
+    if (blocked) return blocked;
     return easyMove(sourcePath, destinationDir);
   });
 
@@ -1978,6 +2013,8 @@ void app.whenReady().then(async () => {
   ipcMain.handle(
     "diskhound:easy-move-elevated",
     async (_event, sourcePath: string, destinationDir: string) => {
+      const blocked = protectedPathBlock(sourcePath, "Easy Move");
+      if (blocked) return blocked;
       const baseName = Path.basename(sourcePath);
       const destinationPath = Path.join(destinationDir, baseName);
 
@@ -2765,13 +2802,21 @@ void app.whenReady().then(async () => {
     async (_event, rootPath: string, parentPath: string) => {
       const history = getScanHistory(rootPath);
       const currentId = history[0]?.id;
-      if (!currentId) return { dirs: [], files: [] };
+      const empty = {
+        dirs: [],
+        files: [],
+        totalSize: 0,
+        totalItemCount: 0,
+        hiddenExcludedCount: 0,
+        hiddenExcludedBytes: 0,
+      };
+      if (!currentId) return empty;
 
       try {
         const tree = await ensureFolderTree(currentId, rootPath);
         const normalizedParent = normPath(parentPath).replace(/[\\/]+$/, "");
         const node = tree.get(normalizedParent);
-        if (!node) return { dirs: [], files: [] };
+        if (!node) return empty;
         // Expand the compact in-cache file shape into the full
         // ScanFileRecord the renderer expects. Done on the way out
         // because the cache holds 1M+ parent entries and duplicating
@@ -2779,16 +2824,36 @@ void app.whenReady().then(async () => {
         // MB of heap for no runtime benefit. The cache stores filenames
         // only — we pass `normalizedParent` so the full path can be
         // reconstructed for the renderer.
+        const files = node.files.map((f) => makeFolderFileRecord(normalizedParent, f));
+        const totalSize =
+          node.dirs.reduce((sum, dir) => sum + dir.size, 0) +
+          files.reduce((sum, file) => sum + file.size, 0);
+        const settings = settingsStore?.get();
+        const hideExcluded = Boolean(settings?.scanning.hideExcludedFoldersFromFolderResults);
+        const excludedFolders = settings?.scanning.excludedFolderPaths ?? [];
+        const visibleDirs = hideExcluded
+          ? node.dirs.filter((dir) => !isPathExcluded(dir.path, excludedFolders, process.platform))
+          : node.dirs;
+        const visibleFiles = hideExcluded
+          ? files.filter((file) => !isPathExcluded(file.path, excludedFolders, process.platform))
+          : files;
+        const visibleSize =
+          visibleDirs.reduce((sum, dir) => sum + dir.size, 0) +
+          visibleFiles.reduce((sum, file) => sum + file.size, 0);
         return {
-          dirs: node.dirs,
-          files: node.files.map((f) => makeFolderFileRecord(normalizedParent, f)),
+          dirs: visibleDirs,
+          files: visibleFiles,
+          totalSize,
+          totalItemCount: node.dirs.length + files.length,
+          hiddenExcludedCount: (node.dirs.length - visibleDirs.length) + (files.length - visibleFiles.length),
+          hiddenExcludedBytes: Math.max(0, totalSize - visibleSize),
         };
       } catch (err) {
         writeCrashLog(
           "folder-tree",
           err instanceof Error ? (err.stack ?? err.message) : String(err),
         );
-        return { dirs: [], files: [] };
+        return empty;
       }
     },
   );
@@ -2831,7 +2896,10 @@ void app.whenReady().then(async () => {
 
   ipcMain.handle("diskhound:analyze-cleanup", (_event, rootPath: string, files: ScanFileRecord[], dirs: DirectoryHotspot[]) => {
     const settings = settingsStore!.get();
-    return analyzeForCleanup(rootPath, files, dirs, settings.cleanup);
+    const excludedFolders = settings.scanning.excludedFolderPaths;
+    const safeFiles = files.filter((file) => !isPathExcluded(file.path, excludedFolders, process.platform));
+    const safeDirs = dirs.filter((dir) => !findExcludedFolderActionBlocker(dir.path, excludedFolders, process.platform));
+    return analyzeForCleanup(rootPath, safeFiles, safeDirs, settings.cleanup);
   });
 
   // ── IPC: Duplicate Detection ────────────────────────────

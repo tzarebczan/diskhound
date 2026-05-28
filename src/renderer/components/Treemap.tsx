@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord } from "../../shared/contracts";
+import { parentFolderOfPath } from "../../shared/pathProtection";
 import { formatBytes, humanAge } from "../lib/format";
-import { useConfirmPermanentDelete } from "../lib/hooks";
+import { useConfirmPermanentDelete, useExcludedFolderProtection } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import {
@@ -344,6 +345,10 @@ function TreemapContextMenu({ x, y, file, onClose }: {
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
   const confirmDelete = useConfirmPermanentDelete();
+  const { findProtectedFolder, addExcludedFolder } = useExcludedFolderProtection();
+  const protectedBy = findProtectedFolder(file.path);
+  const parentFolder = parentFolderOfPath(file.path);
+  const destructiveDisabled = Boolean(protectedBy);
 
   // Adjust position so menu doesn't overflow viewport
   const [pos, setPos] = useState({ x, y });
@@ -381,6 +386,11 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         <div className="treemap-ctx-filesize">{formatBytes(file.size)}</div>
       </div>
       <div className="treemap-ctx-path">{file.path}</div>
+      {protectedBy && (
+        <div className="path-ctx-protected">
+          Protected by {protectedBy}
+        </div>
+      )}
       <div className="treemap-ctx-divider" />
       <button
         className="treemap-ctx-item"
@@ -420,6 +430,8 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       <div className="treemap-ctx-divider" />
       <button
         className="treemap-ctx-item"
+        disabled={destructiveDisabled}
+        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
         onClick={() => {
           onClose();
           void (async () => {
@@ -440,9 +452,33 @@ function TreemapContextMenu({ x, y, file, onClose }: {
         </svg>
         Easy Move (symlink)
       </button>
+      <button
+        className="treemap-ctx-item"
+        disabled={!parentFolder || Boolean(protectedBy)}
+        title={
+          protectedBy
+            ? `Already protected by ${protectedBy}`
+            : parentFolder
+              ? `Protect ${parentFolder}`
+              : "No parent folder available"
+        }
+        onClick={() => {
+          if (!parentFolder) return;
+          onClose();
+          void addExcludedFolder(parentFolder);
+        }}
+      >
+        <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
+          <path d="M7 1.5L11.5 3.5V6.5C11.5 9.35 9.7 11.5 7 12.5C4.3 11.5 2.5 9.35 2.5 6.5V3.5L7 1.5Z" />
+          <path d="M5 7L6.4 8.4L9.2 5.5" />
+        </svg>
+        Protect parent folder
+      </button>
       <div className="treemap-ctx-divider" />
       <button
         className="treemap-ctx-item treemap-ctx-warn"
+        disabled={destructiveDisabled}
+        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
         onClick={() => void doAction(() => nativeApi.trashPath(file.path), "Trash")}
       >
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
@@ -454,6 +490,8 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       </button>
       <button
         className="treemap-ctx-item treemap-ctx-danger"
+        disabled={destructiveDisabled}
+        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
         onClick={() => {
           if (confirmDelete && !confirm(`Permanently delete ${file.name}?\n\nThis cannot be undone.`)) return;
           void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete");

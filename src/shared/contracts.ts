@@ -1,5 +1,10 @@
 // ── Scan Types ──────────────────────────────────────────────
 
+import {
+  getDefaultExcludedFolderPaths,
+  normalizeExcludedFolderPaths,
+} from "./pathProtection";
+
 export type ScanStatus = "idle" | "running" | "done" | "cancelled" | "error";
 export type ScanEngine = "js-worker" | "native-sidecar" | "usn-journal";
 
@@ -188,6 +193,14 @@ export interface GeneralSettings {
 
 export interface ScanningSettings {
   defaultRootPath: string;
+  /**
+   * Folders treated as protected scan exclusions. Scans still count
+   * their bytes; Folder drill-down can hide them, and destructive
+   * actions refuse anything inside them.
+   */
+  excludedFolderPaths: string[];
+  /** Hide excluded folders from Folders while still counting their bytes. */
+  hideExcludedFoldersFromFolderResults: boolean;
 }
 
 export interface MonitoringSettings {
@@ -873,6 +886,7 @@ export interface DiskhoundNativeApi {
 
   // Scan
   pickRootPath: () => Promise<string | null>;
+  pickProtectedFolder: () => Promise<string | null>;
   getCurrentSnapshot: () => Promise<ScanSnapshot>;
   startScan: (rootPath: string, options: ScanOptions) => Promise<ScanSnapshot>;
   /** Cancel a specific root's active scan, or (omit rootPath) cancel all. */
@@ -1050,6 +1064,14 @@ export interface DiskhoundNativeApi {
   ) => Promise<{
     dirs: { path: string; size: number; fileCount: number }[];
     files: ScanFileRecord[];
+    /** Recursive child bytes before excluded-folder rows are hidden. */
+    totalSize: number;
+    /** Direct visible + hidden item count for the parent. */
+    totalItemCount: number;
+    /** Number of direct child rows/files hidden by excluded-folder settings. */
+    hiddenExcludedCount: number;
+    /** Bytes hidden from the rows/files but still counted in totalSize. */
+    hiddenExcludedBytes: number;
   }>;
 
   // Theme
@@ -1151,6 +1173,8 @@ export function defaultSettings(): AppSettings {
     },
     scanning: {
       defaultRootPath: "",
+      excludedFolderPaths: getDefaultExcludedFolderPaths(),
+      hideExcludedFoldersFromFolderResults: true,
     },
     monitoring: {
       enabled: true, // on by default — DiskHound's value is continuous change tracking
@@ -1263,6 +1287,15 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
         typeof merged.scanning.defaultRootPath === "string"
           ? merged.scanning.defaultRootPath
           : defaults.scanning.defaultRootPath,
+      excludedFolderPaths: normalizeExcludedFolderPaths(
+        Array.isArray(merged.scanning.excludedFolderPaths)
+          ? merged.scanning.excludedFolderPaths
+          : defaults.scanning.excludedFolderPaths,
+      ),
+      hideExcludedFoldersFromFolderResults:
+        merged.scanning.hideExcludedFoldersFromFolderResults === undefined
+          ? defaults.scanning.hideExcludedFoldersFromFolderResults
+          : Boolean(merged.scanning.hideExcludedFoldersFromFolderResults),
     },
     monitoring: {
       enabled: Boolean(merged.monitoring.enabled),

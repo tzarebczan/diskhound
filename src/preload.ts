@@ -38,6 +38,7 @@ const api: DiskhoundNativeApi = {
 
   // Scan
   pickRootPath: () => ipcRenderer.invoke("diskhound:pick-root"),
+  pickProtectedFolder: () => ipcRenderer.invoke("diskhound:pick-protected-folder"),
   getCurrentSnapshot: () => ipcRenderer.invoke("diskhound:get-current-snapshot"),
   startScan: (rootPath, options) => ipcRenderer.invoke("diskhound:start-scan", rootPath, options),
   cancelScan: (rootPath) => ipcRenderer.invoke("diskhound:cancel-scan", rootPath),

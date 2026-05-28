@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { ExtensionBucket, ScanDiffResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
 import { basename, formatBytes, formatCount, formatElapsed, humanAge, relativeTime } from "../lib/format";
-import { useConfirmPermanentDelete, usePathActions } from "../lib/hooks";
+import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import {
   buildTreemapComposition,
   colorForExtension,
@@ -133,6 +133,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
   const [latestDiff, setLatestDiff] = useState<ScanDiffResult | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
   const confirmDelete = useConfirmPermanentDelete();
+  const { findProtectedFolder } = useExcludedFolderProtection();
 
   // Load the dense file list from the persisted full-file index whenever a
   // completed scan is available. Falls back to the in-memory top-N if the
@@ -428,6 +429,7 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
                         item={item}
                         rank={index + 1}
                         isBusy={busy.has(item.file.path)}
+                        protectedBy={findProtectedFolder(item.file.path)}
                         onReveal={() => void runAction(item.file.path, () => nativeApi.revealPath(item.file.path))}
                         onOpen={() => void runAction(item.file.path, () => nativeApi.openPath(item.file.path))}
                         onTrash={() => void runAction(item.file.path, () => nativeApi.trashPath(item.file.path))}
@@ -655,10 +657,11 @@ export function Overview({ snapshot, onFilterExtension, onViewChanges, scanPerce
   );
 }
 
-function FeaturedFileCard({ item, rank, isBusy, onReveal, onOpen, onTrash, onDelete, onMove }: {
+function FeaturedFileCard({ item, rank, isBusy, protectedBy, onReveal, onOpen, onTrash, onDelete, onMove }: {
   item: TreemapFeaturedItem;
   rank: number;
   isBusy: boolean;
+  protectedBy: string | null;
   onReveal: () => void;
   onOpen: () => void;
   onTrash: () => void;
@@ -666,6 +669,7 @@ function FeaturedFileCard({ item, rank, isBusy, onReveal, onOpen, onTrash, onDel
   onMove: () => void;
 }) {
   const color = colorForExtension(item.file.extension);
+  const destructiveDisabled = isBusy || Boolean(protectedBy);
 
   return (
     <div className="treemap-featured-card" title={item.file.path}>
@@ -676,6 +680,7 @@ function FeaturedFileCard({ item, rank, isBusy, onReveal, onOpen, onTrash, onDel
       <div className="treemap-featured-name-row">
         <FileIcon path={item.file.path} className="treemap-featured-icon" fallback={<span className="ext-dot" style={{ background: color }} />} />
         <span className="treemap-featured-name">{item.file.name}</span>
+        {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
       </div>
       <div className="treemap-featured-path">{item.file.path}</div>
       <div className="treemap-featured-size-row">
@@ -694,9 +699,9 @@ function FeaturedFileCard({ item, rank, isBusy, onReveal, onOpen, onTrash, onDel
       <div className="treemap-featured-actions">
         <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
         <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
-        <button className="action-btn warn" disabled={isBusy} onClick={onTrash}>Trash</button>
-        <button className="action-btn danger" disabled={isBusy} onClick={onDelete} title="Permanently delete (skips trash)">Del</button>
-        <button className="action-btn" disabled={isBusy} onClick={onMove}>Move</button>
+        <button className="action-btn warn" disabled={destructiveDisabled} onClick={onTrash} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>
+        <button className="action-btn danger" disabled={destructiveDisabled} onClick={onDelete} title={protectedBy ? `Protected by ${protectedBy}` : "Permanently delete (skips trash)"}>Del</button>
+        <button className="action-btn" disabled={destructiveDisabled} onClick={onMove} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
       </div>
     </div>
   );

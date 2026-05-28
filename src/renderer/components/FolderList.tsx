@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
 import { formatBytes, formatCount } from "../lib/format";
-import { usePathActions } from "../lib/hooks";
+import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { FileIcon } from "./FileIcon";
+import { PathContextMenu } from "./PathContextMenu";
 
 interface Props {
   snapshot: ScanSnapshot;
@@ -20,6 +22,15 @@ interface FolderChild {
   path: string;
   size: number;
   fileCount: number;
+}
+
+interface FolderChildrenState {
+  dirs: FolderChild[];
+  files: ScanFileRecord[];
+  totalSize: number;
+  totalItemCount: number;
+  hiddenExcludedCount: number;
+  hiddenExcludedBytes: number;
 }
 
 // Render caps — the persisted index can yield thousands of direct
@@ -78,9 +89,22 @@ export function FolderList({ snapshot }: Props) {
   const [currentPath, setCurrentPath] = useState(rootPath);
   const [children, setChildren] = useState<FolderChild[]>([]);
   const [looseFiles, setLooseFiles] = useState<ScanFileRecord[]>([]);
+  const [folderMeta, setFolderMeta] = useState<Omit<FolderChildrenState, "dirs" | "files">>({
+    totalSize: 0,
+    totalItemCount: 0,
+    hiddenExcludedCount: 0,
+    hiddenExcludedBytes: 0,
+  });
   const [loading, setLoading] = useState(false);
   const [showOtherFiles, setShowOtherFiles] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{
+    x: number;
+    y: number;
+    path: string;
+    isDirectory: boolean;
+  } | null>(null);
   const { busy, runAction, handleEasyMove } = usePathActions();
+  const { findProtectedFolder, findProtectionBlocker } = useExcludedFolderProtection();
 
   // Reset navigation when the scan root changes (drive switch etc).
   useEffect(() => {
@@ -93,6 +117,17 @@ export function FolderList({ snapshot }: Props) {
   useEffect(() => {
     setShowOtherFiles(false);
   }, [currentPath]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("contextmenu", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("contextmenu", close);
+    };
+  }, [contextMenu]);
 
   // Auto-expand the file list when this folder is clearly "a folder
   // of files." The click-to-expand collapse was the right default at
@@ -125,6 +160,7 @@ export function FolderList({ snapshot }: Props) {
     if (!rootPath || !currentPath) {
       setChildren([]);
       setLooseFiles([]);
+      setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
       return;
     }
     let cancelled = false;
@@ -134,16 +170,24 @@ export function FolderList({ snapshot }: Props) {
     // did nothing."
     setChildren([]);
     setLooseFiles([]);
+    setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
     setLoading(true);
     void nativeApi.getFolderChildren(rootPath, currentPath).then((res) => {
       if (cancelled) return;
       setChildren(res?.dirs ?? []);
       setLooseFiles(res?.files ?? []);
+      setFolderMeta({
+        totalSize: res?.totalSize ?? 0,
+        totalItemCount: res?.totalItemCount ?? ((res?.dirs?.length ?? 0) + (res?.files?.length ?? 0)),
+        hiddenExcludedCount: res?.hiddenExcludedCount ?? 0,
+        hiddenExcludedBytes: res?.hiddenExcludedBytes ?? 0,
+      });
       setLoading(false);
     }).catch(() => {
       if (cancelled) return;
       setChildren([]);
       setLooseFiles([]);
+      setFolderMeta({ totalSize: 0, totalItemCount: 0, hiddenExcludedCount: 0, hiddenExcludedBytes: 0 });
       setLoading(false);
     });
     return () => { cancelled = true; };
@@ -162,7 +206,8 @@ export function FolderList({ snapshot }: Props) {
     () => looseFiles.reduce((sum, f) => sum + f.size, 0),
     [looseFiles],
   );
-  const folderTotal = childrenTotal + looseTotal;
+  const folderTotal = folderMeta.totalSize || childrenTotal + looseTotal;
+  const folderItemCount = folderMeta.totalItemCount || children.length + looseFiles.length;
 
   // Cap dirs rendered so we never ship thousands of rows into Preact.
   // Files are already returned top-N from the IPC.
@@ -243,7 +288,7 @@ export function FolderList({ snapshot }: Props) {
           <div className="folder-breadcrumb-size">
             <span className="folder-breadcrumb-total">{formatBytes(folderTotal)}</span>
             <span className="folder-breadcrumb-count">
-              {formatCount(children.length + looseFiles.length)} items
+              {formatCount(folderItemCount)} items
             </span>
           </div>
         )}
@@ -275,12 +320,17 @@ export function FolderList({ snapshot }: Props) {
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>Loading folder contents…</span>
           </div>
-        ) : children.length === 0 && looseFiles.length === 0 ? (
+        ) : children.length === 0 && looseFiles.length === 0 && folderMeta.hiddenExcludedCount === 0 ? (
           <div className="empty-view" style={{ paddingTop: 48 }}>
             <span>This folder appears empty in the scan index</span>
           </div>
         ) : (
           <>
+            {folderMeta.hiddenExcludedCount > 0 && (
+              <div className="folder-protected-note">
+                {formatCount(folderMeta.hiddenExcludedCount)} protected item{folderMeta.hiddenExcludedCount === 1 ? "" : "s"} hidden, {formatBytes(folderMeta.hiddenExcludedBytes)} still counted here.
+              </div>
+            )}
             {dirsToRender.map((child) => (
               <FolderRow
                 key={child.path}
@@ -289,10 +339,12 @@ export function FolderList({ snapshot }: Props) {
                 rootPath={rootPath}
                 canDrillIn={hasChildren(child.path)}
                 isBusy={busy.has(child.path)}
+                protectionBlocker={findProtectionBlocker(child.path)}
                 onNavigate={() => setCurrentPath(child.path)}
                 onReveal={() => void runAction(child.path, () => nativeApi.revealPath(child.path))}
                 onOpen={() => void runAction(child.path, () => nativeApi.openPath(child.path))}
                 onEasyMove={() => void handleEasyMove(child.path)}
+                onContextMenu={(x, y) => setContextMenu({ x, y, path: child.path, isDirectory: true })}
               />
             ))}
             {dirsTruncated && (
@@ -345,9 +397,11 @@ export function FolderList({ snapshot }: Props) {
                         key={f.path}
                         file={f}
                         isBusy={busy.has(f.path)}
+                        protectedBy={findProtectedFolder(f.path)}
                         onReveal={() => void runAction(f.path, () => nativeApi.revealPath(f.path))}
                         onOpen={() => void runAction(f.path, () => nativeApi.openPath(f.path))}
                         onEasyMove={() => void handleEasyMove(f.path)}
+                        onContextMenu={(x, y) => setContextMenu({ x, y, path: f.path, isDirectory: false })}
                       />
                     ))}
                     {filesTruncated && (
@@ -362,6 +416,15 @@ export function FolderList({ snapshot }: Props) {
           </>
         )}
       </div>
+      {contextMenu && (
+        <PathContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          path={contextMenu.path}
+          isDirectory={contextMenu.isDirectory}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
     </div>
   );
 }
@@ -374,19 +437,32 @@ function FolderRow(props: {
   rootPath: string;
   canDrillIn: boolean;
   isBusy: boolean;
+  protectionBlocker: ExcludedFolderActionBlocker | null;
   onNavigate: () => void;
   onReveal: () => void;
   onOpen: () => void;
   onEasyMove: () => void;
+  onContextMenu: (x: number, y: number) => void;
 }) {
-  const { dir, parentSize, rootPath, canDrillIn, isBusy, onNavigate, onReveal, onOpen, onEasyMove } = props;
+  const { dir, parentSize, rootPath, canDrillIn, isBusy, protectionBlocker, onNavigate, onReveal, onOpen, onEasyMove, onContextMenu } = props;
   const pct = parentSize > 0 ? (dir.size / parentSize) * 100 : 0;
   const name = displayName(dir.path, rootPath);
+  const actionDisabled = isBusy || Boolean(protectionBlocker);
+  const protectionTitle = protectionBlocker
+    ? protectionBlocker.reason === "inside"
+      ? `Protected by ${protectionBlocker.folder}`
+      : `Contains protected folder ${protectionBlocker.folder}`
+    : undefined;
 
   return (
     <div
       className={`folder-row ${canDrillIn ? "folder-row-clickable" : ""}`}
       onClick={canDrillIn ? onNavigate : undefined}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY);
+      }}
     >
       <div className="folder-row-icon">
         <FileIcon
@@ -405,6 +481,7 @@ function FolderRow(props: {
       <div className="folder-row-info">
         <div className="folder-row-name">
           {name}
+          {protectionBlocker && <span className="protected-path-badge" title={protectionTitle}>Protected</span>}
           {canDrillIn && (
             <svg className="folder-row-chevron" width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.3">
               <path d="M3.5 2L7 5L3.5 8" />
@@ -426,8 +503,9 @@ function FolderRow(props: {
       <div className="folder-row-actions-col">
         <button
           className="action-btn"
-          disabled={isBusy}
+          disabled={actionDisabled}
           onClick={(e) => { e.stopPropagation(); onEasyMove(); }}
+          title={protectionTitle}
         >
           Move
         </button>
@@ -455,14 +533,24 @@ function FolderRow(props: {
 function LooseFileRow(props: {
   file: ScanFileRecord;
   isBusy: boolean;
+  protectedBy: string | null;
   onReveal: () => void;
   onOpen: () => void;
   onEasyMove: () => void;
+  onContextMenu: (x: number, y: number) => void;
 }) {
-  const { file, isBusy, onReveal, onOpen, onEasyMove } = props;
+  const { file, isBusy, protectedBy, onReveal, onOpen, onEasyMove, onContextMenu } = props;
+  const actionDisabled = isBusy || Boolean(protectedBy);
 
   return (
-    <div className="loose-file-row">
+    <div
+      className="loose-file-row"
+      onContextMenu={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onContextMenu((e as MouseEvent).clientX, (e as MouseEvent).clientY);
+      }}
+    >
       <div className="loose-file-icon">
         <FileIcon
           path={file.path}
@@ -478,10 +566,11 @@ function LooseFileRow(props: {
       <div className="loose-file-info">
         <span className="loose-file-name">{file.name}</span>
         <span className="loose-file-ext">{file.extension}</span>
+        {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
       </div>
       <div className="loose-file-size">{formatBytes(file.size)}</div>
       <div className="loose-file-actions">
-        <button className="action-btn" disabled={isBusy} onClick={onEasyMove}>Move</button>
+        <button className="action-btn" disabled={actionDisabled} onClick={onEasyMove} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
         <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
         <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
       </div>

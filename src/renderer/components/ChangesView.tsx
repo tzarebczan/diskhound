@@ -14,7 +14,7 @@ import type {
   ScanSnapshot,
 } from "../../shared/contracts";
 import { basename, formatBytes, relativeTime } from "../lib/format";
-import { usePathActions } from "../lib/hooks";
+import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 import { toast } from "./Toasts";
 import { FileIcon } from "./FileIcon";
@@ -1112,6 +1112,7 @@ interface DeltaListActions {
 }
 
 function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: { deltas: FileDelta[] } & DeltaListActions) {
+  const { findProtectedFolder } = useExcludedFolderProtection();
   if (deltas.length === 0) {
     return <div className="changes-empty-detail">No file changes detected in tracked files</div>;
   }
@@ -1124,12 +1125,17 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
       {deltas.map((d) => {
         const isBusy = busy.has(d.path);
         const isActionable = d.kind !== "removed";
+        const protectedBy = findProtectedFolder(d.path);
+        const destructiveDisabled = isBusy || Boolean(protectedBy);
         return (
           <div key={d.path} className="changes-row">
             <div className={`changes-row-badge ${badgeClass(d.kind)}`}>{d.kind}</div>
             <FileIcon path={d.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
-              <div className="changes-row-name">{d.name}</div>
+              <div className="changes-row-name">
+                <span className="changes-row-name-text">{d.name}</span>
+                {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
+              </div>
               <div className="changes-row-path">{d.path}</div>
             </div>
             <DeltaCell delta={d.deltaBytes} />
@@ -1150,8 +1156,8 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
               <div className="changes-row-actions">
                 <button className="action-btn" disabled={isBusy} onClick={() => onReveal(d.path)}>Reveal</button>
                 <button className="action-btn" disabled={isBusy} onClick={() => onOpen(d.path)}>Open</button>
-                {onTrash && <button className="action-btn warn" disabled={isBusy} onClick={() => onTrash(d.path)}>Trash</button>}
-                <button className="action-btn" disabled={isBusy} onClick={() => onEasyMove(d.path)}>Move</button>
+                {onTrash && <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(d.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>}
+                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(d.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
               </div>
             )}
           </div>
@@ -1162,6 +1168,7 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
 }
 
 function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: DirectoryDelta[] } & Omit<DeltaListActions, "onTrash">) {
+  const { findProtectionBlocker } = useExcludedFolderProtection();
   // Skip the root directory (depth 0) — it's just the net total
   const filtered = useMemo(
     () => deltas.filter((d) => d.path.split(/[\\/]/).length > 2),
@@ -1178,6 +1185,13 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
         const name = basename(d.path);
         const isBusy = busy.has(d.path);
         const isActionable = d.kind !== "removed";
+        const protectionBlocker = findProtectionBlocker(d.path);
+        const protectionTitle = protectionBlocker
+          ? protectionBlocker.reason === "inside"
+            ? `Protected by ${protectionBlocker.folder}`
+            : `Contains protected folder ${protectionBlocker.folder}`
+          : undefined;
+        const moveDisabled = isBusy || Boolean(protectionBlocker);
         return (
           <div key={d.path} className="changes-row">
             <div className={`changes-row-badge ${badgeClass(d.kind)}`}>{d.kind}</div>
@@ -1189,7 +1203,10 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
                 (the bug the user reported in v0.5.24). */}
             <div aria-hidden="true" />
             <div className="changes-row-info">
-              <div className="changes-row-name">{name}</div>
+              <div className="changes-row-name">
+                <span className="changes-row-name-text">{name}</span>
+                {protectionBlocker && <span className="protected-path-badge" title={protectionTitle}>Protected</span>}
+              </div>
               <div className="changes-row-path">{d.path}</div>
             </div>
             <DeltaCell delta={d.deltaBytes} />
@@ -1211,7 +1228,7 @@ function DirDeltaList({ deltas, busy, onReveal, onOpen, onEasyMove }: { deltas: 
               <div className="changes-row-actions">
                 <button className="action-btn" disabled={isBusy} onClick={() => onReveal(d.path)}>Reveal</button>
                 <button className="action-btn" disabled={isBusy} onClick={() => onOpen(d.path)}>Open</button>
-                <button className="action-btn" disabled={isBusy} onClick={() => onEasyMove(d.path)}>Move</button>
+                <button className="action-btn" disabled={moveDisabled} onClick={() => onEasyMove(d.path)} title={protectionTitle}>Move</button>
               </div>
             )}
           </div>
@@ -1276,6 +1293,7 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
   onEasyMove: (path: string) => void;
 }) {
   const [filter, setFilter] = useState("");
+  const { findProtectedFolder } = useExcludedFolderProtection();
 
   const visibleChanges = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -1324,12 +1342,17 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
         const isBusy = busy.has(change.path);
         const isActionable = change.kind !== "removed";
         const name = change.path.split(/[\\/]/).pop() ?? change.path;
+        const protectedBy = findProtectedFolder(change.path);
+        const destructiveDisabled = isBusy || Boolean(protectedBy);
         return (
           <div key={change.path} className="changes-row">
             <div className={`changes-row-badge ${change.kind}`}>{change.kind}</div>
             <FileIcon path={change.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
-              <div className="changes-row-name">{name}</div>
+              <div className="changes-row-name">
+                <span className="changes-row-name-text">{name}</span>
+                {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
+              </div>
               <div className="changes-row-path">{change.path}</div>
             </div>
             <div className={`changes-row-delta ${change.deltaBytes <= 0 ? "positive" : "negative"}`}>
@@ -1352,8 +1375,8 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
               <div className="changes-row-actions">
                 <button className="action-btn" disabled={isBusy} onClick={() => onReveal(change.path)}>Reveal</button>
                 <button className="action-btn" disabled={isBusy} onClick={() => onOpen(change.path)}>Open</button>
-                <button className="action-btn warn" disabled={isBusy} onClick={() => onTrash(change.path)}>Trash</button>
-                <button className="action-btn" disabled={isBusy} onClick={() => onEasyMove(change.path)}>Move</button>
+                <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(change.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>
+                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(change.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
               </div>
             )}
           </div>

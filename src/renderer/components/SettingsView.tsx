@@ -13,6 +13,12 @@ import { nativeApi } from "../nativeApi";
 import { dispatchSettingsUpdated } from "../lib/uiEvents";
 import { toast } from "./Toasts";
 import { normPath } from "../../shared/pathUtils";
+import {
+  basenameForPath,
+  getDefaultExcludedFolderPaths,
+  normalizeExcludedFolderPaths,
+  normalizeProtectionPath,
+} from "../../shared/pathProtection";
 
 export function SettingsView() {
   const [settings, setSettings] = useState<AppSettings>(defaultSettings());
@@ -157,6 +163,11 @@ export function SettingsView() {
        * disappears entirely on non-Windows instead of half-working. */}
       {nativeApi.platform === "win32" && <PerformanceSection />}
 
+      <ProtectedFoldersSection
+        settings={settings}
+        onChange={(next) => void save(next)}
+      />
+
       {/* ── Monitoring ── */}
       <div className="settings-section">
         <div className="settings-section-title">Drive Monitoring</div>
@@ -267,6 +278,112 @@ export function SettingsView() {
         settings={settings}
         onChange={(next) => void save(next)}
       />
+      </div>
+    </div>
+  );
+}
+
+function ProtectedFoldersSection({
+  settings,
+  onChange,
+}: {
+  settings: AppSettings;
+  onChange: (next: AppSettings) => void;
+}) {
+  const [draftPath, setDraftPath] = useState("");
+  const excluded = settings.scanning.excludedFolderPaths;
+
+  const savePaths = (paths: string[]) => {
+    onChange({
+      ...settings,
+      scanning: {
+        ...settings.scanning,
+        excludedFolderPaths: normalizeExcludedFolderPaths(paths, nativeApi.platform),
+      },
+    });
+  };
+
+  const addPath = (path: string) => {
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    savePaths([...excluded, trimmed]);
+    setDraftPath("");
+  };
+
+  const browse = async () => {
+    const picked = await nativeApi.pickProtectedFolder();
+    if (picked) addPath(picked);
+  };
+
+  const removePath = (path: string) => {
+    const key = normalizeProtectionPath(path, nativeApi.platform);
+    savePaths(excluded.filter((candidate) => normalizeProtectionPath(candidate, nativeApi.platform) !== key));
+  };
+
+  const resetDefaults = () => {
+    savePaths(getDefaultExcludedFolderPaths(nativeApi.platform));
+  };
+
+  return (
+    <div className="settings-section">
+      <div className="settings-section-title">Protected Folders</div>
+      <div className="settings-section-note">
+        These folders are still scanned and counted in totals. DiskHound hides them from the Folders tab by default and blocks Trash, Delete, and Easy Move for anything inside them.
+      </div>
+      <ToggleRow
+        label="Hide protected folders in Folders"
+        desc="Parent folder sizes still include protected bytes, so totals stay accurate while risky system areas stay out of cleanup browsing."
+        value={settings.scanning.hideExcludedFoldersFromFolderResults}
+        onChange={(v) => onChange({
+          ...settings,
+          scanning: {
+            ...settings.scanning,
+            hideExcludedFoldersFromFolderResults: v,
+          },
+        })}
+      />
+      <div className="protected-folder-list">
+        {excluded.length === 0 ? (
+          <div className="protected-folder-empty">
+            No protected folders. Use Reset defaults to restore operating-system protections.
+          </div>
+        ) : (
+          excluded.map((path) => (
+            <div key={normalizeProtectionPath(path, nativeApi.platform)} className="protected-folder-row">
+              <div className="protected-folder-info">
+                <div className="protected-folder-name">{basenameForPath(path)}</div>
+                <div className="protected-folder-path">{path}</div>
+              </div>
+              <button
+                className="action-btn"
+                onClick={() => removePath(path)}
+                title={`Stop protecting ${path}`}
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="protected-folder-add">
+        <input
+          className="filter-input protected-folder-input"
+          value={draftPath}
+          onInput={(e) => setDraftPath((e.target as HTMLInputElement).value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") addPath(draftPath);
+          }}
+          placeholder={nativeApi.platform === "win32" ? "C:\\Path\\To\\Folder" : "/path/to/folder"}
+        />
+        <button className="action-btn" onClick={() => addPath(draftPath)} disabled={!draftPath.trim()}>
+          Add
+        </button>
+        <button className="action-btn" onClick={() => void browse()}>
+          Browse
+        </button>
+        <button className="action-btn" onClick={resetDefaults}>
+          Reset defaults
+        </button>
       </div>
     </div>
   );

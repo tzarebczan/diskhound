@@ -1,9 +1,15 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 
 import type { AppSettings, PathActionResult } from "../../shared/contracts";
+import {
+  findExcludedFolderActionBlocker,
+  findExcludedFolderForPath,
+  normalizeExcludedFolderPaths,
+  type ProtectionPlatform,
+} from "../../shared/pathProtection";
 import { nativeApi } from "../nativeApi";
 import { toast } from "../components/Toasts";
-import { SETTINGS_UPDATED_EVENT } from "./uiEvents";
+import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./uiEvents";
 
 /** Shared busy-set state with add/remove helpers. */
 export function useBusySet() {
@@ -195,4 +201,86 @@ export function useConfirmPermanentDelete(): boolean {
   }, []);
 
   return confirmDelete;
+}
+
+export function useExcludedFolderProtection() {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const platform = nativeApi.platform as ProtectionPlatform;
+
+  useEffect(() => {
+    void nativeApi.getSettings().then((s) => {
+      if (s) setSettings(s);
+    });
+
+    const handleSettings = (event: Event) => {
+      const detail = (event as CustomEvent<AppSettings>).detail;
+      if (detail) setSettings(detail);
+    };
+    const unsubscribeNative = nativeApi.onSettingsUpdated((next) => {
+      if (next) setSettings(next);
+    });
+
+    window.addEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+    return () => {
+      window.removeEventListener(SETTINGS_UPDATED_EVENT, handleSettings as EventListener);
+      unsubscribeNative();
+    };
+  }, []);
+
+  const excludedFolderPaths = settings?.scanning.excludedFolderPaths ?? [];
+
+  const findProtectedFolder = useCallback((path: string): string | null => {
+    return findExcludedFolderForPath(path, excludedFolderPaths, platform);
+  }, [excludedFolderPaths, platform]);
+
+  const findProtectionBlocker = useCallback((path: string) => {
+    return findExcludedFolderActionBlocker(path, excludedFolderPaths, platform);
+  }, [excludedFolderPaths, platform]);
+
+  const isProtectedPath = useCallback((path: string): boolean => {
+    return findProtectionBlocker(path) !== null;
+  }, [findProtectionBlocker]);
+
+  const addExcludedFolder = useCallback(async (folderPath: string): Promise<boolean> => {
+    const current = await nativeApi.getSettings();
+    if (!current) {
+      toast("error", "Settings unavailable");
+      return false;
+    }
+    const nextPaths = normalizeExcludedFolderPaths(
+      [...current.scanning.excludedFolderPaths, folderPath],
+      platform,
+    );
+    const alreadyPresent = nextPaths.length === current.scanning.excludedFolderPaths.length;
+    const nextSettings: AppSettings = {
+      ...current,
+      scanning: {
+        ...current.scanning,
+        excludedFolderPaths: nextPaths,
+      },
+    };
+    try {
+      await nativeApi.updateSettings(nextSettings);
+      setSettings(nextSettings);
+      dispatchSettingsUpdated(nextSettings);
+      toast(
+        alreadyPresent ? "info" : "success",
+        alreadyPresent ? "Folder already protected" : "Folder protected",
+        folderPath,
+      );
+      return true;
+    } catch {
+      toast("error", "Failed to update Protected Folders");
+      return false;
+    }
+  }, [platform]);
+
+  return {
+    settings,
+    excludedFolderPaths,
+    findProtectedFolder,
+    findProtectionBlocker,
+    isProtectedPath,
+    addExcludedFolder,
+  } as const;
 }
