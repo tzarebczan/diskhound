@@ -174,12 +174,49 @@ export function findNestedExcludedFolderForPath(
   return best;
 }
 
+export function isRecycleBinRootPath(
+  candidatePath: string,
+  platform: ProtectionPlatform = runtimePlatform(),
+): boolean {
+  if (platformFamily(platform) !== "win32") return false;
+  const candidate = normalizeProtectionPath(candidatePath, platform);
+  return candidate === "$recycle.bin" || candidate.endsWith("\\$recycle.bin");
+}
+
+export function isRecycleBinPath(
+  candidatePath: string,
+  platform: ProtectionPlatform = runtimePlatform(),
+): boolean {
+  if (platformFamily(platform) !== "win32") return false;
+  const candidate = normalizeProtectionPath(candidatePath, platform);
+  return isRecycleBinRootPath(candidatePath, platform) || candidate.includes("\\$recycle.bin\\");
+}
+
+export function isVisibleProtectedFolderByDefault(
+  folderPath: string,
+  platform: ProtectionPlatform = runtimePlatform(),
+): boolean {
+  const family = platformFamily(platform);
+  if (isRecycleBinPath(folderPath, platform)) return true;
+  if (family !== "win32") return false;
+  return basenameForPath(folderPath).toLowerCase() === "programdata";
+}
+
 export function isPathExcluded(
   candidatePath: string,
   excludedFolderPaths: readonly string[] | null | undefined,
   platform: ProtectionPlatform = runtimePlatform(),
 ): boolean {
-  return findExcludedFolderForPath(candidatePath, excludedFolderPaths, platform) !== null;
+  const matchedFolder = findExcludedFolderForPath(candidatePath, excludedFolderPaths, platform);
+  return Boolean(matchedFolder && !isVisibleProtectedFolderByDefault(matchedFolder, platform));
+}
+
+export function protectedFolderDisplayName(
+  folderPath: string,
+  platform: ProtectionPlatform = runtimePlatform(),
+): string | null {
+  if (isRecycleBinRootPath(folderPath, platform)) return "Recycle Bin";
+  return null;
 }
 
 export function findExcludedFolderActionBlocker(
