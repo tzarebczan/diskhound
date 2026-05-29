@@ -5,10 +5,13 @@ import {
   findExcludedFolderForPath,
   findNestedExcludedFolderForPath,
   getDefaultExcludedFolderPaths,
+  isPathExcluded,
   isPathInsideFolder,
+  isVisibleProtectedFolderByDefault,
   normalizeExcludedFolderPaths,
   normalizeProtectionPath,
   parentFolderOfPath,
+  protectedFolderDisplayName,
 } from "../pathProtection";
 
 describe("path protection helpers", () => {
@@ -61,6 +64,17 @@ describe("path protection helpers", () => {
       ["C:\\Users\\thoma\\AppData"],
       "win32",
     )).toEqual({ folder: "C:\\Users\\thoma\\AppData", reason: "contains" });
+  });
+
+  it("keeps useful protected space buckets visible while hiding stricter system folders", () => {
+    const excluded = ["C:\\Windows", "C:\\ProgramData", "C:\\$Recycle.Bin"];
+
+    expect(isPathExcluded("C:\\Windows\\System32", excluded, "win32")).toBe(true);
+    expect(isPathExcluded("C:\\ProgramData\\Vendor\\cache.bin", excluded, "win32")).toBe(false);
+    expect(isPathExcluded("C:\\$Recycle.Bin\\S-1-5-21\\$R123.bin", excluded, "win32")).toBe(false);
+    expect(isVisibleProtectedFolderByDefault("C:\\ProgramData", "win32")).toBe(true);
+    expect(protectedFolderDisplayName("C:\\$Recycle.Bin", "win32")).toBe("Recycle Bin");
+    expect(protectedFolderDisplayName("C:\\$Recycle.Bin\\S-1-5-21", "win32")).toBe(null);
   });
 
   it("derives parent folders without dropping drive roots", () => {
