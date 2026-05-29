@@ -18,6 +18,7 @@ import {
   getDefaultExcludedFolderPaths,
   normalizeExcludedFolderPaths,
   normalizeProtectionPath,
+  protectedFolderDisplayName,
 } from "../../shared/pathProtection";
 
 export function SettingsView() {
@@ -328,7 +329,7 @@ function ProtectedFoldersSection({
     <div className="settings-section">
       <div className="settings-section-title">Protected Folders</div>
       <div className="settings-section-note">
-        These folders are still scanned and counted in totals. DiskHound hides them from the Folders tab by default and blocks Trash, Delete, and Easy Move for anything inside them.
+        These folders are still scanned and counted in totals. DiskHound hides stricter system folders from the Folders tab by default, keeps useful buckets like ProgramData and Recycle Bin visible, and blocks Trash, Delete, and Easy Move for anything inside them.
       </div>
       <ToggleRow
         label="Hide protected folders in Folders"
@@ -351,7 +352,7 @@ function ProtectedFoldersSection({
           excluded.map((path) => (
             <div key={normalizeProtectionPath(path, nativeApi.platform)} className="protected-folder-row">
               <div className="protected-folder-info">
-                <div className="protected-folder-name">{basenameForPath(path)}</div>
+                <div className="protected-folder-name">{protectedFolderDisplayName(path, nativeApi.platform) ?? basenameForPath(path)}</div>
                 <div className="protected-folder-path">{path}</div>
               </div>
               <button

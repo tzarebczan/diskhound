@@ -5,6 +5,7 @@ import {
   findExcludedFolderForPath,
   findNestedExcludedFolderForPath,
   getDefaultExcludedFolderPaths,
+  isHiddenExcludedPath,
   isPathExcluded,
   isPathInsideFolder,
   isVisibleProtectedFolderByDefault,
@@ -69,9 +70,15 @@ describe("path protection helpers", () => {
   it("keeps useful protected space buckets visible while hiding stricter system folders", () => {
     const excluded = ["C:\\Windows", "C:\\ProgramData", "C:\\$Recycle.Bin"];
 
-    expect(isPathExcluded("C:\\Windows\\System32", excluded, "win32")).toBe(true);
+    expect(isHiddenExcludedPath("C:\\Windows\\System32", excluded, "win32")).toBe(true);
+    expect(isHiddenExcludedPath("C:\\ProgramData\\Vendor\\cache.bin", excluded, "win32")).toBe(false);
+    expect(isHiddenExcludedPath("C:\\$Recycle.Bin\\S-1-5-21\\$R123.bin", excluded, "win32")).toBe(false);
     expect(isPathExcluded("C:\\ProgramData\\Vendor\\cache.bin", excluded, "win32")).toBe(false);
-    expect(isPathExcluded("C:\\$Recycle.Bin\\S-1-5-21\\$R123.bin", excluded, "win32")).toBe(false);
+    expect(findExcludedFolderForPath("C:\\ProgramData\\Vendor\\cache.bin", excluded, "win32")).toBe("C:\\ProgramData");
+    expect(findExcludedFolderActionBlocker("C:\\$Recycle.Bin\\S-1-5-21\\$R123.bin", excluded, "win32")).toEqual({
+      folder: "C:\\$Recycle.Bin",
+      reason: "inside",
+    });
     expect(isVisibleProtectedFolderByDefault("C:\\ProgramData", "win32")).toBe(true);
     expect(protectedFolderDisplayName("C:\\$Recycle.Bin", "win32")).toBe("Recycle Bin");
     expect(protectedFolderDisplayName("C:\\$Recycle.Bin\\S-1-5-21", "win32")).toBe(null);

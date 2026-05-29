@@ -202,13 +202,21 @@ export function isVisibleProtectedFolderByDefault(
   return basenameForPath(folderPath).toLowerCase() === "programdata";
 }
 
-export function isPathExcluded(
+export function isHiddenExcludedPath(
   candidatePath: string,
   excludedFolderPaths: readonly string[] | null | undefined,
   platform: ProtectionPlatform = runtimePlatform(),
 ): boolean {
   const matchedFolder = findExcludedFolderForPath(candidatePath, excludedFolderPaths, platform);
   return Boolean(matchedFolder && !isVisibleProtectedFolderByDefault(matchedFolder, platform));
+}
+
+export function isPathExcluded(
+  candidatePath: string,
+  excludedFolderPaths: readonly string[] | null | undefined,
+  platform: ProtectionPlatform = runtimePlatform(),
+): boolean {
+  return isHiddenExcludedPath(candidatePath, excludedFolderPaths, platform);
 }
 
 export function protectedFolderDisplayName(

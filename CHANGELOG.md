@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.41 — 2026-05-29
+
+DiskHound keeps the protected-folder delete guardrails from 0.5.40, but
+backs off the default hiding for large protected buckets users may need
+to inspect.
+
+### Protected folder visibility
+
+- ProgramData and Recycle Bin remain protected from Trash, permanent
+  Delete, Easy Move, and parent-folder moves.
+- ProgramData and Recycle Bin are visible by default in folder scan
+  results, so their space appears as normal drill-in rows instead of
+  only being rolled into the parent total.
+- Stricter operating-system folders such as Windows, Program Files,
+  System Volume Information, and Recovery remain hidden from Folders by
+  default while still counting toward totals.
+
+### UX polish
+
+- Recycle Bin now displays as `Recycle Bin` instead of `$Recycle.Bin` in
+  protected-folder settings and folder scan results.
+- Settings copy now explains that protected folders can be visible while
+  still refusing destructive actions.
+
 ## 0.5.40 — 2026-05-28
 
 DiskHound now protects operating-system folders from accidental cleanup

@@ -87,6 +87,7 @@ import { randomUUID } from "node:crypto";
 import { normPath } from "./shared/pathUtils";
 import {
   findExcludedFolderActionBlocker,
+  isHiddenExcludedPath,
   isPathExcluded,
 } from "./shared/pathProtection";
 import { analyzeForCleanup } from "./shared/suggestions";
@@ -2832,10 +2833,10 @@ void app.whenReady().then(async () => {
         const hideExcluded = Boolean(settings?.scanning.hideExcludedFoldersFromFolderResults);
         const excludedFolders = settings?.scanning.excludedFolderPaths ?? [];
         const visibleDirs = hideExcluded
-          ? node.dirs.filter((dir) => !isPathExcluded(dir.path, excludedFolders, process.platform))
+          ? node.dirs.filter((dir) => !isHiddenExcludedPath(dir.path, excludedFolders, process.platform))
           : node.dirs;
         const visibleFiles = hideExcluded
-          ? files.filter((file) => !isPathExcluded(file.path, excludedFolders, process.platform))
+          ? files.filter((file) => !isHiddenExcludedPath(file.path, excludedFolders, process.platform))
           : files;
         const visibleSize =
           visibleDirs.reduce((sum, dir) => sum + dir.size, 0) +

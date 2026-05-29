@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import type { ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import { protectedFolderDisplayName } from "../../shared/pathProtection";
 import type { ExcludedFolderActionBlocker } from "../../shared/pathProtection";
 import { formatBytes, formatCount } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
@@ -446,7 +447,7 @@ function FolderRow(props: {
 }) {
   const { dir, parentSize, rootPath, canDrillIn, isBusy, protectionBlocker, onNavigate, onReveal, onOpen, onEasyMove, onContextMenu } = props;
   const pct = parentSize > 0 ? (dir.size / parentSize) * 100 : 0;
-  const name = displayName(dir.path, rootPath);
+  const name = protectedFolderDisplayName(dir.path, nativeApi.platform) ?? displayName(dir.path, rootPath);
   const actionDisabled = isBusy || Boolean(protectionBlocker);
   const protectionTitle = protectionBlocker
     ? protectionBlocker.reason === "inside"
