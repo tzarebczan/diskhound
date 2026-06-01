@@ -6,6 +6,11 @@ import type {
   DuplicateScanProgress,
   ScanSnapshot,
 } from "../../shared/contracts";
+import {
+  deletedPathLabel,
+  deletedPathTitle,
+  useDeletedPaths,
+} from "../lib/deletedPaths";
 import { formatBytes, formatElapsed, humanAge } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -38,6 +43,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const { busy, runAction, handleEasyMove } = usePathActions();
   const { findProtectedFolder, isProtectedPath } = useExcludedFolderProtection();
+  const { isDeleted } = useDeletedPaths();
   const [sortMode, setSortMode] = useState<SortMode>("wasted");
   const confirmDelete = useConfirmPermanentDelete();
   // Optional narrower scope — lets the user scan a subfolder of the
@@ -210,7 +216,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     setSelectedPaths((s) => {
       const n = new Set(s);
       for (const f of group.files) {
-        if (on && !isProtectedPath(f.path)) n.add(f.path);
+        if (on && !isProtectedPath(f.path) && !isDeleted(f.path)) n.add(f.path);
         else n.delete(f.path);
       }
       return n;
@@ -275,7 +281,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
       which === "newest" ? b.modifiedAt - a.modifiedAt : a.modifiedAt - b.modifiedAt,
     );
     const candidates = sorted.slice(1);
-    const toTrash = candidates.filter((f) => !isProtectedPath(f.path));
+    const toTrash = candidates.filter((f) => !isProtectedPath(f.path) && !isDeleted(f.path));
     const blocked = candidates.length - toTrash.length;
     if (toTrash.length === 0) {
       if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before trashing.");
@@ -283,7 +289,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     }
     let ok = 0;
     for (const f of toTrash) {
-      const r = await runAction(f.path, () => nativeApi.trashPath(f.path));
+      const r = await runAction(f.path, () => nativeApi.trashPath(f.path), { deletedAction: "trash" });
       if (r.ok) ok++;
     }
     if (ok > 0) {
@@ -292,9 +298,6 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         `Trashed ${ok} duplicate${ok === 1 ? "" : "s"}`,
         blocked > 0 ? `${blocked} protected duplicate${blocked === 1 ? "" : "s"} skipped.` : undefined,
       );
-      if (ok === candidates.length) {
-        setDismissed((d) => { const n = new Set(d); n.add(group.hash); return n; });
-      }
     }
   };
 
@@ -334,7 +337,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
         );
         // sorted[0] = the one we keep; slice(1) goes into the selection.
         for (const f of sorted.slice(1)) {
-          if (!isProtectedPath(f.path)) next.add(f.path);
+          if (!isProtectedPath(f.path) && !isDeleted(f.path)) next.add(f.path);
         }
       }
       return next;
@@ -361,57 +364,27 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     return total;
   }, [selectedPaths, pathSizeMap]);
 
-  /**
-   * Path → hash map so bulk actions can walk the selection and decide
-   * whether a given group is fully cleared (and should be marked
-   * dismissed). Using a separate map keeps the per-render work bounded.
-   */
-  const pathToHash = useMemo(() => {
-    const map = new Map<string, string>();
-    if (!analysis) return map;
-    for (const g of analysis.groups) {
-      for (const f of g.files) map.set(f.path, g.hash);
-    }
-    return map;
-  }, [analysis]);
-
   const bulkTrash = async () => {
     if (selectedPaths.size === 0) return;
     const selected = Array.from(selectedPaths);
-    const paths = selected.filter((p) => !isProtectedPath(p));
+    const paths = selected.filter((p) => !isProtectedPath(p) && !isDeleted(p));
     const blocked = selected.length - paths.length;
     if (paths.length === 0) {
-      if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before trashing.");
+      if (blocked > 0) toast("info", "No actionable duplicates", "Protected and already-deleted files are skipped.");
       return;
     }
     let ok = 0;
     let fail = 0;
     for (const p of paths) {
-      const r = await runAction(p, () => nativeApi.trashPath(p));
+      const r = await runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" });
       if (r.ok) ok++;
       else fail++;
     }
-    // Any group that had every file trashed is effectively resolved —
-    // dismiss it so it drops out of the visible list.
     if (ok > 0) {
-      setDismissed((d) => {
-        const n = new Set(d);
-        const hashToRemaining = new Map<string, number>();
-        if (analysis) {
-          for (const g of analysis.groups) {
-            const remaining = g.files.filter((f) => !paths.includes(f.path)).length;
-            hashToRemaining.set(g.hash, remaining);
-          }
-        }
-        for (const [hash, remaining] of hashToRemaining) {
-          if (remaining <= 1) n.add(hash);
-        }
-        return n;
-      });
       setSelectedPaths(new Set());
       const detail = [
         fail > 0 ? `${fail} failed` : "",
-        blocked > 0 ? `${blocked} protected skipped` : "",
+        blocked > 0 ? `${blocked} skipped` : "",
       ].filter(Boolean).join(" - ") || undefined;
       toast(
         fail === 0 && blocked === 0 ? "success" : "warning",
@@ -426,7 +399,7 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
   const bulkMove = async () => {
     if (selectedPaths.size === 0) return;
     const selected = Array.from(selectedPaths);
-    const paths = selected.filter((p) => !isProtectedPath(p));
+    const paths = selected.filter((p) => !isProtectedPath(p) && !isDeleted(p));
     const blocked = selected.length - paths.length;
     if (paths.length === 0) {
       if (blocked > 0) toast("info", "Protected duplicates skipped", "Remove their folders from Protected Folders before moving.");
@@ -454,9 +427,6 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
     if (blocked > 0 && ok > 0) {
       toast("warning", "Protected duplicates skipped", `${blocked} file${blocked === 1 ? "" : "s"} were not moved.`);
     }
-    // Mark used `pathToHash` so TS doesn't complain about the unused
-    // binding on builds that don't exercise the dismiss path here.
-    void pathToHash;
   };
 
   if (!rootPath) {
@@ -708,8 +678,8 @@ export function DuplicatesView({ snapshot, analysis, progress, isScanning, onCle
             onKeepOldest={() => void keepOne(group, "oldest")}
             onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
             onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-            onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
-            onDelete={(p) => void runAction(p, () => nativeApi.permanentlyDeletePath(p))}
+            onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" })}
+            onDelete={(p) => void runAction(p, () => nativeApi.permanentlyDeletePath(p), { deletedAction: "delete" })}
             onMove={(p) => void handleEasyMove(p)}
             onToggleFileSelected={togglePathSelected}
             onToggleGroupSelected={setGroupSelected}
@@ -777,10 +747,11 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
   const wasted = (group.files.length - 1) * group.size;
   const name = group.files[0]?.name ?? "unknown";
   const ext = name.includes(".") ? name.slice(name.lastIndexOf(".")) : "";
+  const { getDeletedRecord } = useDeletedPaths();
 
   // Tri-state header checkbox: unchecked / indeterminate / checked based
   // on how many of this group's files are currently selected.
-  const actionableGroupFiles = group.files.filter((f) => !findProtectedFolder(f.path));
+  const actionableGroupFiles = group.files.filter((f) => !findProtectedFolder(f.path) && !getDeletedRecord(f.path));
   const selectedInGroup = actionableGroupFiles.reduce(
     (n, f) => (selectedPaths.has(f.path) ? n + 1 : n),
     0,
@@ -851,12 +822,16 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
             .map((file, idx) => {
               const isBusy = busy.has(file.path);
               const protectedBy = findProtectedFolder(file.path);
-              const actionDisabled = isBusy || Boolean(protectedBy);
+              const deletedRecord = getDeletedRecord(file.path);
+              const isDeleted = Boolean(deletedRecord);
+              const actionDisabled = isBusy || Boolean(protectedBy) || isDeleted;
+              const unavailableDisabled = isBusy || isDeleted;
+              const deletedTitle = deletedRecord ? deletedPathTitle(deletedRecord) : undefined;
               const isSelected = selectedPaths.has(file.path);
               return (
                 <div
                   key={file.path}
-                  className={`duplicate-file-row ${isSelected ? "selected" : ""}`}
+                  className={`duplicate-file-row ${isSelected ? "selected" : ""} ${isDeleted ? "deleted" : ""}`}
                 >
                   <label
                     className="duplicate-file-checkbox"
@@ -864,8 +839,8 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                   >
                     <input
                       type="checkbox"
-                      checked={isSelected}
-                      disabled={Boolean(protectedBy)}
+                      checked={isSelected && !isDeleted}
+                      disabled={Boolean(protectedBy) || isDeleted}
                       onChange={() => onToggleFileSelected(file.path)}
                     />
                   </label>
@@ -875,17 +850,18 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                     <span className="duplicate-file-meta">
                       {humanAge(file.modifiedAt)}
                       {idx === 0 && <span className="duplicate-newest-badge">newest</span>}
+                      {deletedRecord && <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedTitle}>{deletedPathLabel(deletedRecord)}</span>}
                       {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
                     </span>
                   </div>
                   <div className="duplicate-file-actions">
-                    <button className="action-btn" disabled={isBusy} onClick={() => onReveal(file.path)}>Reveal</button>
-                    <button className="action-btn" disabled={isBusy} onClick={() => onOpen(file.path)}>Open</button>
-                    <button className="action-btn warn" disabled={actionDisabled} onClick={() => onTrash(file.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>
+                    <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(file.path)} title={deletedTitle}>Reveal</button>
+                    <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(file.path)} title={deletedTitle}>Open</button>
+                    <button className="action-btn warn" disabled={actionDisabled} onClick={() => onTrash(file.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>
                     <button
                       className="action-btn danger"
                       disabled={actionDisabled}
-                      title={protectedBy ? `Protected by ${protectedBy}` : "Permanently delete this copy (skips trash)"}
+                      title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : "Permanently delete this copy (skips trash)")}
                       onClick={() => {
                         if (confirmDelete && !confirm(`Permanently delete this copy?\n${file.path}`)) return;
                         onDelete(file.path);
@@ -893,7 +869,7 @@ function GroupCard({ group, isExpanded, busy, confirmDelete, selectedPaths, find
                     >
                       Del
                     </button>
-                    <button className="action-btn" disabled={actionDisabled} onClick={() => onMove(file.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
+                    <button className="action-btn" disabled={actionDisabled} onClick={() => onMove(file.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Move</button>
                   </div>
                 </div>
               );

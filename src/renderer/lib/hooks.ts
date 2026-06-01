@@ -9,6 +9,7 @@ import {
 } from "../../shared/pathProtection";
 import { nativeApi } from "../nativeApi";
 import { toast } from "../components/Toasts";
+import { markDeletedPath, type DeletedPathAction } from "./deletedPaths";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./uiEvents";
 
 /** Shared busy-set state with add/remove helpers. */
@@ -33,14 +34,18 @@ export function usePathActions() {
   const runAction = useCallback(async (
     path: string,
     action: () => Promise<PathActionResult>,
-    opts?: { dismiss?: boolean; onSuccess?: () => void },
+    opts?: { dismiss?: boolean; onSuccess?: () => void; deletedAction?: DeletedPathAction },
   ) => {
     markBusy(path);
     const r = await action();
     clearBusy(path);
-    if (r.ok && opts?.onSuccess) opts.onSuccess();
-    else if (r.ok && opts?.dismiss) toast("success", r.message);
-    else if (!r.ok) toast("error", "Action failed", r.message);
+    if (r.ok) {
+      if (opts?.deletedAction) markDeletedPath(path, opts.deletedAction);
+      if (opts?.onSuccess) opts.onSuccess();
+      else if (opts?.dismiss || opts?.deletedAction) toast("success", r.message);
+    } else {
+      toast("error", "Action failed", r.message);
+    }
     return r;
   }, [markBusy, clearBusy]);
 

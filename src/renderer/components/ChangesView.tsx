@@ -13,6 +13,11 @@ import type {
   ScanScheduleInfo,
   ScanSnapshot,
 } from "../../shared/contracts";
+import {
+  deletedPathLabel,
+  deletedPathTitle,
+  useDeletedPaths,
+} from "../lib/deletedPaths";
 import { basename, formatBytes, relativeTime } from "../lib/format";
 import { useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -790,7 +795,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
                 busy={busy}
                 onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
                 onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-                onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
+                onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" })}
                 onEasyMove={(p) => void handleEasyMove(p)}
               />
             )}
@@ -844,7 +849,7 @@ export function ChangesView({ rootPath, snapshot, drives }: Props) {
                   busy={busy}
                   onReveal={(p) => void runAction(p, () => nativeApi.revealPath(p))}
                   onOpen={(p) => void runAction(p, () => nativeApi.openPath(p))}
-                  onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p))}
+                  onTrash={(p) => void runAction(p, () => nativeApi.trashPath(p), { deletedAction: "trash" })}
                   onEasyMove={(p) => void handleEasyMove(p)}
                 />
               </>
@@ -1113,6 +1118,7 @@ interface DeltaListActions {
 
 function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: { deltas: FileDelta[] } & DeltaListActions) {
   const { findProtectedFolder } = useExcludedFolderProtection();
+  const { getDeletedRecord } = useDeletedPaths();
   if (deltas.length === 0) {
     return <div className="changes-empty-detail">No file changes detected in tracked files</div>;
   }
@@ -1126,14 +1132,19 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
         const isBusy = busy.has(d.path);
         const isActionable = d.kind !== "removed";
         const protectedBy = findProtectedFolder(d.path);
-        const destructiveDisabled = isBusy || Boolean(protectedBy);
+        const deletedRecord = getDeletedRecord(d.path);
+        const isDeleted = Boolean(deletedRecord);
+        const destructiveDisabled = isBusy || Boolean(protectedBy) || isDeleted;
+        const unavailableDisabled = isBusy || isDeleted;
+        const deletedTitle = deletedRecord ? deletedPathTitle(deletedRecord) : undefined;
         return (
-          <div key={d.path} className="changes-row">
+          <div key={d.path} className={`changes-row ${isDeleted ? "deleted" : ""}`}>
             <div className={`changes-row-badge ${badgeClass(d.kind)}`}>{d.kind}</div>
             <FileIcon path={d.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
               <div className="changes-row-name">
                 <span className="changes-row-name-text">{d.name}</span>
+                {deletedRecord && <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedTitle}>{deletedPathLabel(deletedRecord)}</span>}
                 {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
               </div>
               <div className="changes-row-path">{d.path}</div>
@@ -1154,10 +1165,10 @@ function FileDeltaList({ deltas, busy, onReveal, onOpen, onTrash, onEasyMove }: 
             </div>
             {isActionable && (
               <div className="changes-row-actions">
-                <button className="action-btn" disabled={isBusy} onClick={() => onReveal(d.path)}>Reveal</button>
-                <button className="action-btn" disabled={isBusy} onClick={() => onOpen(d.path)}>Open</button>
-                {onTrash && <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(d.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>}
-                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(d.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
+                <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(d.path)} title={deletedTitle}>Reveal</button>
+                <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(d.path)} title={deletedTitle}>Open</button>
+                {onTrash && <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(d.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>}
+                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(d.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Move</button>
               </div>
             )}
           </div>
@@ -1294,6 +1305,7 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
 }) {
   const [filter, setFilter] = useState("");
   const { findProtectedFolder } = useExcludedFolderProtection();
+  const { getDeletedRecord } = useDeletedPaths();
 
   const visibleChanges = useMemo(() => {
     const q = filter.trim().toLowerCase();
@@ -1343,14 +1355,19 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
         const isActionable = change.kind !== "removed";
         const name = change.path.split(/[\\/]/).pop() ?? change.path;
         const protectedBy = findProtectedFolder(change.path);
-        const destructiveDisabled = isBusy || Boolean(protectedBy);
+        const deletedRecord = getDeletedRecord(change.path);
+        const isDeleted = Boolean(deletedRecord);
+        const destructiveDisabled = isBusy || Boolean(protectedBy) || isDeleted;
+        const unavailableDisabled = isBusy || isDeleted;
+        const deletedTitle = deletedRecord ? deletedPathTitle(deletedRecord) : undefined;
         return (
-          <div key={change.path} className="changes-row">
+          <div key={change.path} className={`changes-row ${isDeleted ? "deleted" : ""}`}>
             <div className={`changes-row-badge ${change.kind}`}>{change.kind}</div>
             <FileIcon path={change.path} className="changes-row-file-icon" />
             <div className="changes-row-info">
               <div className="changes-row-name">
                 <span className="changes-row-name-text">{name}</span>
+                {deletedRecord && <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedTitle}>{deletedPathLabel(deletedRecord)}</span>}
                 {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
               </div>
               <div className="changes-row-path">{change.path}</div>
@@ -1373,10 +1390,10 @@ function FullDiffList({ diff, busy, onReveal, onOpen, onTrash, onEasyMove }: {
             </div>
             {isActionable && (
               <div className="changes-row-actions">
-                <button className="action-btn" disabled={isBusy} onClick={() => onReveal(change.path)}>Reveal</button>
-                <button className="action-btn" disabled={isBusy} onClick={() => onOpen(change.path)}>Open</button>
-                <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(change.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Trash</button>
-                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(change.path)} title={protectedBy ? `Protected by ${protectedBy}` : undefined}>Move</button>
+                <button className="action-btn" disabled={unavailableDisabled} onClick={() => onReveal(change.path)} title={deletedTitle}>Reveal</button>
+                <button className="action-btn" disabled={unavailableDisabled} onClick={() => onOpen(change.path)} title={deletedTitle}>Open</button>
+                <button className="action-btn warn" disabled={destructiveDisabled} onClick={() => onTrash(change.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Trash</button>
+                <button className="action-btn" disabled={destructiveDisabled} onClick={() => onEasyMove(change.path)} title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}>Move</button>
               </div>
             )}
           </div>

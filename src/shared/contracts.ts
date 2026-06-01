@@ -617,7 +617,14 @@ export interface ProcessInfo {
   /** True when the user owns the process. On Windows we can't always tell cheaply — may be true for all. */
   userOwned: boolean;
   /** Full command line or executable path, when we can get it. */
-  commandLine?: string;
+  commandLine?: string | null;
+  /** Shortened command text with the executable stripped, suitable for dense UI rows. */
+  commandPreview?: string | null;
+  /** Parent process PID/name, when available. */
+  parentPid?: number | null;
+  parentName?: string | null;
+  /** Best-effort working/project directory. On Windows this may be inferred from command arguments. */
+  workingDirectory?: string | null;
   /** Full path to the executable, when known. Used for icon resolution. */
   exePath?: string | null;
   /** Cumulative CPU time in ms — used to compute cpuPercent between samples. */

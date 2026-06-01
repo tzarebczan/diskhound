@@ -1,6 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord, ScanSnapshot } from "../../shared/contracts";
+import {
+  deletedPathLabel,
+  deletedPathTitle,
+  markDeletedPath,
+  markDeletedPaths,
+  useDeletedPaths,
+  type DeletedPathAction,
+  type DeletedPathRecord,
+} from "../lib/deletedPaths";
 import { formatBytes, formatCount, humanAge, relativePath } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection, usePathActions } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -107,6 +116,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
   } | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const { findProtectedFolder, isProtectedPath } = useExcludedFolderProtection();
+  const { getDeletedRecord, isDeleted } = useDeletedPaths();
 
   // Ref for keyboard handler to access latest visibleFiles without dependency cycle
   const visibleFilesRef = useRef<ScanFileRecord[]>([]);
@@ -192,8 +202,8 @@ export function FileList({ snapshot, initialFilter }: Props) {
   //    so "Trash selected" / "Delete selected" act on every ticked
   //    row, not just the rendered page.
   const selectedVisible = useMemo(
-    () => visibleFiles.filter((f) => selected.has(f.path)).length,
-    [visibleFiles, selected],
+    () => visibleFiles.filter((f) => selected.has(f.path) && !isDeleted(f.path)).length,
+    [visibleFiles, selected, isDeleted],
   );
   const selectedTotal = useMemo(
     () => filteredFiles.filter((f) => selected.has(f.path)).length,
@@ -203,7 +213,15 @@ export function FileList({ snapshot, initialFilter }: Props) {
     () => filteredFiles.filter((f) => selected.has(f.path) && isProtectedPath(f.path)).length,
     [filteredFiles, selected, isProtectedPath],
   );
-  const selectedActionableTotal = selectedTotal - selectedProtectedTotal;
+  const selectedDeletedTotal = useMemo(
+    () => filteredFiles.filter((f) => selected.has(f.path) && isDeleted(f.path)).length,
+    [filteredFiles, selected, isDeleted],
+  );
+  const selectedBlockedTotal = useMemo(
+    () => filteredFiles.filter((f) => selected.has(f.path) && (isProtectedPath(f.path) || isDeleted(f.path))).length,
+    [filteredFiles, selected, isProtectedPath, isDeleted],
+  );
+  const selectedActionableTotal = selectedTotal - selectedBlockedTotal;
 
   // Keyboard navigation
   useEffect(() => {
@@ -237,8 +255,16 @@ export function FileList({ snapshot, initialFilter }: Props) {
               toast("info", "Protected file", "Remove its folder from Protected Folders before deleting.");
               return i;
             }
+            if (f && getDeletedRecord(f.path)) {
+              toast("info", "Already deleted", "Deleted rows stay visible until the next scan.");
+              return i;
+            }
             if (f) void nativeApi.trashPath(f.path).then((r) => {
-              if (r.ok) { markDismissed([f.path]); toast("success", r.message); }
+              if (r.ok) {
+                markDeletedPath(f.path, "trash");
+                setSelected((s) => { const next = new Set(s); next.delete(f.path); return next; });
+                toast("success", r.message);
+              }
               else toast("error", "Action failed", r.message);
             });
             return i;
@@ -255,7 +281,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isProtectedPath]);
+  }, [getDeletedRecord, isProtectedPath]);
 
   // Scroll focused row into view
   useEffect(() => {
@@ -279,7 +305,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
     // current 1K page selected, not be silently signed up for a
     // 50K bulk delete. To select more they'd Load-more then click
     // again.
-    const paths = visibleFiles.map((f) => f.path);
+    const paths = visibleFiles.filter((f) => !isDeleted(f.path)).map((f) => f.path);
     const allSelected = paths.every((p) => selected.has(p));
     setSelected((s) => {
       const next = new Set(s);
@@ -296,14 +322,18 @@ export function FileList({ snapshot, initialFilter }: Props) {
   const runAction = async (
     path: string,
     action: () => Promise<PathActionResult>,
-    opts?: { dismiss?: boolean },
+    opts?: { dismiss?: boolean; deletedAction?: DeletedPathAction },
   ) => {
     markBusy(path);
     const result = await action();
     clearBusy(path);
-    if (result.ok && opts?.dismiss) {
-      markDismissed([path]);
-      toast("success", result.message);
+    if (result.ok) {
+      if (opts?.deletedAction) {
+        markDeletedPath(path, opts.deletedAction);
+        setSelected((s) => { const next = new Set(s); next.delete(path); return next; });
+      }
+      if (opts?.dismiss) markDismissed([path]);
+      if (opts?.dismiss || opts?.deletedAction) toast("success", result.message);
     } else if (!result.ok) {
       toast("error", "Action failed", result.message);
     }
@@ -320,10 +350,10 @@ export function FileList({ snapshot, initialFilter }: Props) {
     // then trash, but only page-2 got trashed" footgun we want to
     // avoid.
     const selectedTargets = filteredFiles.filter((f) => selected.has(f.path));
-    const targets = selectedTargets.filter((f) => !isProtectedPath(f.path));
+    const targets = selectedTargets.filter((f) => !isProtectedPath(f.path) && !isDeleted(f.path));
     const blocked = selectedTargets.length - targets.length;
     if (targets.length === 0) {
-      if (blocked > 0) toast("info", "Protected files skipped", "Remove their folders from Protected Folders before deleting.");
+      if (blocked > 0) toast("info", "No actionable files", "Protected and already-deleted files are skipped.");
       return;
     }
     if (label === "delete") {
@@ -341,11 +371,12 @@ export function FileList({ snapshot, initialFilter }: Props) {
       if (r.ok) ok.push(f.path);
     }
     if (ok.length > 0) {
-      markDismissed(ok);
+      markDeletedPaths(ok, label);
+      setSelected((s) => { const next = new Set(s); ok.forEach((p) => next.delete(p)); return next; });
       toast(
         blocked > 0 ? "warning" : "success",
         `${label === "trash" ? "Trashed" : "Deleted"} ${ok.length} file(s)`,
-        blocked > 0 ? `${blocked} protected file(s) skipped.` : undefined,
+        blocked > 0 ? `${blocked} protected or already-deleted file(s) skipped.` : undefined,
       );
     }
   };
@@ -412,6 +443,9 @@ export function FileList({ snapshot, initialFilter }: Props) {
         {selectedProtectedTotal > 0 && (
           <span className="bulk-bar-protected">{selectedProtectedTotal} protected</span>
         )}
+        {selectedDeletedTotal > 0 && (
+          <span className="bulk-bar-protected">{selectedDeletedTotal} deleted</span>
+        )}
         <div className="bulk-spacer" />
         <button className="bulk-btn" onClick={toggleSelectAll}>
           {selectedVisible === visibleFiles.length && visibleFiles.length > 0 ? "Clear page" : "Select page"}
@@ -470,11 +504,12 @@ export function FileList({ snapshot, initialFilter }: Props) {
                 selected={selected.has(file.path)}
                 isBusy={busy.has(file.path)}
                 protectedBy={findProtectedFolder(file.path)}
+                deletedRecord={getDeletedRecord(file.path)}
                 onToggle={() => toggleSelected(file.path)}
                 onReveal={() => void runAction(file.path, () => nativeApi.revealPath(file.path))}
                 onOpen={() => void runAction(file.path, () => nativeApi.openPath(file.path))}
                 onMove={() => void handleEasyMove(file.path)}
-                onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { dismiss: true })}
+                onTrash={() => void runAction(file.path, () => nativeApi.trashPath(file.path), { deletedAction: "trash" })}
                 onDelete={() => {
                   if (confirmDelete) {
                     const msg =
@@ -482,7 +517,7 @@ export function FileList({ snapshot, initialFilter }: Props) {
                       `This SKIPS the trash and CANNOT be undone — the OS will free the bytes immediately.`;
                     if (!confirm(msg)) return;
                   }
-                  void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { dismiss: true });
+                  void runAction(file.path, () => nativeApi.permanentlyDeletePath(file.path), { deletedAction: "delete" });
                 }}
                 onContextMenu={(x, y) => setContextMenu({ x, y, path: file.path })}
               />
@@ -563,6 +598,7 @@ function FileRow(props: {
   selected: boolean;
   isBusy: boolean;
   protectedBy: string | null;
+  deletedRecord: DeletedPathRecord | null;
   onToggle: () => void;
   onReveal: () => void;
   onOpen: () => void;
@@ -571,12 +607,15 @@ function FileRow(props: {
   onDelete: () => void;
   onContextMenu: (x: number, y: number) => void;
 }) {
-  const { file, index, focused, rootPath, selected, isBusy, protectedBy, onToggle, onReveal, onOpen, onMove, onTrash, onDelete, onContextMenu } = props;
-  const destructiveDisabled = isBusy || Boolean(protectedBy);
+  const { file, index, focused, rootPath, selected, isBusy, protectedBy, deletedRecord, onToggle, onReveal, onOpen, onMove, onTrash, onDelete, onContextMenu } = props;
+  const isDeleted = Boolean(deletedRecord);
+  const destructiveDisabled = isBusy || Boolean(protectedBy) || isDeleted;
+  const unavailableDisabled = isBusy || isDeleted;
+  const deletedTitle = deletedRecord ? deletedPathTitle(deletedRecord) : undefined;
 
   return (
     <div
-      className={`file-row ${selected ? "selected" : ""} ${focused ? "focused" : ""}`}
+      className={`file-row ${selected ? "selected" : ""} ${focused ? "focused" : ""} ${isDeleted ? "deleted" : ""}`}
       data-index={index}
       onContextMenu={(e) => {
         e.preventDefault();
@@ -585,13 +624,14 @@ function FileRow(props: {
       }}
     >
       <div className="file-check">
-        <input type="checkbox" checked={selected} onChange={onToggle} />
+        <input type="checkbox" checked={selected && !isDeleted} disabled={isDeleted} onChange={onToggle} />
       </div>
       <div className="file-size">{formatBytes(file.size)}</div>
       <FileIcon path={file.path} className="file-row-icon" />
       <div className="file-info">
         <div className="file-name">
           <span className="file-name-text">{file.name}</span>
+          {deletedRecord && <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedTitle}>{deletedPathLabel(deletedRecord)}</span>}
           {protectedBy && <span className="protected-path-badge" title={`Protected by ${protectedBy}`}>Protected</span>}
         </div>
         <div className="file-path">{relativePath(file.path, rootPath)}</div>
@@ -607,13 +647,13 @@ function FileRow(props: {
         >
           Move
         </button>
-        <button className="action-btn" disabled={isBusy} onClick={onReveal}>Reveal</button>
-        <button className="action-btn" disabled={isBusy} onClick={onOpen}>Open</button>
+        <button className="action-btn" disabled={unavailableDisabled} onClick={onReveal} title={deletedTitle}>Reveal</button>
+        <button className="action-btn" disabled={unavailableDisabled} onClick={onOpen} title={deletedTitle}>Open</button>
         <button
           className="action-btn warn"
           disabled={destructiveDisabled}
           onClick={onTrash}
-          title={protectedBy ? `Protected by ${protectedBy}` : "Send to OS trash (recoverable until emptied)"}
+          title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : "Send to OS trash (recoverable until emptied)")}
         >
           Trash
         </button>
@@ -626,7 +666,7 @@ function FileRow(props: {
           className="action-btn danger"
           disabled={destructiveDisabled}
           onClick={onDelete}
-          title={protectedBy ? `Protected by ${protectedBy}` : "Permanently delete (skips trash, cannot be undone)"}
+          title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : "Permanently delete (skips trash, cannot be undone)")}
         >
           Del
         </button>

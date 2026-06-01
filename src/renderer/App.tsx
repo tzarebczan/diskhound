@@ -14,6 +14,7 @@ import {
   type UpdateStatus,
 } from "../shared/contracts";
 import { formatBytes } from "./lib/format";
+import { clearDeletedPaths } from "./lib/deletedPaths";
 import { setColorBlindPalette } from "./lib/treemap";
 import { setProcessPaletteColorBlind } from "./components/MemoryView";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents";
@@ -120,6 +121,7 @@ export function App() {
   const [currentRoot, setCurrentRoot] = useState<string>("");
   /** Roots with an in-flight scan on the main process (normalized keys). */
   const [activeScanKeys, setActiveScanKeys] = useState<Set<string>>(() => new Set());
+  const deletedResetScanKeysRef = useRef<Set<string>>(new Set());
 
   // Per-root duplicate scan state. Lives at the App level so:
   //   1. Switching drives shows each drive's own stats (not a shared global)
@@ -433,6 +435,15 @@ export function App() {
       const key = rootKey(s.rootPath);
 
       if (s.status === "running") {
+        const deletedResetKey = s.startedAt ? `${key}:${s.startedAt}` : null;
+        if (deletedResetKey && !deletedResetScanKeysRef.current.has(deletedResetKey)) {
+          deletedResetScanKeysRef.current.add(deletedResetKey);
+          if (deletedResetScanKeysRef.current.size > 20) {
+            const first = deletedResetScanKeysRef.current.values().next().value;
+            if (first) deletedResetScanKeysRef.current.delete(first);
+          }
+          clearDeletedPaths();
+        }
         setActiveScanKeys((prev) => new Set(prev).add(key));
         setShowPicker(false);
       }
@@ -707,6 +718,7 @@ export function App() {
     // The real running snapshot from startScan will replace this as
     // soon as it arrives.
     const trimmed = path.trim();
+    clearDeletedPaths();
     syncSnapshot({
       ...createIdleScanSnapshot(),
       status: "running",

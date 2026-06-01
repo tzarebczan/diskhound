@@ -2,6 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "preact/hooks";
 
 import type { PathActionResult, ScanFileRecord } from "../../shared/contracts";
 import { parentFolderOfPath } from "../../shared/pathProtection";
+import {
+  deletedPathLabel,
+  deletedPathTitle,
+  markDeletedPath,
+  useDeletedPaths,
+  type DeletedPathAction,
+} from "../lib/deletedPaths";
 import { formatBytes, humanAge } from "../lib/format";
 import { useConfirmPermanentDelete, useExcludedFolderProtection } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
@@ -53,6 +60,7 @@ export function Treemap({
   } | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [dims, setDims] = useState({ w: 0, h: 0 });
+  const { getDeletedRecord } = useDeletedPaths();
 
   // Resize observer
   useEffect(() => {
@@ -175,6 +183,31 @@ export function Treemap({
           ctx.fillText(sizeLabel, x + pad, y + pad + fontSize + 2, maxLabelW);
         }
       }
+
+      const deletedRecord = getDeletedRecord(r.file.path);
+      if (deletedRecord) {
+        ctx.fillStyle = "rgba(5, 5, 8, 0.58)";
+        ctx.fillRect(x, y, w, h);
+        ctx.strokeStyle = deletedRecord.action === "trash"
+          ? "rgba(245, 158, 11, 0.9)"
+          : "rgba(239, 68, 68, 0.9)";
+        ctx.lineWidth = Math.max(1, Math.min(3, Math.min(w, h) * 0.04));
+        ctx.beginPath();
+        ctx.moveTo(x + 2, y + h - 2);
+        ctx.lineTo(x + w - 2, y + 2);
+        ctx.stroke();
+        if (w > 54 && h > 22) {
+          ctx.font = `700 ${Math.min(10, Math.max(8, h / 5))}px "JetBrains Mono", monospace`;
+          ctx.textBaseline = "bottom";
+          const label = deletedRecord.action === "trash" ? "TRASHED" : "DELETED";
+          ctx.fillStyle = "rgba(0,0,0,0.62)";
+          ctx.fillText(label, x + pad + 1, y + h - pad + 1, maxLabelW);
+          ctx.fillStyle = deletedRecord.action === "trash"
+            ? "rgba(252, 211, 77, 0.96)"
+            : "rgba(252, 165, 165, 0.96)";
+          ctx.fillText(label, x + pad, y + h - pad, maxLabelW);
+        }
+      }
     }
 
     // Folder delineation pass (Tree layout only). Drawn AFTER leaves so
@@ -211,7 +244,7 @@ export function Treemap({
         );
       }
     }
-  }, [files, dims, areaMode, layout, showFolderOutlines]);
+  }, [files, dims, areaMode, layout, showFolderOutlines, getDeletedRecord]);
 
   const hitTest = useCallback((e: MouseEvent): ScanFileRecord | null => {
     const canvas = canvasRef.current;
@@ -310,6 +343,14 @@ export function Treemap({
         >
           <span className="treemap-tooltip-size">{formatBytes(tooltip.file.size)}</span>
           <span className="treemap-tooltip-name">{tooltip.file.name}</span>
+          {(() => {
+            const deletedRecord = getDeletedRecord(tooltip.file.path);
+            return deletedRecord ? (
+              <span className={`deleted-path-badge ${deletedRecord.action}`} title={deletedPathTitle(deletedRecord)}>
+                {deletedPathLabel(deletedRecord)}
+              </span>
+            ) : null;
+          })()}
           <div className="treemap-tooltip-path">{tooltip.file.path}</div>
           <div className="treemap-tooltip-meta">Modified {humanAge(tooltip.file.modifiedAt)}</div>
           {tooltip.folder && (
@@ -346,9 +387,13 @@ function TreemapContextMenu({ x, y, file, onClose }: {
   const menuRef = useRef<HTMLDivElement>(null);
   const confirmDelete = useConfirmPermanentDelete();
   const { findProtectedFolder, addExcludedFolder } = useExcludedFolderProtection();
+  const { getDeletedRecord } = useDeletedPaths();
   const protectedBy = findProtectedFolder(file.path);
+  const deletedRecord = getDeletedRecord(file.path);
   const parentFolder = parentFolderOfPath(file.path);
-  const destructiveDisabled = Boolean(protectedBy);
+  const destructiveDisabled = Boolean(protectedBy) || Boolean(deletedRecord);
+  const unavailableDisabled = Boolean(deletedRecord);
+  const deletedTitle = deletedRecord ? deletedPathTitle(deletedRecord) : undefined;
 
   // Adjust position so menu doesn't overflow viewport
   const [pos, setPos] = useState({ x, y });
@@ -361,13 +406,15 @@ function TreemapContextMenu({ x, y, file, onClose }: {
     setPos({ x: Math.max(0, nx), y: Math.max(0, ny) });
   }, [x, y]);
 
-  const doAction = async (action: () => Promise<PathActionResult | unknown>, label: string) => {
+  const doAction = async (action: () => Promise<PathActionResult | unknown>, label: string, deletedAction?: DeletedPathAction) => {
     onClose();
     try {
       const result = await action();
       // Surface structured IPC failures (PathActionResult with ok: false)
       if (result && typeof result === "object" && "ok" in result && !(result as PathActionResult).ok) {
         toast("error", `${label} failed`, (result as PathActionResult).message);
+      } else if (deletedAction) {
+        markDeletedPath(file.path, deletedAction);
       }
     } catch {
       toast("error", `Failed: ${label}`);
@@ -391,9 +438,16 @@ function TreemapContextMenu({ x, y, file, onClose }: {
           Protected by {protectedBy}
         </div>
       )}
+      {deletedRecord && (
+        <div className={`path-ctx-deleted ${deletedRecord.action}`}>
+          {deletedPathLabel(deletedRecord)} in this session
+        </div>
+      )}
       <div className="treemap-ctx-divider" />
       <button
         className="treemap-ctx-item"
+        disabled={unavailableDisabled}
+        title={deletedTitle}
         onClick={() => void doAction(() => nativeApi.revealPath(file.path), "Reveal")}
       >
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
@@ -403,6 +457,8 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       </button>
       <button
         className="treemap-ctx-item"
+        disabled={unavailableDisabled}
+        title={deletedTitle}
         onClick={() => void doAction(() => nativeApi.openPath(file.path), "Open")}
       >
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
@@ -431,7 +487,7 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       <button
         className="treemap-ctx-item"
         disabled={destructiveDisabled}
-        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
+        title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}
         onClick={() => {
           onClose();
           void (async () => {
@@ -478,8 +534,8 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       <button
         className="treemap-ctx-item treemap-ctx-warn"
         disabled={destructiveDisabled}
-        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
-        onClick={() => void doAction(() => nativeApi.trashPath(file.path), "Trash")}
+        title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}
+        onClick={() => void doAction(() => nativeApi.trashPath(file.path), "Trash", "trash")}
       >
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">
           <path d="M2.5 4.5H11.5L10.5 12.5H3.5L2.5 4.5Z" />
@@ -491,10 +547,10 @@ function TreemapContextMenu({ x, y, file, onClose }: {
       <button
         className="treemap-ctx-item treemap-ctx-danger"
         disabled={destructiveDisabled}
-        title={protectedBy ? `Protected by ${protectedBy}` : undefined}
+        title={deletedTitle ?? (protectedBy ? `Protected by ${protectedBy}` : undefined)}
         onClick={() => {
           if (confirmDelete && !confirm(`Permanently delete ${file.name}?\n\nThis cannot be undone.`)) return;
-          void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete");
+          void doAction(() => nativeApi.permanentlyDeletePath(file.path), "Delete", "delete");
         }}
       >
         <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2">

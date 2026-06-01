@@ -35,6 +35,7 @@ const MAX_REFRESH_MS = 30_000;
 const VIEW_MODE_KEY = "diskhound:memory-view-mode";
 const REFRESH_MS_KEY = "diskhound:memory-refresh-ms";
 const CPU_SCALE_KEY = "diskhound:cpu-scale";
+const PROCESS_METADATA_KEY = "diskhound:process-metadata-visible";
 
 function getInitialCpuScale(): CpuScale {
   if (typeof window === "undefined") return "overall";
@@ -70,6 +71,11 @@ function getInitialRefreshMs(): number {
   return Math.min(MAX_REFRESH_MS, Math.max(MIN_REFRESH_MS, parsed));
 }
 
+function getInitialShowProcessMetadata(): boolean {
+  if (typeof window === "undefined") return true;
+  return window.localStorage.getItem(PROCESS_METADATA_KEY) !== "0";
+}
+
 export function MemoryView() {
   const [snapshot, setSnapshot] = useState<SystemMemorySnapshot | null>(null);
   const [loadingPhase, setLoadingPhase] = useState<"initial" | "refreshing" | "idle">("initial");
@@ -81,6 +87,7 @@ export function MemoryView() {
   const [viewMode, setViewMode] = useState<ViewMode>(getInitialViewMode);
   const [refreshMs, setRefreshMs] = useState<number>(getInitialRefreshMs);
   const [cpuScale, setCpuScale] = useState<CpuScale>(getInitialCpuScale);
+  const [showProcessMetadata, setShowProcessMetadata] = useState<boolean>(getInitialShowProcessMetadata);
   const [lastSampleMs, setLastSampleMs] = useState<number | null>(null);
   // Active affinity rules, poll-refreshed at a lower cadence than the
   // memory snapshot. ProcessRow uses this to badge rows whose exe name
@@ -146,6 +153,9 @@ export function MemoryView() {
   useEffect(() => {
     try { window.localStorage.setItem(CPU_SCALE_KEY, cpuScale); } catch { /* ignore */ }
   }, [cpuScale]);
+  useEffect(() => {
+    try { window.localStorage.setItem(PROCESS_METADATA_KEY, showProcessMetadata ? "1" : "0"); } catch { /* ignore */ }
+  }, [showProcessMetadata]);
 
   // Project the chosen CPU scale onto every process's cpuPercent so
   // downstream consumers (list, treemap, heatmap detail popover) don't
@@ -282,7 +292,7 @@ export function MemoryView() {
     const q = filter.trim().toLowerCase();
     let list = q
       ? scaledSnapshot.processes.filter((p) =>
-          p.name.toLowerCase().includes(q) || String(p.pid).includes(q),
+          processSearchText(p).includes(q),
         )
       : scaledSnapshot.processes;
 
@@ -476,7 +486,7 @@ export function MemoryView() {
           className="filter-input"
           value={filter}
           onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
-          placeholder="Filter by name or PID..."
+          placeholder="Filter by name, PID, command, or folder..."
         />
         <div className="memory-toolbar-spacer" />
         {/* CPU scale toggle — only visible on views that actually show
@@ -506,6 +516,14 @@ export function MemoryView() {
             </button>
           </div>
         )}
+        <button
+          className={`chip memory-metadata-toggle ${showProcessMetadata ? "active" : ""}`}
+          aria-pressed={showProcessMetadata}
+          onClick={() => setShowProcessMetadata((v) => !v)}
+          title={showProcessMetadata ? "Hide command lines and parent process metadata" : "Show command lines and parent process metadata"}
+        >
+          Metadata
+        </button>
         {loadingPhase === "refreshing" && (
           <span className="memory-refresh-indicator" title="Refreshing…">
             <span className="memory-refresh-dot" />
@@ -539,6 +557,7 @@ export function MemoryView() {
           onRuleChanged={() => {
             void nativeApi.getAffinityRules().then(setAffinityRules);
           }}
+          showMetadata={showProcessMetadata}
         />
       )}
       {viewMode === "treemap" && (
@@ -550,6 +569,7 @@ export function MemoryView() {
           onRuleChanged={() => {
             void nativeApi.getAffinityRules().then(setAffinityRules);
           }}
+          showMetadata={showProcessMetadata}
         />
       )}
       {viewMode === "heatmap" && (
@@ -659,8 +679,9 @@ function ProcessList(props: {
   onKill: (p: ProcessInfo, hard: boolean) => void;
   affinityRules: AffinityRule[];
   onRuleChanged: () => void;
+  showMetadata: boolean;
 }) {
-  const { processes, total, totalBytes, filter, sortField, sortDir, onToggleSort, killingPid, onKill, affinityRules, onRuleChanged } = props;
+  const { processes, total, totalBytes, filter, sortField, sortDir, onToggleSort, killingPid, onKill, affinityRules, onRuleChanged, showMetadata } = props;
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const groups = useMemo(
@@ -712,6 +733,7 @@ function ProcessList(props: {
                   isBusy={killingPid === p.pid}
                   onKill={onKill}
                   affinityRule={findMatchingRule(affinityRules, p)}
+                  showMetadata={showMetadata}
                 />
               );
             }
@@ -727,6 +749,7 @@ function ProcessList(props: {
                 onKill={onKill}
                 affinityRules={affinityRules}
                 onRuleChanged={onRuleChanged}
+                showMetadata={showMetadata}
               />
             );
           })
@@ -746,8 +769,9 @@ function ProcessGroupRows(props: {
   onKill: (p: ProcessInfo, hard: boolean) => void;
   affinityRules: AffinityRule[];
   onRuleChanged: () => void;
+  showMetadata: boolean;
 }) {
-  const { group, maxMem, totalBytes, isExpanded, onToggle, killingPid, onKill, affinityRules } = props;
+  const { group, maxMem, totalBytes, isExpanded, onToggle, killingPid, onKill, affinityRules, showMetadata } = props;
   // Group-level rule match — if every member of this family matches the
   // same rule, we badge the group header too. Callers hitting Expand will
   // see per-child badges (which may differ in rare multi-pattern setups).
@@ -804,6 +828,7 @@ function ProcessGroupRows(props: {
           isBusy={killingPid === p.pid}
           onKill={onKill}
           affinityRule={findMatchingRule(affinityRules, p)}
+          showMetadata={showMetadata}
           isChild
         />
       ))}
@@ -818,19 +843,21 @@ function ProcessRow(props: {
   isBusy: boolean;
   onKill: (p: ProcessInfo, hard: boolean) => void;
   affinityRule?: AffinityRule | null;
+  showMetadata: boolean;
   isChild?: boolean;
 }) {
-  const { proc, maxMem, totalBytes, isBusy, onKill, affinityRule, isChild } = props;
+  const { proc, maxMem, totalBytes, isBusy, onKill, affinityRule, showMetadata, isChild } = props;
   const memPct = maxMem > 0 ? (proc.memoryBytes / maxMem) * 100 : 0;
   const totalPct = totalBytes > 0 ? (proc.memoryBytes / totalBytes) * 100 : 0;
   const memClass = totalPct > 5 ? "high" : totalPct > 1 ? "mid" : "low";
   const cpuRaw = proc.cpuPercent ?? 0;
   const cpuPct = Math.min(100, cpuRaw);
   const cpuClass = cpuPct > 50 ? "high" : cpuPct > 15 ? "mid" : "low";
+  const metadata = showMetadata ? processMetadataParts(proc) : null;
 
   return (
     <div
-      className={`memory-row ${isChild ? "memory-row-child" : ""}`}
+      className={`memory-row ${metadata ? "has-metadata" : ""} ${isChild ? "memory-row-child" : ""}`}
       title={proc.commandLine ?? proc.exePath ?? proc.name}
     >
       <div className="memory-row-icon">
@@ -853,11 +880,20 @@ function ProcessRow(props: {
         )}
       </div>
       <div className="memory-row-pid">{proc.pid}</div>
-      <div className="memory-row-name">
-        {isChild && <span className="memory-row-child-prefix">{"\u2514"}</span>}
-        {proc.name}
-        {affinityRule && <AffinityRulePinIcon rule={affinityRule} />}
-        {!proc.userOwned && <span className="memory-row-system-badge" title="System process">sys</span>}
+      <div className="memory-row-name memory-row-name-stack">
+        <div className="memory-row-name-line">
+          {isChild && <span className="memory-row-child-prefix">{"\u2514"}</span>}
+          <span className="memory-row-name-text">{proc.name}</span>
+          {affinityRule && <AffinityRulePinIcon rule={affinityRule} />}
+          {!proc.userOwned && <span className="memory-row-system-badge" title="System process">sys</span>}
+        </div>
+        {metadata && (
+          <div className="memory-row-meta-line">
+            {metadata.command && <span className="memory-row-meta-cmd" title={proc.commandLine ?? metadata.command}>{metadata.command}</span>}
+            {metadata.origin && <span className="memory-row-meta-origin" title={metadata.origin}>{metadata.origin}</span>}
+            {metadata.parent && <span className="memory-row-meta-parent" title={metadata.parent}>{metadata.parent}</span>}
+          </div>
+        )}
       </div>
       <div className="memory-row-actions">
         <button className="action-btn warn" disabled={isBusy} onClick={() => onKill(proc, false)} title="Graceful shutdown (SIGTERM/taskkill)">End</button>
@@ -949,6 +985,37 @@ function colorForProcessName(name: string): string {
 function prettyProcessName(name: string): string {
   if (/\.exe$/i.test(name)) return name.slice(0, -4);
   return name;
+}
+
+function processSearchText(proc: ProcessInfo): string {
+  return [
+    proc.name,
+    proc.pid,
+    proc.commandPreview,
+    proc.commandLine,
+    proc.exePath,
+    proc.workingDirectory,
+    proc.parentName,
+    proc.parentPid,
+  ].filter((value) => value !== null && value !== undefined)
+    .join(" ")
+    .toLowerCase();
+}
+
+function processMetadataParts(proc: ProcessInfo): { command: string | null; origin: string | null; parent: string | null } | null {
+  const command = proc.commandPreview || proc.commandLine || null;
+  const origin = proc.workingDirectory
+    ? `from ${proc.workingDirectory}`
+    : proc.exePath
+      ? `exe ${proc.exePath}`
+      : null;
+  const parent = proc.parentName
+    ? `parent ${prettyProcessName(proc.parentName)} (${proc.parentPid ?? "?"})`
+    : proc.parentPid
+      ? `parent PID ${proc.parentPid}`
+      : null;
+  if (!command && !origin && !parent) return null;
+  return { command, origin, parent };
 }
 
 // ── Process appearance cache (icon + dominant color) ─────────────────────
@@ -1163,8 +1230,9 @@ function ProcessTreemap(props: {
   onKill: (p: ProcessInfo, hard: boolean) => void;
   affinityRules: AffinityRule[];
   onRuleChanged: () => void;
+  showMetadata: boolean;
 }) {
-  const { processes, onKill, affinityRules, onRuleChanged } = props;
+  const { processes, onKill, affinityRules, onRuleChanged, showMetadata } = props;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rectsRef = useRef<TreemapRect[]>([]);
@@ -1479,6 +1547,16 @@ function ProcessTreemap(props: {
           {hover.process.exePath && (
             <div className="treemap-tooltip-meta">{hover.process.exePath}</div>
           )}
+          {showMetadata && (() => {
+            const metadata = processMetadataParts(hover.process);
+            return metadata ? (
+              <div className="treemap-tooltip-meta process-tooltip-meta">
+                {metadata.command && <div title={hover.process.commandLine ?? metadata.command}>cmd {metadata.command}</div>}
+                {metadata.origin && <div title={metadata.origin}>{metadata.origin}</div>}
+                {metadata.parent && <div title={metadata.parent}>{metadata.parent}</div>}
+              </div>
+            ) : null;
+          })()}
         </div>
       )}
       {selected && (
@@ -1486,6 +1564,7 @@ function ProcessTreemap(props: {
           proc={selected}
           onClose={() => setSelected(null)}
           onKill={onKill}
+          showMetadata={showMetadata}
         />
       )}
       {contextMenu && (
@@ -1620,6 +1699,43 @@ function ProcessContextMenu(props: {
        * engine we haven't built yet, and on macOS affinity isn't
        * exposed at all (the scheduler treats it as a hint at best).
        * Hide the items rather than showing ones that always fail. */}
+      {(proc.commandLine || proc.workingDirectory) && (
+        <>
+          {proc.commandLine && (
+            <button
+              className="process-ctx-item"
+              role="menuitem"
+              onClick={() =>
+                act(() => {
+                  void navigator.clipboard.writeText(proc.commandLine!).then(
+                    () => toast("success", "Command copied", proc.name),
+                    () => toast("error", "Couldn't copy command"),
+                  );
+                })
+              }
+            >
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <rect x="4" y="4" width="8" height="9" rx="1" />
+                <path d="M4 4V3C4 2.45 4.45 2 5 2H9C9.55 2 10 2.45 10 3V4" />
+              </svg>
+              Copy command line
+            </button>
+          )}
+          {proc.workingDirectory && (
+            <button
+              className="process-ctx-item"
+              role="menuitem"
+              onClick={() => act(() => void nativeApi.revealPath(proc.workingDirectory!))}
+            >
+              <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+                <path d="M1.5 3.5V11.5C1.5 12.05 1.95 12.5 2.5 12.5H11.5C12.05 12.5 12.5 12.05 12.5 11.5V5.5C12.5 4.95 12.05 4.5 11.5 4.5H7L5.5 2.5H2.5C1.95 2.5 1.5 2.95 1.5 3.5Z" />
+              </svg>
+              Reveal inferred folder
+            </button>
+          )}
+          <div className="process-ctx-divider" />
+        </>
+      )}
       {nativeApi.platform === "win32" && (
         <>
           <button
@@ -1989,8 +2105,10 @@ function ProcessDetailPopover(props: {
   proc: ProcessInfo;
   onClose: () => void;
   onKill: (p: ProcessInfo, hard: boolean) => void;
+  showMetadata: boolean;
 }) {
-  const { proc, onClose, onKill } = props;
+  const { proc, onClose, onKill, showMetadata } = props;
+  const metadata = showMetadata ? processMetadataParts(proc) : null;
   return (
     <div className="process-detail-overlay" onClick={onClose}>
       <div className="process-detail-card" onClick={(e) => e.stopPropagation()}>
@@ -2010,11 +2128,33 @@ function ProcessDetailPopover(props: {
         {proc.exePath && (
           <div className="process-detail-path">{proc.exePath}</div>
         )}
+        {metadata && (
+          <div className="process-detail-metadata">
+            {metadata.command && (
+              <ProcessMetadataField label="Command" value={proc.commandLine ?? metadata.command} />
+            )}
+            {metadata.origin && (
+              <ProcessMetadataField label="Location" value={metadata.origin} />
+            )}
+            {metadata.parent && (
+              <ProcessMetadataField label="Parent" value={metadata.parent} />
+            )}
+          </div>
+        )}
         <div className="process-detail-actions">
           <button className="action-btn warn" onClick={() => onKill(proc, false)}>End</button>
           <button className="action-btn danger" onClick={() => onKill(proc, true)}>Force kill</button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ProcessMetadataField({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="process-detail-metadata-row">
+      <span>{label}</span>
+      <code>{value}</code>
     </div>
   );
 }

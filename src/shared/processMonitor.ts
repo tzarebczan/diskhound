@@ -7,7 +7,7 @@ import type { KillSignal, ProcessInfo, SystemMemorySnapshot } from "./contracts"
 const execFileAsync = promisify(execFile);
 // PowerShell Get-Process usually returns in 1-2s, but we give room for cold-
 // start on slower boxes. Basic tasklist is snappier but lacks paths.
-const POWERSHELL_TIMEOUT_MS = 8_000;
+const POWERSHELL_TIMEOUT_MS = 12_000;
 const TASKLIST_TIMEOUT_MS = 15_000;
 
 /** Cached CPU times from the previous sample, keyed by PID. Used to derive
@@ -143,10 +143,29 @@ async function sampleProcessesWindows(): Promise<ProcessInfo[]> {
  * Explicitly skips the profile so startup is snappy.
  */
 async function sampleViaPowerShell(): Promise<ProcessInfo[]> {
-  const script =
-    "Get-Process | Select-Object Id, ProcessName, WorkingSet64, Path, " +
-    "@{N='CpuMs';E={[int64]$_.TotalProcessorTime.TotalMilliseconds}} | " +
-    "ConvertTo-Json -Compress -Depth 2";
+  const script = `
+$ErrorActionPreference = 'SilentlyContinue'
+$cimByPid = @{}
+Get-CimInstance Win32_Process | ForEach-Object {
+  $cimByPid[[int]$_.ProcessId] = $_
+}
+Get-Process | ForEach-Object {
+  $cpuMs = $null
+  try { $cpuMs = [int64]$_.TotalProcessorTime.TotalMilliseconds } catch { $cpuMs = $null }
+  $cim = $cimByPid[[int]$_.Id]
+  $path = $_.Path
+  if (-not $path -and $cim) { $path = $cim.ExecutablePath }
+  [PSCustomObject]@{
+    Id = $_.Id
+    ProcessName = $_.ProcessName
+    WorkingSet64 = $_.WorkingSet64
+    Path = $path
+    CpuMs = $cpuMs
+    ParentPid = if ($cim) { $cim.ParentProcessId } else { $null }
+    CommandLine = if ($cim) { $cim.CommandLine } else { $null }
+  }
+} | ConvertTo-Json -Compress -Depth 3
+`.trim();
   const { stdout } = await execFileAsync(
     "powershell",
     ["-NoProfile", "-NonInteractive", "-Command", script],
@@ -176,9 +195,11 @@ async function sampleViaPowerShell(): Promise<ProcessInfo[]> {
     const name = baseName.endsWith(".exe") ? baseName : `${baseName}.exe`;
     const memoryBytes = Number(obj.WorkingSet64) || 0;
     const cpuTimeMs = typeof obj.CpuMs === "number" ? obj.CpuMs : Number(obj.CpuMs) || 0;
-    const exePath = typeof obj.Path === "string" && obj.Path.length > 0 ? obj.Path : null;
+    const exePath = cleanOptionalString(obj.Path);
+    const commandLine = cleanOptionalString(obj.CommandLine);
+    const parentPid = parsePositiveNumber(obj.ParentPid);
 
-    processes.push({
+    processes.push(enrichProcessInfo({
       pid,
       name,
       memoryBytes,
@@ -190,11 +211,13 @@ async function sampleViaPowerShell(): Promise<ProcessInfo[]> {
       // errors per-action.
       userOwned: !isKnownSystemProcess(name),
       exePath,
+      commandLine,
+      parentPid,
       cpuTimeMs,
-    });
+    }));
   }
 
-  return processes;
+  return attachParentNames(processes);
 }
 
 /** Pattern list for processes we consider "system" even if PS lists them. */
@@ -210,6 +233,155 @@ const SYSTEM_PROCESS_NAMES = new Set<string>([
 
 function isKnownSystemProcess(name: string): boolean {
   return SYSTEM_PROCESS_NAMES.has(name.toLowerCase());
+}
+
+function cleanOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
+}
+
+function parsePositiveNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+function enrichProcessInfo(processInfo: ProcessInfo): ProcessInfo {
+  const metadata = deriveProcessMetadata(processInfo);
+  return {
+    ...processInfo,
+    commandPreview: metadata.commandPreview,
+    workingDirectory: metadata.workingDirectory,
+  };
+}
+
+function attachParentNames(processes: ProcessInfo[]): ProcessInfo[] {
+  const nameByPid = new Map<number, string>();
+  for (const p of processes) nameByPid.set(p.pid, p.name);
+  return processes.map((p) => ({
+    ...p,
+    parentName: p.parentPid ? (nameByPid.get(p.parentPid) ?? null) : null,
+  }));
+}
+
+export function deriveProcessMetadata(
+  processInfo: Pick<ProcessInfo, "name" | "exePath" | "commandLine">,
+): Pick<ProcessInfo, "commandPreview" | "workingDirectory"> {
+  const commandLine = processInfo.commandLine?.trim() || null;
+  const args = commandLine ? splitCommandLine(commandLine) : [];
+  const commandPreview = commandLine
+    ? buildCommandPreview(args, commandLine)
+    : null;
+  const workingDirectory = inferWorkingDirectory(args, processInfo.exePath ?? null);
+  return { commandPreview, workingDirectory };
+}
+
+function buildCommandPreview(args: string[], commandLine: string): string {
+  const source = args.length > 1 ? args.slice(1).join(" ") : commandLine;
+  return truncateMiddle(source, 220);
+}
+
+function splitCommandLine(commandLine: string): string[] {
+  const out: string[] = [];
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  let escaping = false;
+  for (let i = 0; i < commandLine.length; i++) {
+    const ch = commandLine[i]!;
+    if (escaping) {
+      current += ch;
+      escaping = false;
+      continue;
+    }
+    if (ch === "\\") {
+      const next = commandLine[i + 1];
+      if (quote && (next === quote || next === "\\")) {
+        escaping = true;
+        continue;
+      }
+    }
+    if ((ch === '"' || ch === "'") && (!quote || quote === ch)) {
+      quote = quote ? null : ch;
+      continue;
+    }
+    if (!quote && /\s/.test(ch)) {
+      if (current) {
+        out.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+function inferWorkingDirectory(args: string[], exePath: string | null): string | null {
+  if (args.length === 0) return null;
+  for (let i = 1; i < args.length; i++) {
+    const arg = args[i]!;
+    const next = args[i + 1];
+    const cwd = cwdFromOption(arg, next);
+    if (cwd) return cwd;
+  }
+
+  const exeKey = exePath ? normalizeProcessPath(exePath) : null;
+  for (const arg of args.slice(1)) {
+    const cleaned = stripOptionValueQuotes(arg);
+    if (!isAbsolutePath(cleaned)) continue;
+    if (exeKey && normalizeProcessPath(cleaned) === exeKey) continue;
+    const projectRoot = projectRootFromPath(cleaned);
+    if (projectRoot) return projectRoot;
+    const folder = looksLikeFilePath(cleaned) ? parentDir(cleaned) : cleaned;
+    if (folder) return folder;
+  }
+  return null;
+}
+
+function cwdFromOption(arg: string, next: string | undefined): string | null {
+  const normalized = arg.toLowerCase();
+  if ((normalized === "--cwd" || normalized === "--prefix" || arg === "-C") && next) {
+    const cleaned = stripOptionValueQuotes(next);
+    return isAbsolutePath(cleaned) ? cleaned : null;
+  }
+  const match = arg.match(/^(?:--cwd|--prefix)=(.+)$/i);
+  if (!match) return null;
+  const cleaned = stripOptionValueQuotes(match[1] ?? "");
+  return isAbsolutePath(cleaned) ? cleaned : null;
+}
+
+function stripOptionValueQuotes(value: string): string {
+  return value.replace(/^["']|["']$/g, "");
+}
+
+function isAbsolutePath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value) || value.startsWith("/");
+}
+
+function looksLikeFilePath(value: string): boolean {
+  return /\.[A-Za-z0-9]{1,8}$/.test(value) || /[\\/]bin[\\/][^\\/]+$/.test(value);
+}
+
+function parentDir(value: string): string | null {
+  const idx = Math.max(value.lastIndexOf("\\"), value.lastIndexOf("/"));
+  if (idx <= 0) return null;
+  if (/^[A-Za-z]:[\\/]?$/.test(value.slice(0, idx + 1))) return value.slice(0, idx + 1);
+  return value.slice(0, idx);
+}
+
+function projectRootFromPath(value: string): string | null {
+  const match = value.match(/^(.*?)[\\/]node_modules[\\/]/i);
+  if (match?.[1]) return match[1];
+  return null;
+}
+
+function normalizeProcessPath(value: string): string {
+  return value.replace(/\//g, "\\").toLowerCase();
+}
+
+function truncateMiddle(value: string, max: number): string {
+  if (value.length <= max) return value;
+  const keep = Math.max(20, Math.floor((max - 3) / 2));
+  return `${value.slice(0, keep)}...${value.slice(value.length - keep)}`;
 }
 
 async function runTasklist(verbose: boolean): Promise<ProcessInfo[]> {
@@ -288,23 +460,25 @@ async function sampleProcessesUnix(): Promise<ProcessInfo[]> {
   // rss is in KB.
   const { stdout } = await execFileAsync(
     "ps",
-    ["-axo", "pid,rss,%cpu,comm"],
+    ["-axo", "pid=,ppid=,rss=,pcpu=,comm=,args="],
     { timeout: TASKLIST_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 },
   );
 
-  const lines = stdout.split("\n").slice(1); // skip header
+  const lines = stdout.split("\n");
   const processes: ProcessInfo[] = [];
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed) continue;
-    // PID RSS %CPU COMMAND
-    const match = trimmed.match(/^(\d+)\s+(\d+)\s+([\d.]+)\s+(.+)$/);
+    // PID PPID RSS %CPU COMMAND ARGS
+    const match = trimmed.match(/^(\d+)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+(\S+)(?:\s+(.*))?$/);
     if (!match) continue;
     const pid = Number.parseInt(match[1], 10);
-    const rssKb = Number.parseInt(match[2], 10);
-    const cpu = Number.parseFloat(match[3]);
-    const name = (match[4] ?? "").trim();
+    const parentPid = Number.parseInt(match[2], 10);
+    const rssKb = Number.parseInt(match[3], 10);
+    const cpu = Number.parseFloat(match[4]);
+    const name = (match[5] ?? "").trim();
+    const commandLine = cleanOptionalString(match[6]);
 
     if (!Number.isFinite(pid) || pid <= 0 || !name) continue;
 
@@ -314,15 +488,17 @@ async function sampleProcessesUnix(): Promise<ProcessInfo[]> {
     const cores = Math.max(1, OS.cpus().length);
     const sysPct = Number.isFinite(cpu) ? cpu : null;
     const perCore = sysPct !== null ? Math.min(cores * 100, sysPct * cores) : null;
-    processes.push({
+    processes.push(enrichProcessInfo({
       pid,
       name,
       memoryBytes: rssKb * 1024,
       cpuPercent: sysPct,
       cpuPercentPerCore: perCore,
       userOwned: true,
-    });
+      commandLine,
+      parentPid: Number.isFinite(parentPid) && parentPid > 0 ? parentPid : null,
+    }));
   }
 
-  return processes;
+  return attachParentNames(processes);
 }

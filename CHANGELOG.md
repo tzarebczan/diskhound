@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.5.42 — 2026-06-01
+
+DiskHound now keeps cleanup actions visible in the current scan after
+files are removed, and makes the Processes view much better at explaining
+which `node.exe` is which.
+
+### Deleted file session state
+
+- Trash and permanent delete actions now mark files as `Trashed` or
+  `Deleted` in the UI instead of making them vanish from the current scan.
+- Deleted markers appear across Largest Files, Overview dominant cards,
+  the disk treemap, Duplicates, and Changes.
+- Marked rows stay counted in the scanned totals but disable follow-up
+  open, move, trash, and delete actions until the next scan clears the
+  session state.
+
+### Process metadata
+
+- Windows process sampling now uses `Win32_Process` command-line and
+  parent-PID metadata alongside `Get-Process` memory and CPU data.
+- Processes can show command previews, inferred project folders, and
+  parent process names/PIDs for Node, Vite, TypeScript server, editor,
+  and other command-driven process trees.
+- Added a persisted `Metadata` toggle plus command/folder/parent details
+  in process rows, treemap tooltips, detail popovers, and context menus.
+
+### Tests
+
+- Added process metadata parsing coverage for Node command lines and
+  project-root inference.
+
 ## 0.5.41 — 2026-05-29
 
 DiskHound keeps the protected-folder delete guardrails from 0.5.40, but
