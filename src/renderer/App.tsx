@@ -491,6 +491,22 @@ export function App() {
     const unsubUpdate = nativeApi.onUpdateStatus((status) => {
       setUpdateStatus(status);
     });
+    let updateStateDisposed = false;
+    let updateStateRetryId: number | null = null;
+    const loadInitialUpdateState = (attempt = 0) => {
+      void nativeApi.getUpdateState()
+        .then((state) => {
+          if (updateStateDisposed) return;
+          if (state?.lastStatus) {
+            setUpdateStatus(state.lastStatus);
+          }
+        })
+        .catch(() => {
+          if (updateStateDisposed || attempt >= 8) return;
+          updateStateRetryId = window.setTimeout(() => loadInitialUpdateState(attempt + 1), 150);
+        });
+    };
+    loadInitialUpdateState();
 
     // System-Widget click-throughs: the widget's hero tiles + sections fire
     // `focusMainWithView` IPC, which the main process forwards here as a
@@ -617,6 +633,8 @@ export function App() {
     });
 
     return () => {
+      updateStateDisposed = true;
+      if (updateStateRetryId !== null) window.clearTimeout(updateStateRetryId);
       unsub();
       unsubUpdate();
       unsubNavigate();
@@ -845,6 +863,16 @@ export function App() {
     }
   }, [snapshot.status, snapshot.scanPhase]);
 
+  const updateBannerVisible =
+    updateStatus?.phase === "downloaded" ||
+    updateStatus?.phase === "installing" ||
+    updateStatus?.phase === "installed";
+  const updateVersion =
+    updateStatus?.availableVersion ??
+    updateStatus?.installedVersion ??
+    updateStatus?.currentVersion;
+  const updateChannelLabel = updateStatus?.channel === "beta" ? "Beta" : "Latest";
+
   return (
     <ToastProvider>
       <div className="app-shell">
@@ -940,17 +968,40 @@ export function App() {
             </div>
           )}
 
-        {/* Update banner — shows when an update is downloaded and ready */}
-        {updateStatus?.phase === "downloaded" && (
-          <div className="update-banner">
-            <span className="update-banner-icon">↻</span>
+        {/* Update banner — shows when an update is ready, installing, or just completed */}
+        {updateBannerVisible && updateStatus && (
+          <div className={`update-banner update-banner-${updateStatus.phase}`}>
+            <span className="update-banner-icon" aria-hidden="true" />
             <span className="update-banner-text">
-              DiskHound <strong>v{updateStatus.availableVersion}</strong> is ready to install.
+              {updateStatus.phase === "installed" ? (
+                <>DiskHound updated to <strong>v{updateVersion}</strong>.</>
+              ) : updateStatus.phase === "installing" ? (
+                <>Installing <strong>v{updateVersion}</strong>. DiskHound will restart automatically.</>
+              ) : (
+                <>DiskHound <strong>v{updateVersion}</strong> is ready to install.</>
+              )}
+              {" "}
+              <span className={`update-banner-channel ${updateStatus.channel ?? "latest"}`}>{updateChannelLabel}</span>
+              {updateStatus.phase === "installing" && (
+                <span className="update-banner-progress" aria-hidden="true">
+                  <span className="update-banner-progress-fill" />
+                </span>
+              )}
             </span>
-            <button className="update-banner-btn" onClick={() => nativeApi.quitAndInstall()}>
-              Restart & install
-            </button>
-            <button className="update-banner-dismiss" onClick={() => setUpdateStatus(null)} title="Dismiss">&times;</button>
+            {updateStatus.phase === "downloaded" && (
+              <button
+                className="update-banner-btn"
+                onClick={() => {
+                  setUpdateStatus({ ...updateStatus, phase: "installing", installStartedAt: Date.now() });
+                  nativeApi.quitAndInstall();
+                }}
+              >
+                Restart & install
+              </button>
+            )}
+            {updateStatus.phase !== "installing" && (
+              <button className="update-banner-dismiss" onClick={() => setUpdateStatus(null)} title="Dismiss">&times;</button>
+            )}
           </div>
         )}
 

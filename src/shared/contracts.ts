@@ -180,6 +180,7 @@ export interface GeneralSettings {
   launchOnStartup: boolean;
   theme: "dark" | "light" | "system";
   autoUpdate: boolean;
+  betaUpdates: boolean;
   /**
    * When true, swap red/green-heavy color cues for an Okabe-Ito-derived
    * palette (orange, sky blue, bluish-green, yellow, blue, vermillion,
@@ -770,17 +771,24 @@ export type UpdatePhase =
   | "available"
   | "downloading"
   | "downloaded"
+  | "installing"
+  | "installed"
   | "up-to-date"
   | "manual"
   | "error";
 
+export type UpdateChannel = "latest" | "beta";
+
 export interface UpdateStatus {
   phase: UpdatePhase;
   currentVersion: string;
+  channel?: UpdateChannel;
   availableVersion?: string;
   downloadPercent?: number;
   errorMessage?: string;
   manualMessage?: string;
+  installStartedAt?: number;
+  installedVersion?: string;
   /** Epoch ms of the last successful check attempt (available / up-to-date / error).
    *  Persists across app restarts so the Settings UI doesn't say "Never checked"
    *  after a cold boot that's about to trigger a check. */
@@ -790,6 +798,8 @@ export interface UpdateStatus {
 export interface UpdateState {
   lastCheckedAt: number | null;
   currentVersion: string;
+  channel: UpdateChannel;
+  lastStatus?: UpdateStatus | null;
 }
 
 // ── Duplicate Detection Types ──────────────────────────────
@@ -1180,6 +1190,7 @@ export function defaultSettings(): AppSettings {
       launchOnStartup: true,
       theme: "dark",
       autoUpdate: true,
+      betaUpdates: false,
       colorBlindMode: false,
     },
     scanning: {
@@ -1291,6 +1302,7 @@ export function normalizeAppSettings(input?: Partial<AppSettings> | null): AppSe
       launchOnStartup: Boolean(merged.general.launchOnStartup),
       theme: isThemeValue(merged.general.theme) ? merged.general.theme : defaults.general.theme,
       autoUpdate: merged.general.autoUpdate === undefined ? defaults.general.autoUpdate : Boolean(merged.general.autoUpdate),
+      betaUpdates: Boolean(merged.general.betaUpdates),
       colorBlindMode: Boolean(merged.general.colorBlindMode),
     },
     scanning: {

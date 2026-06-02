@@ -136,6 +136,12 @@ export function SettingsView() {
           onChange={(v) => void save({ ...settings, general: { ...settings.general, autoUpdate: v } })}
         />
         <ToggleRow
+          label="Beta updates"
+          desc="Receive prerelease builds and check every 30 minutes. Turning this off only installs a stable release when it is newer than your current build."
+          value={settings.general.betaUpdates}
+          onChange={(v) => void save({ ...settings, general: { ...settings.general, betaUpdates: v } })}
+        />
+        <ToggleRow
           label="Color-blind friendly palette"
           desc="Swaps red/green-heavy color cues for an Okabe-Ito palette (orange, sky blue, bluish-green, yellow). Affects treemap colors, folder subtree bars, Changes tab deltas, and status indicators."
           value={settings.general.colorBlindMode}
@@ -734,6 +740,7 @@ function RunNowRow({ defaultRootPath }: { defaultRootPath: string }) {
 function UpdateRow() {
   const [status, setStatus] = useState<UpdateStatus | null>(null);
   const [checking, setChecking] = useState(false);
+  const [channel, setChannel] = useState<"latest" | "beta">("latest");
   // Seeded from the persisted updater-state.json so "Last checked 4h ago"
   // survives restarts instead of falling back to "Never" every cold boot.
   const [persistedLastCheckedAt, setPersistedLastCheckedAt] = useState<number | null>(null);
@@ -741,13 +748,17 @@ function UpdateRow() {
   useEffect(() => {
     const unsub = nativeApi.onUpdateStatus((s) => {
       setStatus(s);
+      if (s.channel) setChannel(s.channel);
       if (typeof s.lastCheckedAt === "number") {
         setPersistedLastCheckedAt(s.lastCheckedAt);
       }
     });
     // Load the persisted last-checked timestamp on mount.
     void nativeApi.getUpdateState().then((state) => {
-      if (state) setPersistedLastCheckedAt(state.lastCheckedAt);
+      if (!state) return;
+      setPersistedLastCheckedAt(state.lastCheckedAt);
+      setChannel(state.channel);
+      if (state.lastStatus) setStatus(state.lastStatus);
     });
     return unsub;
   }, []);
@@ -769,12 +780,16 @@ function UpdateRow() {
   let statusText = persistedLastCheckedAt
     ? `Last checked ${formatLastChecked(persistedLastCheckedAt)}`
     : "Never checked";
+  const activeChannel = status?.channel ?? channel;
+  const channelLabel = activeChannel === "beta" ? "Beta" : "Latest";
   if (status) {
     switch (status.phase) {
       case "checking":      statusText = "Checking..."; break;
       case "available":     statusText = `Update available: v${status.availableVersion}`; break;
       case "downloading":   statusText = `Downloading... ${status.downloadPercent ?? 0}%`; break;
       case "downloaded":    statusText = `Ready to install: v${status.availableVersion}`; break;
+      case "installing":    statusText = `Installing v${status.availableVersion ?? status.currentVersion}. DiskHound will restart automatically.`; break;
+      case "installed":     statusText = `Updated to v${status.installedVersion ?? status.currentVersion}`; break;
       case "manual":        statusText = status.manualMessage ?? "Manual download required for this build."; break;
       case "up-to-date":
         statusText = `Up to date (v${status.currentVersion})${
@@ -786,13 +801,24 @@ function UpdateRow() {
   }
 
   const canInstall = status?.phase === "downloaded";
+  const installing = status?.phase === "installing";
+  const downloading = status?.phase === "downloading";
   const isManual = status?.phase === "manual";
+  const actionBusy = checking || status?.phase === "checking" || downloading || installing;
 
   return (
     <div className="setting-row">
       <div>
-        <div className="setting-label">Update status</div>
+        <div className="setting-label">Update status <span className={`update-channel-pill ${activeChannel}`}>{channelLabel}</span></div>
         <div className="setting-desc">{statusText}</div>
+        {(downloading || installing) && (
+          <div className={`settings-update-progress ${installing ? "indeterminate" : ""}`}>
+            <div
+              className="settings-update-progress-fill"
+              style={downloading ? { width: `${Math.max(0, Math.min(100, status?.downloadPercent ?? 0))}%` } : undefined}
+            />
+          </div>
+        )}
       </div>
       <div style={{ display: "flex", gap: 6 }}>
         {canInstall ? (
@@ -800,8 +826,8 @@ function UpdateRow() {
             Restart & install
           </button>
         ) : (
-          <button className="action-btn" disabled={checking} onClick={() => void check()}>
-            {checking ? "Checking..." : isManual ? "Open releases" : "Check now"}
+          <button className="action-btn" disabled={actionBusy} onClick={() => void check()}>
+            {installing ? "Restarting..." : downloading ? "Downloading..." : checking ? "Checking..." : isManual ? "Open releases" : "Check now"}
           </button>
         )}
       </div>

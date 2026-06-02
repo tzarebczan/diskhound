@@ -36,6 +36,8 @@ import {
   type ScanSnapshot,
   type SystemMemorySnapshot,
   type ToastMessage,
+  type UpdateChannel,
+  type UpdateStatus,
   type WorkerToMainMessage,
 } from "./shared/contracts";
 import {
@@ -1969,6 +1971,10 @@ void app.whenReady().then(async () => {
     writeCrashLog("renderer", `${payload.message}${loc}\n${payload.stack ?? ""}`);
   });
 
+  let handleUpdateSettingsChanged:
+    | ((previous: AppSettings, next: AppSettings) => void)
+    | null = null;
+
   // ── IPC: Settings ─────────────────────────────────────────
 
   ipcMain.handle("diskhound:get-settings", () => settingsStore!.get());
@@ -1992,6 +1998,7 @@ void app.whenReady().then(async () => {
     }
 
     restartMonitoring(normalizedSettings);
+    handleUpdateSettingsChanged?.(previousSettings, normalizedSettings);
   });
 
   ipcMain.handle("diskhound:get-recent-scans", () => settingsStore!.get().recentScans ?? []);
@@ -3933,10 +3940,12 @@ void app.whenReady().then(async () => {
   const UPDATE_STATUS_CHANNEL = "diskhound:update-status";
   const currentVersion = app.getVersion();
   const linuxManualUpdateBuild = process.platform === "linux" && !process.env.APPIMAGE;
-  // Interval between automatic update checks once the app is running.
-  // 4 hours is a middle ground — fast enough to catch same-day releases
-  // without thrashing GitHub's rate limit on always-on installs.
-  const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  // Stable checks stay conservative; beta checks poll faster so
+  // prerelease builds reach opted-in clients promptly.
+  const STABLE_UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+  const BETA_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
+  let updateCheckTimer: ReturnType<typeof setTimeout> | null = null;
+  let lastUpdateStatus: UpdateStatus | null = null;
 
   /**
    * Persisted timestamp of the last time we successfully *attempted* an
@@ -3946,16 +3955,24 @@ void app.whenReady().then(async () => {
    * instead of reading "Never" every time the app cold-boots.
    */
   const updaterStatePath = Path.join(app.getPath("userData"), "updater-state.json");
-  type UpdaterState = { lastCheckedAt: number | null };
+  type UpdaterState = {
+    lastCheckedAt: number | null;
+    pendingInstallVersion: string | null;
+    pendingInstallStartedAt: number | null;
+  };
   const readUpdaterState = (): UpdaterState => {
     try {
       const raw = FS_SYNC.readFileSync(updaterStatePath, "utf8");
       const parsed = JSON.parse(raw) as Partial<UpdaterState>;
-      if (typeof parsed.lastCheckedAt === "number") {
-        return { lastCheckedAt: parsed.lastCheckedAt };
-      }
+      return {
+        lastCheckedAt: typeof parsed.lastCheckedAt === "number" ? parsed.lastCheckedAt : null,
+        pendingInstallVersion:
+          typeof parsed.pendingInstallVersion === "string" ? parsed.pendingInstallVersion : null,
+        pendingInstallStartedAt:
+          typeof parsed.pendingInstallStartedAt === "number" ? parsed.pendingInstallStartedAt : null,
+      };
     } catch { /* missing / corrupt — treat as "never checked" */ }
-    return { lastCheckedAt: null };
+    return { lastCheckedAt: null, pendingInstallVersion: null, pendingInstallStartedAt: null };
   };
   let updaterState: UpdaterState = readUpdaterState();
   const persistUpdaterState = () => {
@@ -3964,17 +3981,85 @@ void app.whenReady().then(async () => {
     } catch { /* best effort */ }
   };
 
-  const emitUpdateStatus = (status: import("./shared/contracts").UpdateStatus) => {
-    const enriched = {
+  const updateChannelForSettings = (value: AppSettings): UpdateChannel =>
+    value.general.betaUpdates ? "beta" : "latest";
+
+  const currentUpdateChannel = (): UpdateChannel => updateChannelForSettings(settingsStore!.get());
+
+  const configureAutoUpdaterForSettings = (value = settingsStore!.get()) => {
+    if (!autoUpdater) return;
+    autoUpdater.allowPrerelease = updateChannelForSettings(value) === "beta";
+    // Do not install an older stable release when the user leaves beta.
+    autoUpdater.allowDowngrade = false;
+  };
+
+  const updateCheckIntervalForSettings = (value = settingsStore!.get()) =>
+    updateChannelForSettings(value) === "beta"
+      ? BETA_UPDATE_CHECK_INTERVAL_MS
+      : STABLE_UPDATE_CHECK_INTERVAL_MS;
+
+  const emitUpdateStatus = (status: UpdateStatus) => {
+    const enriched: UpdateStatus = {
       ...status,
+      channel: status.channel ?? currentUpdateChannel(),
       lastCheckedAt: updaterState.lastCheckedAt,
     };
+    lastUpdateStatus = enriched;
     mainWindow?.webContents.send(UPDATE_STATUS_CHANNEL, enriched);
   };
 
   const recordCheck = () => {
-    updaterState = { lastCheckedAt: Date.now() };
+    updaterState = { ...updaterState, lastCheckedAt: Date.now() };
     persistUpdaterState();
+  };
+
+  const clearPendingInstall = () => {
+    updaterState = {
+      ...updaterState,
+      pendingInstallVersion: null,
+      pendingInstallStartedAt: null,
+    };
+    persistUpdaterState();
+  };
+
+  const emitCompletedInstallIfNeeded = () => {
+    const pendingVersion = updaterState.pendingInstallVersion;
+    if (!pendingVersion) return;
+
+    const startedAt = updaterState.pendingInstallStartedAt ?? Date.now();
+    clearPendingInstall();
+    if (pendingVersion !== currentVersion) return;
+
+    emitUpdateStatus({
+      phase: "installed",
+      currentVersion,
+      availableVersion: currentVersion,
+      installedVersion: currentVersion,
+      installStartedAt: startedAt,
+    });
+  };
+
+  const clearUpdateCheckTimer = () => {
+    if (updateCheckTimer) {
+      clearTimeout(updateCheckTimer);
+      updateCheckTimer = null;
+    }
+  };
+
+  const scheduleNextUpdateCheck = (immediate = false) => {
+    clearUpdateCheckTimer();
+    if (!autoUpdater || !settingsStore!.get().general.autoUpdate) return;
+
+    const delay = immediate ? 1_500 : updateCheckIntervalForSettings();
+    updateCheckTimer = setTimeout(() => {
+      updateCheckTimer = null;
+      if (!autoUpdater || !settingsStore!.get().general.autoUpdate) return;
+      configureAutoUpdaterForSettings();
+      autoUpdater.checkForUpdates().catch(() => {}).finally(() => {
+        scheduleNextUpdateCheck(false);
+      });
+    }, delay);
+    updateCheckTimer.unref?.();
   };
 
   if (!isDevelopment && !linuxManualUpdateBuild) {
@@ -3985,6 +4070,7 @@ void app.whenReady().then(async () => {
       // Per-user install location (LocalAppData) doesn't need elevation; setting
       // this false lets the silent updater run without a UAC prompt.
       autoUpdater.allowElevation = false;
+      configureAutoUpdaterForSettings(settings);
 
       autoUpdater.on("checking-for-update", () => {
         emitUpdateStatus({ phase: "checking", currentVersion });
@@ -4013,20 +4099,21 @@ void app.whenReady().then(async () => {
         emitUpdateStatus({ phase: "error", currentVersion, errorMessage: err?.message });
       });
 
-      const scheduleUpdateCheck = () => {
-        if (!settingsStore?.get().general.autoUpdate) return;
-        autoUpdater.checkForUpdates().catch(() => {});
+      handleUpdateSettingsChanged = (previousSettings, nextSettings) => {
+        const autoUpdateChanged = previousSettings.general.autoUpdate !== nextSettings.general.autoUpdate;
+        const betaChanged = previousSettings.general.betaUpdates !== nextSettings.general.betaUpdates;
+        if (!autoUpdateChanged && !betaChanged) return;
+
+        configureAutoUpdaterForSettings(nextSettings);
+        scheduleNextUpdateCheck(nextSettings.general.autoUpdate);
       };
+
+      emitCompletedInstallIfNeeded();
 
       // Check on boot only if the user has auto-update enabled
       if (settings.general.autoUpdate) {
-        scheduleUpdateCheck();
+        scheduleNextUpdateCheck(true);
       }
-
-      // Re-check every UPDATE_CHECK_INTERVAL_MS so long-running installs
-      // pick up releases without needing a manual click. setInterval is
-      // cleared in before-quit.
-      setInterval(scheduleUpdateCheck, UPDATE_CHECK_INTERVAL_MS).unref?.();
     } catch {
       // electron-updater not available (dev mode or build issue)
     }
@@ -4051,6 +4138,7 @@ void app.whenReady().then(async () => {
       return;
     }
     if (!autoUpdater) return;
+    configureAutoUpdaterForSettings();
     try { await autoUpdater.checkForUpdates(); } catch { /* ignore */ }
   });
 
@@ -4061,15 +4149,43 @@ void app.whenReady().then(async () => {
     return {
       lastCheckedAt: updaterState.lastCheckedAt,
       currentVersion,
+      channel: currentUpdateChannel(),
+      lastStatus: lastUpdateStatus,
     };
   });
 
   ipcMain.on("diskhound:quit-and-install", () => {
     if (!autoUpdater) return;
-    isQuitting = true;
+    const availableVersion = lastUpdateStatus?.availableVersion ?? null;
+    const installStartedAt = Date.now();
+    updaterState = {
+      ...updaterState,
+      pendingInstallVersion: availableVersion,
+      pendingInstallStartedAt: installStartedAt,
+    };
+    persistUpdaterState();
+    emitUpdateStatus({
+      phase: "installing",
+      currentVersion,
+      availableVersion: availableVersion ?? undefined,
+      installStartedAt,
+    });
+    clearUpdateCheckTimer();
     // Silent install + auto-relaunch after update.
     // isSilent=true → skip NSIS UI; isForceRunAfter=true → relaunch DiskHound once install finishes.
-    try { autoUpdater.quitAndInstall(true, true); } catch { /* ignore */ }
+    setTimeout(() => {
+      isQuitting = true;
+      try {
+        autoUpdater.quitAndInstall(true, true);
+      } catch (err) {
+        clearPendingInstall();
+        emitUpdateStatus({
+          phase: "error",
+          currentVersion,
+          errorMessage: err instanceof Error ? err.message : "Failed to start installer",
+        });
+      }
+    }, 500);
   });
 
   app.on("activate", () => {
@@ -4080,6 +4196,7 @@ void app.whenReady().then(async () => {
 
   app.on("before-quit", () => {
     isQuitting = true;
+    clearUpdateCheckTimer();
     for (const session of activeScans.values()) {
       void session.stop();
     }

@@ -315,11 +315,91 @@ button, input, select, textarea { font: inherit; }
   to { opacity: 1; transform: translateY(0); }
 }
 .update-banner-icon {
+  position: relative;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(59,130,246,0.25);
+  border-top-color: var(--blue);
+  border-radius: 50%;
   font-size: 14px;
   color: var(--blue);
 }
+.update-banner-downloaded .update-banner-icon,
+.update-banner-installed .update-banner-icon {
+  border: 1.5px solid var(--blue);
+}
+.update-banner-downloaded .update-banner-icon::after,
+.update-banner-installed .update-banner-icon::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 3px;
+  width: 5px;
+  height: 8px;
+  border-right: 2px solid var(--blue);
+  border-bottom: 2px solid var(--blue);
+  transform: rotate(45deg);
+}
+.update-banner-installing .update-banner-icon {
+  animation: update-spinner 0.8s linear infinite;
+}
+@keyframes update-spinner {
+  to { transform: rotate(360deg); }
+}
 .update-banner-text { flex: 1; color: var(--text-secondary); }
 .update-banner-text strong { color: var(--text); font-weight: 600; }
+.update-banner-channel,
+.update-channel-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  margin-left: 8px;
+  padding: 0 6px;
+  border: 1px solid rgba(148,163,184,0.25);
+  border-radius: 999px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+.update-banner-channel.beta,
+.update-channel-pill.beta {
+  border-color: rgba(245,158,11,0.35);
+  background: rgba(245,158,11,0.11);
+  color: var(--amber);
+}
+.update-banner-progress,
+.settings-update-progress {
+  position: relative;
+  display: block;
+  height: 3px;
+  margin-top: 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(148,163,184,0.18);
+}
+.update-banner-progress-fill,
+.settings-update-progress-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+}
+.update-banner-progress-fill,
+.settings-update-progress.indeterminate .settings-update-progress-fill {
+  width: 42%;
+  animation: update-progress-indeterminate 1s ease-in-out infinite;
+}
+.settings-update-progress {
+  width: min(240px, 100%);
+}
+@keyframes update-progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(260%); }
+}
 .update-banner-btn {
   height: 26px;
   padding: 0 12px;

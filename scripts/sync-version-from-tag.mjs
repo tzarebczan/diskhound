@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 const rawTag = process.argv[2] ?? process.env.GITHUB_REF_NAME ?? "";
 const version = rawTag.replace(/^v/, "").trim();
 
-if (!/^\d+\.\d+\.\d+$/.test(version)) {
+if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.test(version)) {
   console.error(`Refusing to sync package.json version from invalid tag: "${rawTag}"`);
   process.exit(1);
 }

@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.5.44 — 2026-06-02
+
+DiskHound now supports an opt-in beta update channel and gives users clearer
+progress while updates restart and install.
+
+### Beta update channel
+
+- Added a Settings toggle for beta updates. Opted-in clients check every
+  30 minutes and receive GitHub prereleases.
+- Turning beta updates off returns clients to stable releases without allowing
+  accidental downgrades from a newer prerelease build.
+- Release automation now publishes semver prerelease tags such as
+  `v0.5.44-beta.1` as GitHub prereleases and keeps them out of the Latest
+  release slot.
+- The release version sync script now accepts prerelease semver tags.
+
+### Update install progress
+
+- Update state now distinguishes downloaded, installing, and installed phases
+  across the app banner and Settings.
+- `Restart & install` now shows an installing progress state before quitting
+  and can replay a completed install status after relaunch.
+
 ## 0.5.43 — 2026-06-02
 
 DiskHound now keeps drive free-space telemetry fresher in the main UI and
