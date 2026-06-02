@@ -660,7 +660,11 @@ export interface DiskIoProcessInfo {
   readBytesTotal: number | null;
   writeBytesTotal: number | null;
   exePath?: string | null;
-  commandLine?: string;
+  commandLine?: string | null;
+  commandPreview?: string | null;
+  parentPid?: number | null;
+  parentName?: string | null;
+  workingDirectory?: string | null;
 }
 
 export interface DiskIoSnapshot {

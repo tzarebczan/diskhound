@@ -2,6 +2,7 @@ import { useEffect, useState } from "preact/hooks";
 
 import type { DiskSpaceInfo, RecentScan } from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
+import { useLiveDiskSpace } from "../lib/hooks";
 import { nativeApi } from "../nativeApi";
 
 interface Props {
@@ -10,21 +11,22 @@ interface Props {
 }
 
 export function DiskPicker({ onScanDrive, onScanFolder }: Props) {
-  const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
+  const { drives, loading } = useLiveDiskSpace();
   const [recents, setRecents] = useState<RecentScan[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [recentsLoading, setRecentsLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const [d, r] = await Promise.all([
-        nativeApi.getDiskSpace(),
-        nativeApi.getRecentScans(),
-      ]);
-      if (!cancelled) {
-        setDrives((d as DiskSpaceInfo[] | null) ?? []);
-        setRecents((r as RecentScan[] | null) ?? []);
-        setLoading(false);
+      try {
+        const r = await nativeApi.getRecentScans();
+        if (!cancelled) {
+          setRecents((r as RecentScan[] | null) ?? []);
+        }
+      } catch {
+        // Recent scans are nice-to-have; drive selection should still render.
+      } finally {
+        if (!cancelled) setRecentsLoading(false);
       }
     })();
     return () => { cancelled = true; };
@@ -90,7 +92,7 @@ export function DiskPicker({ onScanDrive, onScanFolder }: Props) {
         </button>
 
         {/* Recent scans */}
-        {recents.length > 0 && (
+        {!recentsLoading && recents.length > 0 && (
           <>
             <div className="picker-section-label" style={{ marginTop: 16 }}>Recent Scans</div>
             <div className="picker-recents">

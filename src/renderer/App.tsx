@@ -15,6 +15,7 @@ import {
 } from "../shared/contracts";
 import { formatBytes } from "./lib/format";
 import { clearDeletedPaths } from "./lib/deletedPaths";
+import { useLiveDiskSpace } from "./lib/hooks";
 import { setColorBlindPalette } from "./lib/treemap";
 import { setProcessPaletteColorBlind } from "./components/MemoryView";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./lib/uiEvents";
@@ -151,7 +152,7 @@ export function App() {
 
   const [scanOptions, setScanOptions] = useState<ScanOptions>(defaultScanOptions());
   const [view, setView] = useState<AppView>("overview");
-  const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
+  const { drives, refresh: refreshDiskSpace } = useLiveDiskSpace();
   const [filterExt, setFilterExt] = useState<string | undefined>();
   // null = still loading the initial snapshot; prevents a flash of the picker
   // when we're about to restore a previous scan
@@ -407,7 +408,6 @@ export function App() {
         setShowPicker(true);
       }
     });
-    void nativeApi.getDiskSpace().then((d) => { if (d) setDrives(d); });
     // Seed the active-scan set so the UI's drive-pill progress
     // indicators reflect scans that were already running when the
     // renderer mounted (typical after a reload during a scheduled scan).
@@ -466,8 +466,9 @@ export function App() {
           if (first) toastedCompletions.delete(first);
         }
 
-        // Refresh drives after scan
-        void nativeApi.getDiskSpace().then((d) => { if (d) setDrives(d); });
+        // Refresh drives immediately after scan completion. The live disk-space
+        // hook keeps the title/header pills current between scans.
+        void refreshDiskSpace();
         // Check for a diff against the previous scan
         if (s.rootPath) {
           void nativeApi.getLatestDiff(s.rootPath).then((diff) => {

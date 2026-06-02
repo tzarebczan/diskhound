@@ -25,4 +25,16 @@ describe("deriveProcessMetadata", () => {
 
     expect(metadata.workingDirectory).toBe("C:\\Users\\thoma\\repo\\api");
   });
+
+  it("does not treat Windows slash-style switches as working directories", () => {
+    const metadata = deriveProcessMetadata({
+      name: "chrome.exe",
+      exePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+      commandLine:
+        "\"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" --type=renderer /prefetch:1",
+    });
+
+    expect(metadata.commandPreview).toContain("--type=renderer");
+    expect(metadata.workingDirectory).toBeNull();
+  });
 });

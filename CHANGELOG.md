@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.5.43 — 2026-06-02
+
+DiskHound now keeps drive free-space telemetry fresher in the main UI and
+makes the process-oriented monitoring tabs easier to read at a glance.
+
+### Live drive telemetry
+
+- Main-window drive pills now refresh free-space values on the same live
+  cadence used by the floating system widget.
+- DiskPicker drive cards also refresh while the picker is open, so newly
+  freed or consumed space is reflected without reopening the app.
+
+### Processes UX
+
+- The Processes toolbar now groups CPU List and CPU Heatmap as one CPU
+  feature with two display options.
+- The memory treemap is labeled explicitly as `Memory Treemap`, clarifying
+  that tile area is based on RAM usage rather than CPU.
+
+### Disk I/O metadata
+
+- Disk I/O rows can show command previews, inferred folders, and parent
+  process details behind a persisted `Metadata` toggle.
+- Disk I/O filtering now searches process metadata, command lines, and
+  inferred folders.
+- Disk I/O column headers now show the active sort column and direction.
+
+### Process metadata parsing
+
+- Windows slash-style switches such as `/prefetch:1` are no longer mistaken
+  for working directories when inferring process locations.
+
 ## 0.5.42 — 2026-06-01
 
 DiskHound now keeps cleanup actions visible in the current scan after

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "preact/hooks";
 
 import type { DiskIoProcessInfo, DiskIoSnapshot } from "../../shared/contracts";
 import { formatBytes, relativeTime } from "../lib/format";
+import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { nativeApi } from "../nativeApi";
 import { ProcessIcon } from "./ProcessIcon";
 import { toast } from "./Toasts";
@@ -10,6 +11,12 @@ type SortField = "total" | "read" | "write" | "name" | "pid";
 type SortDir = "asc" | "desc";
 
 const REFRESH_MS = 2_000;
+const DISK_IO_METADATA_KEY = "diskhound:diskio-metadata-visible";
+
+function getInitialShowDiskIoMetadata(): boolean {
+  if (typeof window === "undefined") return true;
+  return window.localStorage.getItem(DISK_IO_METADATA_KEY) !== "0";
+}
 
 export function DiskIoView() {
   const [snapshot, setSnapshot] = useState<DiskIoSnapshot | null>(null);
@@ -18,6 +25,13 @@ export function DiskIoView() {
   const [filter, setFilter] = useState("");
   const [sortField, setSortField] = useState<SortField>("total");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [showMetadata, setShowMetadata] = useState<boolean>(getInitialShowDiskIoMetadata);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(DISK_IO_METADATA_KEY, showMetadata ? "1" : "0");
+    } catch { /* ignore */ }
+  }, [showMetadata]);
 
   const refresh = useCallback(async () => {
     const snap = await nativeApi.getDiskIoSnapshot();
@@ -59,12 +73,7 @@ export function DiskIoView() {
     const q = filter.trim().toLowerCase();
     const rows = (snapshot?.processes ?? []).filter((p) => {
       if (!q) return true;
-      return (
-        p.name.toLowerCase().includes(q) ||
-        String(p.pid).includes(q) ||
-        (p.exePath ?? "").toLowerCase().includes(q) ||
-        (p.commandLine ?? "").toLowerCase().includes(q)
-      );
+      return processSearchText(p).includes(q);
     });
 
     const dir = sortDir === "asc" ? 1 : -1;
@@ -155,8 +164,17 @@ export function DiskIoView() {
           className="filter-input"
           value={filter}
           onInput={(e) => setFilter((e.target as HTMLInputElement).value)}
-          placeholder="Filter by process, PID, or path..."
+          placeholder="Filter by process, PID, command, or folder..."
         />
+        <button
+          type="button"
+          className={`chip diskio-metadata-toggle ${showMetadata ? "active" : ""}`}
+          aria-pressed={showMetadata}
+          onClick={() => setShowMetadata((v) => !v)}
+          title={showMetadata ? "Hide command lines and parent process metadata" : "Show command lines and parent process metadata"}
+        >
+          Metadata
+        </button>
         <div className="diskio-toolbar-meta">
           {snapshot?.isStale ? "cached" : snapshot ? `sampled ${relativeTime(snapshot.sampledAt)}` : ""}
           {snapshot?.sampleElapsedMs ? ` - ${snapshot.sampleElapsedMs}ms` : ""}
@@ -168,11 +186,11 @@ export function DiskIoView() {
       <div className="diskio-table">
         <div className="diskio-table-head">
           <div />
-          <button type="button" onClick={() => setSort("name")}>Process</button>
-          <button type="button" onClick={() => setSort("read")}>Read/s</button>
-          <button type="button" onClick={() => setSort("write")}>Write/s</button>
-          <button type="button" onClick={() => setSort("total")}>Total/s</button>
-          <button type="button" onClick={() => setSort("pid")}>PID</button>
+          <DiskIoSortHeader field="name" label="Process" current={sortField} dir={sortDir} onToggle={setSort} />
+          <DiskIoSortHeader field="read" label="Read/s" current={sortField} dir={sortDir} onToggle={setSort} />
+          <DiskIoSortHeader field="write" label="Write/s" current={sortField} dir={sortDir} onToggle={setSort} />
+          <DiskIoSortHeader field="total" label="Total/s" current={sortField} dir={sortDir} onToggle={setSort} />
+          <DiskIoSortHeader field="pid" label="PID" current={sortField} dir={sortDir} onToggle={setSort} align="right" />
         </div>
         <div className="diskio-table-scroll">
           {filtered.length === 0 ? (
@@ -183,7 +201,7 @@ export function DiskIoView() {
             </div>
           ) : (
             filtered.map((process) => (
-              <DiskIoRow key={process.pid} process={process} maxRate={maxRate} />
+              <DiskIoRow key={process.pid} process={process} maxRate={maxRate} showMetadata={showMetadata} />
             ))
           )}
         </div>
@@ -206,19 +224,66 @@ function DiskIoMetric({ label, value, accent, title }: {
   );
 }
 
-function DiskIoRow({ process, maxRate }: { process: DiskIoProcessInfo; maxRate: number }) {
+function DiskIoSortHeader(props: {
+  field: SortField;
+  label: string;
+  current: SortField;
+  dir: SortDir;
+  onToggle: (field: SortField) => void;
+  align?: "left" | "right";
+}) {
+  const { field, label, current, dir, onToggle, align = "left" } = props;
+  const isActive = current === field;
+  return (
+    <button
+      type="button"
+      className={`diskio-sort-btn ${isActive ? "active" : ""}`}
+      style={{ justifyContent: align === "right" ? "flex-end" : "flex-start" }}
+      onClick={() => onToggle(field)}
+      title={`Sort by ${label}`}
+    >
+      <span>{label}</span>
+      {isActive && (
+        <svg width="8" height="8" viewBox="0 0 8 8" fill="currentColor" aria-hidden="true">
+          {dir === "desc" ? <path d="M4 6L1 2.5H7Z" /> : <path d="M4 2L1 5.5H7Z" />}
+        </svg>
+      )}
+    </button>
+  );
+}
+
+function DiskIoRow({ process, maxRate, showMetadata }: {
+  process: DiskIoProcessInfo;
+  maxRate: number;
+  showMetadata: boolean;
+}) {
   const pct = process.totalBytesPerSec > 0
     ? Math.max(2, Math.min(100, (process.totalBytesPerSec / maxRate) * 100))
     : 0;
   const readPct = process.totalBytesPerSec > 0
     ? (process.readBytesPerSec / process.totalBytesPerSec) * 100
     : 0;
+  const metadata = showMetadata ? processMetadataParts(process) : null;
   return (
-    <div className="diskio-row" title={process.exePath ?? process.commandLine ?? process.name}>
+    <div
+      className={`diskio-row ${metadata ? "has-metadata" : ""}`}
+      title={process.commandLine ?? process.exePath ?? process.name}
+    >
       <ProcessIcon exePath={process.exePath} className="diskio-row-icon" />
       <div className="diskio-row-process">
         <div className="diskio-row-name">{process.name}</div>
         <div className="diskio-row-path">{process.exePath ?? process.commandLine ?? "path unavailable"}</div>
+        {metadata && (
+          <div className="diskio-row-meta-line">
+            {metadata.command && (
+              <span className="diskio-row-meta-cmd" title={process.commandLine ?? metadata.command}>
+                {metadata.command}
+              </span>
+            )}
+            {metadata.origin && <span title={metadata.origin}>{metadata.origin}</span>}
+            {metadata.parent && <span title={metadata.parent}>{metadata.parent}</span>}
+          </div>
+        )}
       </div>
       <div className="diskio-row-rate read">{formatBytes(process.readBytesPerSec)}/s</div>
       <div className="diskio-row-rate write">{formatBytes(process.writeBytesPerSec)}/s</div>

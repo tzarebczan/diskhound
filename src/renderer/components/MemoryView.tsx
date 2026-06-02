@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "preact/hooks"
 import type { AffinityRule, ProcessInfo, SystemMemorySnapshot } from "../../shared/contracts";
 import { findMatchingRule } from "../lib/affinityMatch";
 import { formatBytes, formatCount } from "../lib/format";
+import { processMetadataParts, processSearchText } from "../lib/processMetadata";
 import { nativeApi } from "../nativeApi";
 import { GpuView } from "./GpuView";
 import {
@@ -89,6 +90,8 @@ export function MemoryView() {
   const [cpuScale, setCpuScale] = useState<CpuScale>(getInitialCpuScale);
   const [showProcessMetadata, setShowProcessMetadata] = useState<boolean>(getInitialShowProcessMetadata);
   const [lastSampleMs, setLastSampleMs] = useState<number | null>(null);
+  const isCpuView = viewMode === "list" || viewMode === "heatmap";
+  const showMetadataControl = viewMode === "list" || viewMode === "treemap";
   // Active affinity rules, poll-refreshed at a lower cadence than the
   // memory snapshot. ProcessRow uses this to badge rows whose exe name
   // matches a rule, and the context menu uses it to decide between
@@ -396,12 +399,14 @@ export function MemoryView() {
       {/* ── Toolbar + view-mode tabs ── */}
       <div className="memory-toolbar">
         <div className="memory-view-tabs" role="tablist">
+          <div className={`memory-view-group ${isCpuView ? "active" : ""}`} role="group" aria-label="CPU views">
+            <span className="memory-view-group-label">CPU</span>
           <button
             role="tab"
             aria-selected={viewMode === "list"}
-            className={`memory-view-tab ${viewMode === "list" ? "active" : ""}`}
+            className={`memory-view-tab memory-view-tab-compact ${viewMode === "list" ? "active" : ""}`}
             onClick={() => setViewMode("list")}
-            title="Tabular process list"
+            title="CPU process list"
           >
             <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
               <path d="M2 3.5H12M2 7H12M2 10.5H12" />
@@ -410,25 +415,10 @@ export function MemoryView() {
           </button>
           <button
             role="tab"
-            aria-selected={viewMode === "treemap"}
-            className={`memory-view-tab ${viewMode === "treemap" ? "active" : ""}`}
-            onClick={() => setViewMode("treemap")}
-            title="Treemap — proportional area view"
-          >
-            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
-              <rect x="1.5" y="1.5" width="7" height="7" />
-              <rect x="9" y="1.5" width="3.5" height="4" />
-              <rect x="9" y="6" width="3.5" height="6.5" />
-              <rect x="1.5" y="9" width="7" height="3.5" />
-            </svg>
-            Treemap
-          </button>
-          <button
-            role="tab"
             aria-selected={viewMode === "heatmap"}
-            className={`memory-view-tab ${viewMode === "heatmap" ? "active" : ""}`}
+            className={`memory-view-tab memory-view-tab-compact ${viewMode === "heatmap" ? "active" : ""}`}
             onClick={() => setViewMode("heatmap")}
-            title="CPU heatmap — scrolling waterfall of CPU usage over time"
+            title="CPU heatmap: scrolling waterfall of CPU usage over time"
           >
             <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
               <rect x="1.5" y="2" width="2" height="10" opacity="0.35" />
@@ -437,7 +427,23 @@ export function MemoryView() {
               <rect x="9" y="2" width="2" height="10" />
               <rect x="11.5" y="2" width="1" height="10" opacity="0.4" />
             </svg>
-            CPU Heatmap
+            Heatmap
+          </button>
+          </div>
+          <button
+            role="tab"
+            aria-selected={viewMode === "treemap"}
+            className={`memory-view-tab ${viewMode === "treemap" ? "active" : ""}`}
+            onClick={() => setViewMode("treemap")}
+            title="Memory treemap: tile area is proportional to RAM usage"
+          >
+            <svg width="13" height="13" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.3">
+              <rect x="1.5" y="1.5" width="7" height="7" />
+              <rect x="9" y="1.5" width="3.5" height="4" />
+              <rect x="9" y="6" width="3.5" height="6.5" />
+              <rect x="1.5" y="9" width="7" height="3.5" />
+            </svg>
+            Memory Treemap
           </button>
           {/* GPU + Affinity Rules are Windows-only — the samplers rely
            * on PowerShell's Get-Counter (WDDM) and
@@ -494,7 +500,7 @@ export function MemoryView() {
          * toggle would be confusing there. "Overall" matches Task
          * Manager; "Active" shows each process's share of the current
          * load so busy processes sum to ~100% regardless of total use. */}
-        {viewMode !== "treemap" && (
+        {isCpuView && (
           <div className="memory-cpu-scale-switch" role="tablist" aria-label="CPU scale">
             <button
               type="button"
@@ -516,14 +522,16 @@ export function MemoryView() {
             </button>
           </div>
         )}
-        <button
-          className={`chip memory-metadata-toggle ${showProcessMetadata ? "active" : ""}`}
-          aria-pressed={showProcessMetadata}
-          onClick={() => setShowProcessMetadata((v) => !v)}
-          title={showProcessMetadata ? "Hide command lines and parent process metadata" : "Show command lines and parent process metadata"}
-        >
-          Metadata
-        </button>
+        {showMetadataControl && (
+          <button
+            className={`chip memory-metadata-toggle ${showProcessMetadata ? "active" : ""}`}
+            aria-pressed={showProcessMetadata}
+            onClick={() => setShowProcessMetadata((v) => !v)}
+            title={showProcessMetadata ? "Hide command lines and parent process metadata" : "Show command lines and parent process metadata"}
+          >
+            Metadata
+          </button>
+        )}
         {loadingPhase === "refreshing" && (
           <span className="memory-refresh-indicator" title="Refreshing…">
             <span className="memory-refresh-dot" />
@@ -985,37 +993,6 @@ function colorForProcessName(name: string): string {
 function prettyProcessName(name: string): string {
   if (/\.exe$/i.test(name)) return name.slice(0, -4);
   return name;
-}
-
-function processSearchText(proc: ProcessInfo): string {
-  return [
-    proc.name,
-    proc.pid,
-    proc.commandPreview,
-    proc.commandLine,
-    proc.exePath,
-    proc.workingDirectory,
-    proc.parentName,
-    proc.parentPid,
-  ].filter((value) => value !== null && value !== undefined)
-    .join(" ")
-    .toLowerCase();
-}
-
-function processMetadataParts(proc: ProcessInfo): { command: string | null; origin: string | null; parent: string | null } | null {
-  const command = proc.commandPreview || proc.commandLine || null;
-  const origin = proc.workingDirectory
-    ? `from ${proc.workingDirectory}`
-    : proc.exePath
-      ? `exe ${proc.exePath}`
-      : null;
-  const parent = proc.parentName
-    ? `parent ${prettyProcessName(proc.parentName)} (${proc.parentPid ?? "?"})`
-    : proc.parentPid
-      ? `parent PID ${proc.parentPid}`
-      : null;
-  if (!command && !origin && !parent) return null;
-  return { command, origin, parent };
 }
 
 // ── Process appearance cache (icon + dominant color) ─────────────────────
@@ -2325,7 +2302,7 @@ function AffinityRulesView({ cpuCount }: { cpuCount: number }) {
         <div className="affinity-rules-empty-title">No affinity rules yet</div>
         <div className="affinity-rules-empty-body">
           Pin a process to specific CPU cores persistently: switch to the
-          <strong> List </strong> or <strong> CPU Heatmap </strong> tab,
+          <strong> CPU List </strong> or <strong> CPU Heatmap </strong> view,
           right-click a process, and choose <strong>Pin CPU affinity…</strong>.
           DiskHound will re-apply the mask every time that executable
           launches.

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "preact/hooks";
 
-import type { AppSettings, PathActionResult } from "../../shared/contracts";
+import type { AppSettings, DiskSpaceInfo, PathActionResult } from "../../shared/contracts";
 import {
   findExcludedFolderActionBlocker,
   findExcludedFolderForPath,
@@ -11,6 +11,68 @@ import { nativeApi } from "../nativeApi";
 import { toast } from "../components/Toasts";
 import { markDeletedPath, type DeletedPathAction } from "./deletedPaths";
 import { dispatchSettingsUpdated, SETTINGS_UPDATED_EVENT } from "./uiEvents";
+
+const DEFAULT_DISK_SPACE_REFRESH_MS = 10_000;
+
+function diskSpaceEqual(a: DiskSpaceInfo[], b: DiskSpaceInfo[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    const left = a[i]!;
+    const right = b[i]!;
+    if (
+      left.drive !== right.drive ||
+      left.totalBytes !== right.totalBytes ||
+      left.freeBytes !== right.freeBytes ||
+      left.usedBytes !== right.usedBytes
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function useLiveDiskSpace(refreshMs = DEFAULT_DISK_SPACE_REFRESH_MS) {
+  const [drives, setDrives] = useState<DiskSpaceInfo[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(async () => {
+    try {
+      const next = await nativeApi.getDiskSpace();
+      if (Array.isArray(next)) {
+        setDrives((prev) => (diskSpaceEqual(prev, next) ? prev : next));
+      }
+    } catch {
+      // Non-fatal telemetry read. Keep the last known drive list.
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      try {
+        const next = await nativeApi.getDiskSpace();
+        if (cancelled) return;
+        if (Array.isArray(next)) {
+          setDrives((prev) => (diskSpaceEqual(prev, next) ? prev : next));
+        }
+      } catch {
+        // Non-fatal telemetry read. Keep the last known drive list.
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
+    void run();
+    const id = window.setInterval(() => void run(), refreshMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [refreshMs]);
+
+  return { drives, loading, refresh } as const;
+}
 
 /** Shared busy-set state with add/remove helpers. */
 export function useBusySet() {

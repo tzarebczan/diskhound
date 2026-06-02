@@ -317,17 +317,18 @@ function splitCommandLine(commandLine: string): string[] {
 
 function inferWorkingDirectory(args: string[], exePath: string | null): string | null {
   if (args.length === 0) return null;
+  const allowUnixAbsolute = !exePath || !isWindowsPath(exePath);
   for (let i = 1; i < args.length; i++) {
     const arg = args[i]!;
     const next = args[i + 1];
-    const cwd = cwdFromOption(arg, next);
+    const cwd = cwdFromOption(arg, next, allowUnixAbsolute);
     if (cwd) return cwd;
   }
 
   const exeKey = exePath ? normalizeProcessPath(exePath) : null;
   for (const arg of args.slice(1)) {
     const cleaned = stripOptionValueQuotes(arg);
-    if (!isAbsolutePath(cleaned)) continue;
+    if (!isAbsolutePath(cleaned, allowUnixAbsolute)) continue;
     if (exeKey && normalizeProcessPath(cleaned) === exeKey) continue;
     const projectRoot = projectRootFromPath(cleaned);
     if (projectRoot) return projectRoot;
@@ -337,24 +338,28 @@ function inferWorkingDirectory(args: string[], exePath: string | null): string |
   return null;
 }
 
-function cwdFromOption(arg: string, next: string | undefined): string | null {
+function cwdFromOption(arg: string, next: string | undefined, allowUnixAbsolute: boolean): string | null {
   const normalized = arg.toLowerCase();
   if ((normalized === "--cwd" || normalized === "--prefix" || arg === "-C") && next) {
     const cleaned = stripOptionValueQuotes(next);
-    return isAbsolutePath(cleaned) ? cleaned : null;
+    return isAbsolutePath(cleaned, allowUnixAbsolute) ? cleaned : null;
   }
   const match = arg.match(/^(?:--cwd|--prefix)=(.+)$/i);
   if (!match) return null;
   const cleaned = stripOptionValueQuotes(match[1] ?? "");
-  return isAbsolutePath(cleaned) ? cleaned : null;
+  return isAbsolutePath(cleaned, allowUnixAbsolute) ? cleaned : null;
 }
 
 function stripOptionValueQuotes(value: string): string {
   return value.replace(/^["']|["']$/g, "");
 }
 
-function isAbsolutePath(value: string): boolean {
-  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value) || value.startsWith("/");
+function isAbsolutePath(value: string, allowUnixAbsolute: boolean): boolean {
+  return isWindowsPath(value) || (allowUnixAbsolute && value.startsWith("/"));
+}
+
+function isWindowsPath(value: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(value) || /^\\\\[^\\]+\\[^\\]+/.test(value);
 }
 
 function looksLikeFilePath(value: string): boolean {

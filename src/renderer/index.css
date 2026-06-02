@@ -3972,11 +3972,33 @@ button, input, select, textarea { font: inherit; }
 /* ── View-mode tabs + refresh indicator ── */
 .memory-view-tabs {
   display: flex;
+  align-items: center;
   gap: 2px;
   padding: 2px;
   background: rgba(255,255,255,0.04);
   border-radius: var(--radius-sm);
   margin-right: 8px;
+}
+.memory-view-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 1px;
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-sm) - 1px);
+}
+.memory-view-group.active {
+  border-color: rgba(245,158,11,0.22);
+  background: rgba(245,158,11,0.06);
+}
+.memory-view-group-label {
+  padding: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--text-tertiary);
+  text-transform: uppercase;
 }
 .memory-view-tab {
   display: inline-flex;
@@ -3990,6 +4012,10 @@ button, input, select, textarea { font: inherit; }
   border-radius: calc(var(--radius-sm) - 2px);
   cursor: pointer;
   transition: all 0.12s;
+}
+.memory-view-tab-compact {
+  padding-left: 8px;
+  padding-right: 8px;
 }
 .memory-view-tab:hover {
   color: var(--text);
@@ -7245,6 +7271,9 @@ button, input, select, textarea { font: inherit; }
 .diskio-toolbar .filter-input {
   max-width: 320px;
 }
+.diskio-metadata-toggle {
+  flex-shrink: 0;
+}
 .diskio-toolbar-meta {
   font-family: var(--font-mono);
   font-size: 10.5px;
@@ -7277,6 +7306,9 @@ button, input, select, textarea { font: inherit; }
   background: rgba(10, 10, 16, 0.45);
 }
 .diskio-table-head button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   border: 0;
   background: transparent;
   color: var(--text-tertiary);
@@ -7289,6 +7321,10 @@ button, input, select, textarea { font: inherit; }
   cursor: pointer;
 }
 .diskio-table-head button:hover { color: var(--text-secondary); }
+.diskio-table-head button.active,
+.diskio-sort-btn.active {
+  color: var(--amber);
+}
 .diskio-table-scroll {
   min-height: 0;
   overflow-y: auto;
@@ -7297,6 +7333,17 @@ button, input, select, textarea { font: inherit; }
   border-bottom: 1px solid rgba(255,255,255,0.04);
   font-family: var(--font-mono);
   font-size: 11px;
+}
+.diskio-row.has-metadata {
+  align-items: start;
+  padding-top: 9px;
+  padding-bottom: 9px;
+}
+.diskio-row.has-metadata .diskio-row-icon,
+.diskio-row.has-metadata .diskio-row-rate,
+.diskio-row.has-metadata .diskio-row-total,
+.diskio-row.has-metadata .diskio-row-pid {
+  margin-top: 2px;
 }
 .diskio-row:hover { background: var(--bg-row-hover); }
 .diskio-row-icon {
@@ -7318,6 +7365,26 @@ button, input, select, textarea { font: inherit; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.diskio-row-meta-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  line-height: 1.3;
+}
+.diskio-row-meta-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.diskio-row-meta-cmd {
+  color: var(--blue);
+  max-width: 45%;
 }
 .diskio-row-rate {
   color: var(--text-secondary);
